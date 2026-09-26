@@ -1,0 +1,22 @@
+# Build outputs -- `make` regenerates everything here.
+build/
+
+# Local pre-cleanup snapshot, not part of the source rebuild.
+attic/
+
+# The working log: 340 KB of session-by-session detail, kept local.
+NOTES.md
+
+__pycache__/
+*.pyc
+
+# Reverse-engineering scratch from the disassembly phase: the function
+# inventory, its boundary corrections, and a copy of TECHART's released 1.8.0
+# image.  Inputs to the analysis, not to the build.
+artifacts/
+
+# Reverse-engineering tooling: Ghidra setup, function-inventory and
+# boundary repair, ASF4 identification.  Works on the STOCK image and on
+# artifacts/, needs a Ghidra project, and is unrelated to building or
+# debugging the rebuild.
+internal_tools/
