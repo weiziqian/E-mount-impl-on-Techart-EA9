@@ -38,6 +38,28 @@
 #define TAG_FAIL        0x4C494146u   /* "FAIL": the handshake did not complete */
 
 /* Boot identity, carried in every page that has room for it. */
+/* EA9_NO_LOG: the release build writes no flash at all, so these become
+ * inline no-ops and trail.c is not compiled.  See src/diag.h for why this is
+ * done at compile time rather than with a runtime flag. */
+#ifdef EA9_NO_LOG
+static inline void trail_set_boot(uint32_t noinit_boot, uint32_t flash_boot)
+{
+	(void)noinit_boot; (void)flash_boot;
+}
+static inline void trail_idlog(uint32_t page) { (void)page; }
+static inline void trail_norm(uint32_t page)  { (void)page; }
+static inline void trail_m08(uint32_t page)   { (void)page; }
+static inline void trail_fhist(uint32_t page) { (void)page; }
+static inline void trail_chk(uint32_t page)   { (void)page; }
+static inline void trail_cap(uint32_t page, unsigned slot)
+{
+	(void)page; (void)slot;
+}
+static inline void trail_cap_pre(uint32_t page, unsigned slot)
+{
+	(void)page; (void)slot;
+}
+#else
 void trail_set_boot(uint32_t noinit_boot, uint32_t flash_boot);
 
 void trail_idlog(uint32_t page);
@@ -47,5 +69,6 @@ void trail_fhist(uint32_t page);
 void trail_chk(uint32_t page);
 void trail_cap(uint32_t page, unsigned slot);
 void trail_cap_pre(uint32_t page, unsigned slot);
+#endif
 
 #endif

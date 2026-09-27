@@ -2,6 +2,22 @@
 #define DIAG_H
 #include <stdint.h>
 
+/* EA9_NO_LOG -- the release configuration.
+ *
+ * Everything below writes to flash, and flash has a finite number of
+ * erase/program cycles.  That is a fair price for a development instrument
+ * used over a bench session; it is not a fair price for an adapter that sits
+ * in a camera bag for years.  So the release build (`make release`) defines
+ * EA9_NO_LOG, which turns this whole interface into inline no-ops and drops
+ * diag.c and trail.c from the build entirely.  The callers keep their calls --
+ * no #ifdef anywhere else in the tree -- and the compiler deletes the page
+ * buffers they were filling, because nothing reads them any more.
+ *
+ * It is a compile-time removal rather than a runtime `if`, deliberately: a
+ * runtime flag leaves the NVMCTRL command sequence in the image, and then
+ * "does this build write flash?" is a question about control flow instead of
+ * a question about symbols.  The Makefile checks the symbols. */
+
 /* A progress trail in flash, so a run that produces no visible motion can still
  * be read back over USB afterwards.  FOUR slots of eight erased rows each at
  * DIAG_BASE, 64-byte pages; each page is written exactly once, so whichever
@@ -47,16 +63,33 @@
  * boots land in successive rows and the trail shows it. */
 /* Erases THIS boot's slot only, leaving the previous boot's intact.  Pass the
  * boot index from diag_boot_tally(); returns the noinit boot counter. */
+#ifdef EA9_NO_LOG
+static inline uint32_t diag_begin(uint32_t boot_index)
+{
+	(void)boot_index;
+	return 0;
+}
+static inline void diag_page(uint32_t page, const uint32_t *w, uint32_t words)
+{
+	(void)page; (void)w; (void)words;
+}
+#else
 uint32_t diag_begin(uint32_t boot_index);
 void     diag_page(uint32_t page, const uint32_t *w, uint32_t words);
+#endif
 
 /* DIAG_PAGES as diag.c was compiled with it.  Two objects can disagree about a
  * constant from this header if one of them was not rebuilt, and the link will
  * not say so -- that cost a camera run (NOTES.md §21).  The header
  * dependencies in the Makefile prevent it; this reports it if they ever fail
  * again, because a silent instrument is worse than none. */
+#ifdef EA9_NO_LOG
+static inline uint32_t diag_page_capacity(void) { return 0; }
+static inline uint32_t diag_slot_base(void)     { return 0; }
+#else
 uint32_t diag_page_capacity(void);
 uint32_t diag_slot_base(void);
+#endif
 
 /* A boot tally in a row diag_begin does NOT erase, so it survives the erase
  * that every boot performs.  The trail alone cannot distinguish "booted once"
@@ -97,7 +130,15 @@ uint32_t diag_slot_base(void);
  * to rebuild so the stamp tracks the image.  Taking it as an argument meant it
  * was expanded in the CALLER, which is not force-rebuilt, so the forced
  * rebuild had no effect at all. */
+#ifdef EA9_NO_LOG
+static inline uint32_t diag_boot_tally(uint32_t rcause)
+{
+	(void)rcause;
+	return 0;
+}
+#else
 uint32_t diag_boot_tally(uint32_t rcause);
+#endif
 
 /* A milestone, appended to the tally row.  The row is never erased between
  * boots, so this is the only record that survives a boot being overwritten --
@@ -123,7 +164,14 @@ uint32_t diag_boot_tally(uint32_t rcause);
  * Payload: the number of frame-sync edges seen, saturated at 255. */
 #define DIAG_MARK_NOBODY    0xB6u
 
+#ifdef EA9_NO_LOG
+static inline void diag_tally_mark(uint8_t code, uint8_t data)
+{
+	(void)code; (void)data;
+}
+#else
 void diag_tally_mark(uint8_t code, uint8_t data);
+#endif
 
 /* A hash of every source file, compiled in.  Two images with the same value
  * were built from identical source; two with different values were not --
@@ -133,6 +181,10 @@ void diag_tally_mark(uint8_t code, uint8_t data);
 #ifndef DIAG_SRC_ID
 #define DIAG_SRC_ID 0
 #endif
+#ifdef EA9_NO_LOG
+static inline uint32_t diag_src_id(void) { return DIAG_SRC_ID; }
+#else
 uint32_t diag_src_id(void);
+#endif
 
 #endif

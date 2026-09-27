@@ -287,11 +287,55 @@ to flash. The build prints the markers it verified and a short hash of the
 sources, so you can tell two builds apart:
 
 ```
-built build/ea9-rebuild.bin (17316 bytes)
+built build/ea9-rebuild.bin (18164 bytes)
   verified: full stock shutdown incl. bus off (BOFF marker)
   verified: motor drive ENABLED (DRY0 marker)
   source id: 4fa075
 ```
+
+#### Debug and release
+
+There are two configurations, and they differ in exactly two things:
+optimisation, and whether the flash trail exists.
+
+| | command | image | optimisation | flash trail |
+| --- | --- | --- | --- | --- |
+| **debug** | `make` | `build/ea9-rebuild.bin` | `-O1 -DDEBUG` | **written** |
+| **release** | `make release` | `build/ea9-rebuild-release.bin` | `-O2 -DNDEBUG` | **none** |
+
+The debug image is the instrumented one: it erases and programs pages at
+`0x16000` as it runs, which is what `--dump` reads back and what every result
+in `NOTES.md` was measured with. Use it for camera sessions.
+
+The release image **writes nothing to flash, ever.** That is the point of it:
+flash has a finite number of erase/program cycles, and an adapter that is
+actually in use should not be spending them on a diagnostic trail nobody is
+going to read. It is a compile-time removal, not a runtime switch — `diag.c`
+and `trail.c` are not compiled at all, the headers replace their interface with
+inline no-ops, and the build then *checks* that no `diag_*` or `trail_*` symbol
+was linked:
+
+```
+built build/ea9-rebuild-release.bin (15152 bytes)
+  verified: no build-marker page (the trail is compiled out)
+  verified: no diag_*/trail_* symbol -- the image cannot write flash
+  source id: 11ca60
+```
+
+That check is worth more than reading the code: since every flash write in this
+firmware goes through `diag.c`, the absence of those symbols is proof the image
+has no instruction that can write flash. The only remaining NVMCTRL accesses
+are `Reset_Handler`'s MANW errata bit and `clock_init`'s wait-state setting,
+both of which write `CTRLB` and issue no command.
+
+Each configuration has its own object directory (`build/obj-debug`,
+`build/obj-release`), so switching between them cannot leave a stale object in
+the image — which has cost this project camera runs before (§21, §43, §51).
+
+Note that the two images are **different binaries**, so a release image is not
+covered by a debug image's hardware results. `make hosttest` exercises the same
+sources either way, but the optimisation level is not the one the recorded
+camera runs used.
 
 **Run the tests:**
 
@@ -329,11 +373,14 @@ python3 tools/ea9flash.py --check
 **Flash:**
 
 ```bash
-python3 tools/ea9flash.py build/ea9-rebuild.bin
+python3 tools/ea9flash.py build/ea9-rebuild.bin            # debug, writes a trail
+python3 tools/ea9flash.py build/ea9-rebuild-release.bin    # release, writes nothing
 ```
 
 **Read flash back** — used here to recover the diagnostic trail after a camera
-session:
+session. A **release** image leaves no trail, so this returns erased flash (or
+whatever the last debug image left behind); flash the debug image before a
+session you intend to read back:
 
 ```bash
 python3 tools/ea9flash.py --dump 0x16000:0x2100 -o dump.bin

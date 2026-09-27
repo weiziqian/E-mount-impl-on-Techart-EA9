@@ -61,11 +61,18 @@
  *                   four sessions.  The logs cannot separate e/22, e/26 and
  *                   e/30 -- all three land within 12 counts, worst case --
  *                   so the choice is made on how it feels to shoot.
+ *     0x56 = 5.06   boot-time waiting removed.  Homing used to start on
+ *                   `millis() >= 4000` and run a flat 300 + 500 ms, so the
+ *                   mechanism stood still for the first 4.8 s of every boot.
+ *                   It now starts when the handshake is answered and stops
+ *                   as soon as the encoder says it is against the stop.
+ *                   The homing page also records when the handshake was
+ *                   answered, which no dump has ever shown (NOTES.md 112).
  *
  * Not to be confused with the bootloader's own version triplet, which is what
  * ea9flash.py --check reports and lives nowhere in the app image (CLAUDE.md,
  * "There are TWO independent version records"). */
-#define EM_FW_VERSION_BCD   0x55u
+#define EM_FW_VERSION_BCD   0x56u
 
 /* Blocks until the body brings its chip select up and back down, then arms the
  * receiver.  Never returns on a bench supply with no body attached -- the same

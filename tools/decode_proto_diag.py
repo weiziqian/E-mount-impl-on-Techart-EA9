@@ -481,8 +481,27 @@ def decode_trail(blob, label):
             enc_b = w[8] - (1 << 32) if w[8] >> 31 else w[8]
             enc_a = w[9] - (1 << 32) if w[9] >> 31 else w[9]
             first, peak = w[7] & 0xFFFF, w[7] >> 16
-            print(f"page {p:2d}  {tag}: step {w[15]}, commanded {delta:+d} counts "
-                  f"({delta / 4:+.0f} protocol units) at t={w[3]} ms")
+            # Step 0 is the boot homing.  It commands no displacement, so
+            # w[4] carries the boot timing instead: settle length in the high
+            # half, the handshake timestamp (16-bit) in the low half.  Builds
+            # before that field existed wrote a plain 0 there, and 0 is a
+            # value neither of those can legitimately take, so it is a safe
+            # discriminator -- printing "handshake at t=0 ms" for an old dump
+            # would be a fabricated observation.
+            if w[15] == 0 and w[4]:
+                hs, settle = w[4] & 0xFFFF, w[4] >> 16
+                drive = w[12] & 0xFFFF
+                started = w[3] - drive - settle
+                print(f"page {p:2d}  MOTR  boot homing: done at "
+                      f"t={w[3]} ms")
+                print(f"         handshake answered t={hs} ms, homing started "
+                      f"t={started} ms ({started - hs:+d} ms after it)")
+                print(f"         drive {drive} ms (cap 300) + settle {settle} "
+                      f"ms (cap 500) = {drive + settle} ms")
+            else:
+                print(f"page {p:2d}  {tag}: step {w[15]}, commanded {delta:+d} "
+                      f"counts ({delta / 4:+.0f} protocol units) at "
+                      f"t={w[3]} ms")
             for label, word in (("idle", w[5]), ("load", w[6])):
                 print(f"         supply {label}  {word & 0xFFFF:4d} .. "
                       f"{word >> 16:4d} mV")

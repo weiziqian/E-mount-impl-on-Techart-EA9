@@ -184,8 +184,6 @@ static void quiet_idlog_page(void)
 	trail_idlog(QUIET_IDLOG_PAGE);
 }
 
-#define TEST_START_MS   4000u
-
 /* THE EXPERIMENT (user's, 2026-09-20): home to the infinity end the way the
  * stock firmware does, then move one third of the way along the travel using
  * the duty the stock firmware actually uses.
@@ -196,9 +194,16 @@ static void quiet_idlog_page(void)
  *            800/2560 = 31.25% for 300 ms, releases, waits 500 ms, then
  *            latches the position as its reference.  At the speed measured in
  *            a measurement run that covers ~7200 counts against a 5952-count travel, so it
- *            deliberately runs into the end stop and parks there.  Every
- *            LM-EA9 does this at every power-on; it is the most thoroughly
- *            proven operation this mechanism has.
+ *            deliberately runs into the end stop and parks there.
+ *
+ *            CORRECTION (2026-09-27, servo.md 10): that block is DEAD CODE.
+ *            Its gate, 0x2000051c[0x14], is in zeroed .bss and the only write
+ *            to it in the whole image is the clear at the end of the block
+ *            itself.  The stock does NOT home at power-on -- it parks at the
+ *            same infinity clamp on the way down and assumes it is still
+ *            there.  So "every LM-EA9 does this at every power-on" is
+ *            withdrawn; the duty and the durations are still the stock's own
+ *            constants, and they are proven by this project's own runs.
  *
  *   moving   the stock servo's PID limiter (0x8bfc) works out to
  *            duty = clamp(accumulator / 200, +-1280), floored to a magnitude
@@ -230,10 +235,73 @@ static void build_marker_page(uint32_t page);
 static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
 
 #define HOME_DUTY       800         /* 31.25%, stock 0x5e00 */
-#define HOME_MS         300
-#define HOME_SETTLE_MS  500
-/* 800 = 31.25%: the stock's own homing duty, proven to move this mechanism
- * because it is what drives it into the end stop at every power-on. */
+
+/* The three waits homing used to sit through, all of them now bounds rather
+ * than durations (NOTES.md 112).  Together they were 4.8 s of every boot; two
+ * of the three were copied from a stock code path that turns out never to run
+ * (servo.md 10), and the third was a bench-era constant nobody had measured.
+ *
+ * HOME_DELAY_MS -- how long after the HANDSHAKE homing may start.  It used to
+ *   be `millis() >= 4000`, measured from boot, which in every dump was the
+ *   binding constraint: af6's homing page is stamped 4821 ms and homing is
+ *   800 ms long, so the loop had been sitting at that gate with the handshake
+ *   long since done.  Nothing was ever measured to justify 4000.
+ *
+ *   It is 0 because no mechanism was found by which a margin would help.  The
+ *   real hazard -- the body current-limiting before it has accepted the lens
+ *   (NOTES.md 29) -- is what `em_handshake_done` guards, and that guard stays.
+ *   If a camera run says otherwise, this is the one line to raise: 500, then
+ *   1500, with the homing page's supply and encoder figures as the evidence.
+ *
+ * HOME_MS / HOME_SETTLE_MS -- now CAPS.  The drive stops early once the
+ *   encoder has been still for HOME_STILL_MS, which is the definition of
+ *   "against the stop"; the settle does the same.  Of the eight distinct
+ *   homing pages in dumps/af1..af6, six moved under 60 counts -- the boot
+ *   started already parked at infinity, where our own shutdown left it, so
+ *   the drive was a stall against the stop from the first millisecond.  The
+ *   other two moved 1201 and 5269 counts, about 45 ms and 200 ms of travel
+ *   at this duty, so they still finish well inside the 300 ms cap and simply
+ *   stop hammering the stop once they get there.
+ *
+ * Why an early exit cannot mistake stiction for the end stop: at 800 the duty
+ * is above every breakaway this mechanism has ever shown (170-536, one spot
+ * >=1280), so breakaway at this duty is immediate or never -- and at the spot
+ * where it is never, the full 300 ms does not free it either.  The early exit
+ * therefore removes waiting, not a retry (NOTES.md 96-103 for the breakaway
+ * distribution). */
+#define HOME_DELAY_MS       0     /* after em_t_handshake, not after boot */
+#if HOME_DELAY_MS > 0
+#define HOME_GATE_OPEN()    ((uint32_t)(millis() - em_t_handshake) \
+                             >= HOME_DELAY_MS)
+#else
+/* Zero margin: the handshake IS the gate, and the compiler is spared a
+ * comparison it would rightly point out is always true. */
+#define HOME_GATE_OPEN()    1
+#endif
+#define HOME_MS             300   /* cap on the drive   */
+#define HOME_MIN_MS         40    /* ...but never less than this          */
+#define HOME_SETTLE_MS      500   /* cap on the settle  */
+#define HOME_SETTLE_MIN_MS  20    /* ...but never less than this          */
+#define HOME_STILL_MS       40    /* still for this long = it has stopped */
+/* Encoder noise is 3-5 counts peak-to-peak with sigma ~0.8 (NOTES.md 97).  6
+ * is clear of that and still nothing at all as movement: at this duty the
+ * mechanism covers ~27 counts per millisecond, so 6 counts is a quarter of a
+ * millisecond of it.  Erring high is the safe direction too -- a threshold
+ * the noise can cross merely resets the timer, and the loop falls back to the
+ * fixed length it had before. */
+#define HOME_STILL_COUNTS   6
+/* Trace sample spacing.  It used to be HOME_MS / SERVO_TRACE_N = 12 ms, which
+ * spread 24 samples over the whole fixed-length pulse.  Now that the pulse
+ * usually ends at 40 ms that would leave three points and nothing to read, so
+ * the trace is packed into the first 48 ms instead -- which is where the
+ * early exit makes its decision, and therefore where a wrong one would show.
+ * A long drive is still covered by the encoder pair and the drive length on
+ * the MOTR page. */
+#define HOME_TRACE_MS       2
+
+/* 800 = 31.25%: the stock's own homing duty.  It is the value the stock's own
+ * (unreachable, servo.md 10) homing block uses, and this project's hardware
+ * runs are what show that it moves this mechanism. */
 #define PARK_DUTY       800
 
 /* 1280 = 50% of PER, the stock's own limiter.
@@ -435,15 +503,49 @@ static void pump(int32_t pos)
 	vdd_track_sample();
 }
 
-/* Step 0: home to the infinity end, exactly the way the stock firmware does.
- * Open loop on purpose -- this is a replay of 0x5e00, not an improvement on it,
- * and driving into this stop is what the mechanism does at every power-on. */
+/* Has the mechanism stopped?  Tracks the position at the last real movement
+ * and how long ago that was; a creep slower than the threshold per call still
+ * accumulates, because the reference only moves when the threshold is crossed.
+ */
+struct home_still {
+	int32_t  at;          /* position when it last really moved */
+	uint32_t t;           /* millis() then                      */
+};
+
+static void home_still_init(struct home_still *st)
+{
+	st->at = abs_encoder_track();
+	st->t  = millis();
+}
+
+static uint8_t home_still_for(struct home_still *st, uint32_t ms)
+{
+	int32_t now = abs_encoder_track();
+	int32_t d   = now - st->at;
+
+	if (d > HOME_STILL_COUNTS || d < -HOME_STILL_COUNTS) {
+		st->at = now;
+		st->t  = millis();
+	}
+	return (uint32_t)(millis() - st->t) >= ms;
+}
+
+/* Step 0: home to the infinity end with the stock's own constants.
+ *
+ * Open loop on purpose -- the drive itself is a replay of 0x5e00, not an
+ * improvement on it.  What is NOT the stock's is the timing: the stock's block
+ * runs for a flat 300 + 500 ms, and this one stops as soon as the encoder says
+ * the mechanism is against the stop.  It is also not something the stock does
+ * at all, since that block is unreachable in every shipped image (servo.md 10)
+ * -- we home because we want a known zero, and it parks at power-off instead.
+ */
 static void motor_home(void)
 {
 	uint32_t w[16];
 	uint16_t idle_lo, idle_hi, load_lo, load_hi;
 	int32_t  before, after;
-	uint32_t t0;
+	uint32_t t0, drive_ms, settle_ms;
+	struct home_still still;
 	unsigned i;
 
 	vdd_read_burst(&idle_lo, &idle_hi, 20);
@@ -456,6 +558,7 @@ static void motor_home(void)
 	}
 	t0 = millis();
 	i  = 0;
+	home_still_init(&still);
 	while ((uint32_t)(millis() - t0) < HOME_MS) {
 		/* 0 because the position is not reportable yet: g_homed is still
 		 * clear, so pump() skips the report entirely.  Passing a real
@@ -463,10 +566,18 @@ static void motor_home(void)
 		 * value nothing consumes. */
 		pump(0);
 		if (i < SERVO_TRACE_N
-		    && (uint32_t)(millis() - t0) >= i * (HOME_MS / SERVO_TRACE_N)) {
+		    && (uint32_t)(millis() - t0) >= i * HOME_TRACE_MS) {
 			g_home_trace[i++] = abs_encoder_raw();
 		}
+		/* Against the stop -- either it started there or it has arrived.
+		 * Either way there is nothing left for the remaining
+		 * milliseconds to do except heat the coils. */
+		if ((uint32_t)(millis() - t0) >= HOME_MIN_MS
+		    && home_still_for(&still, HOME_STILL_MS)) {
+			break;
+		}
 	}
+	drive_ms = millis() - t0;
 	g_home_trace_n = (uint8_t)i;
 	if (!STOCK.dry) {
 		/* Brake into the stop rather than releasing: the settle that
@@ -478,9 +589,15 @@ static void motor_home(void)
 	vdd_track_result(&load_lo, &load_hi);
 
 	t0 = millis();
+	home_still_init(&still);
 	while ((uint32_t)(millis() - t0) < HOME_SETTLE_MS) {
 		pump(0);                /* still pre-homing; see above */
+		if ((uint32_t)(millis() - t0) >= HOME_SETTLE_MIN_MS
+		    && home_still_for(&still, HOME_STILL_MS)) {
+			break;
+		}
 	}
+	settle_ms = millis() - t0;
 	after = abs_encoder_track();
 
 	for (i = 0; i < 16; i++) {
@@ -490,7 +607,12 @@ static void motor_home(void)
 	w[1]  = EM_DIAG_FORMAT;
 	w[2]  = TAG_MOTR;
 	w[3]  = millis();
-	w[4]  = 0;                       /* open loop: no commanded displacement */
+	/* Homing commands no displacement, so this word is free -- and the boot
+	 * timing is the thing a dump has never been able to answer: when the
+	 * handshake finished, and how much of what followed was waiting.  The
+	 * handshake time is 16-bit, as the focus-history page's times already
+	 * are; a session is well under 65 s. */
+	w[4]  = ((uint32_t)settle_ms << 16) | (em_t_handshake & 0xFFFFu);
 	w[5]  = ((uint32_t)idle_hi << 16) | idle_lo;
 	w[6]  = ((uint32_t)load_hi << 16) | load_lo;
 	w[7]  = ((uint32_t)HOME_DUTY << 16) | HOME_DUTY;
@@ -498,7 +620,9 @@ static void motor_home(void)
 	w[9]  = (uint32_t)after;
 	w[10] = em_frames_rx;
 	w[11] = em_frames_tx;
-	w[12] = (0u << 16) | HOME_MS;    /* outcome "OK" */
+	/* The drive's ACTUAL length, not HOME_MS.  It used to report the cap,
+	 * which was true only because the loop always ran to it. */
+	w[12] = (0u << 16) | (drive_ms & 0xFFFFu);   /* outcome "OK" */
 	w[13] = (g_flash_boots << 16) | (g_boot & 0xFFFFu);
 	w[14] = PM->RCAUSE.reg;
 	w[15] = 0;
@@ -1431,9 +1555,13 @@ int main(void)
 			quiet = 0;      /* it came back; that was a hiccup */
 		}
 
-		/* Home once, then serve whatever focus targets arrive. */
-		if (!g_aborted && em_handshake_done
-		    && step == 0 && millis() >= TEST_START_MS) {
+		/* Home once, then serve whatever focus targets arrive.
+		 *
+		 * The gate is the HANDSHAKE plus HOME_DELAY_MS, not a wall
+		 * clock: `millis() >= 4000` held the mechanism still for four
+		 * seconds of every boot and guarded nothing (NOTES.md 112). */
+		if (!g_aborted && em_handshake_done && step == 0
+		    && HOME_GATE_OPEN()) {
 			motor_home();
 			focus_report();
 			step = 1;
