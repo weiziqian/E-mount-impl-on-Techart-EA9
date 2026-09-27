@@ -68,11 +68,24 @@
  *                   as soon as the encoder says it is against the stop.
  *                   The homing page also records when the handshake was
  *                   answered, which no dump has ever shown (NOTES.md 112).
+ *     0x57 = 5.07   the optical rows.  Slot A (the field-sampling grid) and
+ *                   slot B type 0 (the pupil magnification) are now sent in
+ *                   message 0x05, and slot A again in message 0x28, from two
+ *                   constants in this file.  Before this the adapter sent no
+ *                   grid at all and a flat pupil row inherited from the Canon
+ *                   clone it impersonates.
+ *     0x58 = 5.08   slot B type 1 as well, into message 0x28's slot B -- the
+ *                   field the stock fills with a type 0 row, which is the
+ *                   wrong quantity for it.  All four row fields in the two
+ *                   messages now carry a row of the right type.
+ *     0x59 = 5.09   the declared aperture follows the optical row: f/2.0 ->
+ *                   f/1.8 (0x1200 -> 0x11C0), all three constants, so the
+ *                   descriptor block and slot B type 1 describe one lens.
  *
  * Not to be confused with the bootloader's own version triplet, which is what
  * ea9flash.py --check reports and lives nowhere in the app image (CLAUDE.md,
  * "There are TWO independent version records"). */
-#define EM_FW_VERSION_BCD   0x56u
+#define EM_FW_VERSION_BCD   0x59u
 
 /* Blocks until the body brings its chip select up and back down, then arms the
  * receiver.  Never returns on a bench supply with no body attached -- the same
@@ -330,11 +343,15 @@ uint16_t em_defocus_scale(void);
  * (aperture_value.md).  Read one straight off:
  *
  *     AV = (value - 4096) / 256        F = 2^(AV / 2)
- *     0x1200 = 4608 -> AV = 2 -> F = 2^1 = f/2.0
+ *     0x11C0 = 4544 -> AV = 1.75 -> F = 2^0.875 = f/1.834
  *
- * The high byte alone is legible: 0x12 = 18, and 18 - 0x10 = 2 = AV, so the
- * whole stops read off the top byte and the low byte is the fraction of a
- * stop.  f/1.4 is 0x1100, f/2.8 is 0x1300, f/4 is 0x1400.
+ * The high byte alone is legible: 0x11 = 17, and 17 - 0x10 = 1 = AV's whole
+ * part, so the whole stops read off the top byte and the low byte is the
+ * fraction of a stop.  f/1.4 is 0x1100, f/2.0 is 0x1200, f/2.8 is 0x1300.
+ *
+ * 0x11C0 is chosen rather than a rounder number because it lands EXACTLY on
+ * the coarser descriptor grid below -- descriptor 0x16, which converts back
+ * to 4544 with no rounding -- so the two encodings agree to the bit.
  *
  * The OTHER encoding, the Canon-convention descriptor of message 0x05
  * pl[44..59], is derived from these by em_aperture_to_descriptor() rather than
@@ -344,18 +361,28 @@ uint16_t em_defocus_scale(void);
  *
  * THE MINIMUM IS THE MAXIMUM.  An adapter with no iris has no range, and the
  * stock's f/90 is a fiction: a body may command anywhere in that range and the
- * transmission is f/2.0 regardless.
+ * transmission is f/1.8 regardless.
  *
  * Restoring f/90 was TRIED and changed nothing: the camera still re-metered
  * after every exposure, and start-up hung as well (NOTES.md 89).  So the
  * fiction buys nothing here, and the honest single point is what stands.
  *
- * pl[52] is therefore the ONE byte of this block that a stock LM-EA9 sends
- * differently.  Every other byte matches one, and the test says so against a
- * literal rather than against values derived from these constants. */
-#define EM_APERTURE_MAX  0x1200u        /* f/2.0 -- message 0x05 pl[44], pl[51] */
-#define EM_APERTURE_MIN  0x1200u        /* f/2.0 -- message 0x05 pl[52]         */
-#define EM_APERTURE_NOW  0x1200u        /* f/2.0 -- 0x05 pl[0..3], 0x28 pl[9..10] */
+ * WHY f/1.8 AND NOT f/2.0.  It used to be f/2.0, which was the stock's own
+ * boot value and therefore the smallest possible deviation.  What moved it is
+ * EM_SLOT_B_TYPE1: that row encodes an f-number through the protocol constant
+ * `value[0] x F` ~ 0.0998, and the row this build sends is a real f/1.8 row.
+ * A lens whose optical row says f/1.8 and whose descriptor says f/2.0 is
+ * describing two different lenses to the same body, which is precisely the
+ * class of inconsistency this file exists to remove.  Change one of these and
+ * the other has to move with it.
+ *
+ * Four bytes of the descriptor block now differ from a stock LM-EA9 --
+ * pl[44], pl[46], pl[51] take descriptor 0x16 instead of 0x18, and pl[52] is
+ * the maximum instead of the stock's f/90.  The test enumerates exactly those
+ * four and checks every other byte against a stock literal. */
+#define EM_APERTURE_MAX  0x11C0u        /* f/1.8 -- message 0x05 pl[44], pl[51] */
+#define EM_APERTURE_MIN  0x11C0u        /* f/1.8 -- message 0x05 pl[52]         */
+#define EM_APERTURE_NOW  0x11C0u        /* f/1.8 -- 0x05 pl[0..3], 0x28 pl[9..10] */
 
 /* The current aperture, as 256 x AV + 4096, into message 0x05 payload[0..1],
  * its second copy at [2..3], and message 0x1B's reply.
@@ -409,6 +436,71 @@ void em_set_aperture_range(uint16_t max_av, uint16_t min_av);
  * f/1.0; an aperture value is 256*AV + 4096. */
 uint16_t em_aperture_from_descriptor(uint8_t v);
 uint8_t  em_aperture_to_descriptor(uint16_t av);
+
+/* THE OPTICAL ROWS -- what this adapter tells the body about its pupil.
+ *
+ * Two 6-byte rows in the block-float format the protocol uses for optical data
+ * (E-mount-protocol-re/docs/optical_data.md): a start value and four signed
+ * deltas, all scaled by a shared exponent in the high nibble of byte 0.
+ *
+ *   SLOT A        the field-sampling grid -- WHERE across the frame the other
+ *                 curves are sampled, as tangent angles from the exit pupil.
+ *   SLOT B type 0 the pupil magnification p, i.e. exit-pupil distance / focal
+ *                 length at infinity.
+ *   SLOT B type 1 the pupil SIZE: value[0] = C/F with C ~ 0.0998, so the row
+ *                 scales by 1/sqrt(2) per stop.
+ *
+ * Bit 7 of byte 0 is the type flag -- slot A rows are type 1, and slot B's two
+ * types are two different physical quantities sharing one field.
+ *
+ * Where they go:
+ *
+ *   message 0x05  slot A at pl[32..37], slot B **type 0** at pl[38..43]
+ *   message 0x28  slot A at pl[11..16], slot B **type 1** at pl[17..22]
+ *
+ * Why the split: message 0x05 alternates the two slot B types frame by frame
+ * on a real lens, and message 0x28 carries only the type 1 row.  We do not
+ * alternate -- there is one value of each -- so each message gets the type it
+ * is supposed to carry.  The stock writes something in both places, so both
+ * are fields a body may read.
+ *
+ * What the stock puts there, for comparison: message 0x05 slot A all zeros,
+ * which is not a row at all; message 0x05 slot B `26 00 00 00 00 00`, a flat
+ * p = 1.500; message 0x28 slot A all but one byte zero; message 0x28 slot B
+ * `22 00 00 00 00 00`, which is a flat 0.5 AND the wrong type for that field.
+ * So the adapter has always claimed a pupil distance of 1.5 x focal length,
+ * never said where the field is sampled, and contradicted itself between the
+ * two messages.
+ */
+#define EM_ROW_BYTES 6u
+
+/* b1 30 7e 4b 32 29 -- the grid. */
+#define EM_SLOT_A        { 0xB1, 0x30, 0x7E, 0x4B, 0x32, 0x29 }
+
+/* 24 e1 f6 f6 f6 f5 -- p from 1.2197 on axis falling to 1.1797 at the corner,
+ * mean exactly 1.2000.  Taken verbatim from build/EA9-slotB0-1_2.bin, the
+ * hand-patched image this value was arrived at on; exponent nibble 2 = E 10,
+ * so the mantissas 1249..1208 divide by 1024.  For the 50 mm this adapter
+ * declares that is an exit pupil at 61.0 mm on axis. */
+#define EM_SLOT_B_TYPE0  { 0x24, 0xE1, 0xF6, 0xF6, 0xF6, 0xF5 }
+
+/* d1 d0 d5 e8 e9 ef -- the pupil size, 0.05664 on axis falling to 0.04358,
+ * exponent nibble d = E 13.  This is the Sony SEL5518Z's own wide-open row
+ * (optical_data.md 6.2), and `value[0] x F` for it is 0.1020, right on the
+ * protocol constant -- which means it describes a lens working at **F 1.8**.
+ *
+ * NOTE, if you change the aperture: this row and EM_APERTURE_* have to agree,
+ * because `value[0] x F` is the same number for every lens measured.  They do
+ * agree as shipped -- EM_APERTURE_* is 0x11C0, f/1.834, and 0.05664 x 1.834 =
+ * 0.1039.  Move the aperture and this row has to be rescaled by the ratio of
+ * the f-numbers, or the adapter describes two different lenses at once. */
+#define EM_SLOT_B_TYPE1  { 0xD1, 0xD0, 0xD5, 0xE8, 0xE9, 0xEF }
+
+/* Installs all three rows.  Called from em_init with the constants above; the
+ * arguments exist so the host suite can prove the fields follow them rather
+ * than merely happening to match once. */
+void em_set_optical_rows(const uint8_t *slot_a, const uint8_t *slot_b_type0,
+                         const uint8_t *slot_b_type1);
 
 /* The body's "no target" sentinel, on both channels.  Driving to it would
  * command a position far outside any travel a lens advertises. */

@@ -106,6 +106,14 @@
 #define EM05_AP_MIN       0x3A          /* pl[52] minimum                  */
 #define EM05_AP_CONST_01  0x41          /* pl[59] constant 0x01            */
 
+/* The 6-byte optical rows, at frame offsets (payload index + 6).  See
+ * emount.h for what each row is and why message 0x28's slot B is not one of
+ * these. */
+#define EM05_SLOT_A       0x26          /* pl[32..37] the field grid       */
+#define EM05_SLOT_B       0x2C          /* pl[38..43] pupil magnification  */
+#define EM28_SLOT_A       0x11          /* pl[11..16] the same grid        */
+#define EM28_SLOT_B       0x17          /* pl[17..22] pupil size, type 1   */
+
 /* Message 0x05 payload[4] = frame offset 10 is the APERTURE settle countdown.
  * Nothing writes it: this adapter has no iris, so its aperture is never in
  * transit and the stored 0x00 is already the right answer (emount.h).
@@ -1213,6 +1221,22 @@ void em_set_aperture_range(uint16_t max_av, uint16_t min_av)
 	ea9_data[EA9_OFF_05 + EM05_AP_CONST_01] = 0x01;
 }
 
+void em_set_optical_rows(const uint8_t *slot_a, const uint8_t *slot_b_type0,
+                         const uint8_t *slot_b_type1)
+{
+	uint8_t k;
+
+	for (k = 0; k < EM_ROW_BYTES; k++) {
+		ea9_data[EA9_OFF_05 + EM05_SLOT_A + k] = slot_a[k];
+		ea9_data[EA9_OFF_05 + EM05_SLOT_B + k] = slot_b_type0[k];
+		/* The same grid in both messages, and each message's slot B
+		 * gets the row type that message is supposed to carry
+		 * (emount.h). */
+		ea9_data[EA9_OFF_28 + EM28_SLOT_A + k] = slot_a[k];
+		ea9_data[EA9_OFF_28 + EM28_SLOT_B + k] = slot_b_type1[k];
+	}
+}
+
 uint8_t em_take_focus_cmd(struct em_focus_cmd *out)
 {
 	uint8_t k;
@@ -1283,6 +1307,18 @@ void em_init(void)
 	 * both derived from one literal.  The stored 4864 never goes out. */
 	em_set_aperture_range(EM_APERTURE_MAX, EM_APERTURE_MIN);
 	em_set_aperture(EM_APERTURE_NOW);
+
+	/* The optical rows.  The stock says nothing about where the field is
+	 * sampled and claims a pupil at 1.5 x focal length; these two rows are
+	 * the first thing this adapter has ever told a body about its pupil
+	 * geometry that was measured rather than inherited from a Canon. */
+	{
+		static const uint8_t SLOT_A[EM_ROW_BYTES]  = EM_SLOT_A;
+		static const uint8_t SLOT_B0[EM_ROW_BYTES] = EM_SLOT_B_TYPE0;
+		static const uint8_t SLOT_B1[EM_ROW_BYTES] = EM_SLOT_B_TYPE1;
+
+		em_set_optical_rows(SLOT_A, SLOT_B0, SLOT_B1);
+	}
 
 	/* protocol_init, 0x551c, replicated including the one non-obvious bit:
 	 * our chip select goes high FIRST and stays high across the whole

@@ -387,7 +387,60 @@ python3 tools/ea9flash.py --dump 0x16000:0x2100 -o dump.bin
 python3 tools/decode_proto_diag.py dump.bin
 ```
 
-### 4.4 If something goes wrong
+### 4.4 What to change for your lens
+
+Everything the adapter tells the camera about the lens in front of it is a
+constant in **[`src/emount.h`](src/emount.h)**. The adapter has no electrical
+contact with an M lens and cannot measure any of this, so these are what you
+declare on its behalf. Edit, `make`, flash.
+
+Each constant is documented where it is defined — the table below is only so
+you know what to look for.
+
+| What | Constant | Ships as |
+| --- | --- | --- |
+| **Focal length** | `EM_FOCAL_MM10` | `500` = 50.0 mm |
+| **Aperture, maximum** | `EM_APERTURE_MAX` | `0x11C0` = f/1.8 |
+| **Aperture, minimum** | `EM_APERTURE_MIN` | `0x11C0` = f/1.8 |
+| **Aperture, current** | `EM_APERTURE_NOW` | `0x11C0` = f/1.8 |
+| **Optical data, slot A** | `EM_SLOT_A` | `b1 30 7e 4b 32 29` |
+| **Optical data, slot B type 0** | `EM_SLOT_B_TYPE0` | `24 e1 f6 f6 f6 f5` |
+| **Optical data, slot B type 1** | `EM_SLOT_B_TYPE1` | `d1 d0 d5 e8 e9 ef` |
+
+**Focal length** is millimetres × 10, and it goes into every field that carries
+one. It is the number the camera displays *and* the one written to the
+photograph's EXIF.
+
+**The three apertures** are all on the same scale, `256 × AV + 4096`, where
+`AV = 2·log₂(F)`. A Leica M lens has an aperture ring the adapter cannot read
+and cannot move, so all three ship at the same value: the honest report is one
+fixed aperture with no range for the body to drive. Set them to your lens's
+maximum aperture — and see the note below, because the optical row has to move
+with them. If you would rather report a range, the maximum and minimum
+are the two ends of it and the current value is what the body meters with.
+
+**The three optical rows** describe the lens's pupil geometry — slot A is where
+across the frame the correction curves are sampled, slot B type 0 is the pupil
+magnification (exit-pupil distance ÷ focal length) and slot B type 1 is the
+pupil size. Six bytes each, in the protocol's own block-float encoding, which
+is described in `E-mount-protocol-re/docs/optical_data.md`. They are what a
+body uses to correct off-axis phase detection, which is the failure this whole
+project started from: the stock adapter sends no slot A at all, a fixed slot B
+inherited from the Canon lens it impersonates, and a message 0x28 slot B that
+is the wrong row type for that field.
+
+Slot A goes into messages 0x05 and 0x28. The two slot B rows go to one message
+each — type 0 into message 0x05, type 1 into message 0x28 — because that is the
+type each message is supposed to carry.
+
+**Slot B type 1 and the aperture have to agree.** `value[0] × F` is the same
+constant ≈ 0.0998 for every lens measured, so that row encodes an f-number as
+surely as the aperture constants do. As shipped they agree — the row is a real
+f/1.8 row and the apertures declare f/1.8. If you change one, rescale the other
+by the ratio of the f-numbers, or the adapter describes two different lenses to
+the same body.
+
+### 4.5 If something goes wrong
 
 **You cannot brick the adapter by flashing a bad application image.** The
 bootloader owns `0x0000`–`0x5000`, runs first on every power-up, and does not

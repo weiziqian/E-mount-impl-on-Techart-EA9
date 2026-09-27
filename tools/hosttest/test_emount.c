@@ -430,6 +430,77 @@ int main(void)
 		em_set_focal_length(EM_FOCAL_MM10);
 	}
 
+	/* --- the optical rows, from three constants -----------------------
+	 * The stock sends no grid at all (slot A is six zero bytes, which is
+	 * not a row), a pupil row inherited from the Canon clone, and a slot B
+	 * in message 0x28 that is the WRONG TYPE for that field.  Checked
+	 * here: every field carries what its constant says, each field gets
+	 * the row type that field is supposed to carry, and the fields FOLLOW
+	 * the setter rather than happening to agree once. */
+	{
+		static const struct {
+			uint16_t off;        /* into ea9_data           */
+			uint8_t  type;       /* what bit 7 must say     */
+			const char *name;
+		} ROW[] = {
+			{ EA9_OFF_05 + 0x26, 1, "message 0x05 slot A" },
+			{ EA9_OFF_05 + 0x2C, 0, "message 0x05 slot B" },
+			{ EA9_OFF_28 + 0x11, 1, "message 0x28 slot A" },
+			{ EA9_OFF_28 + 0x17, 1, "message 0x28 slot B" },
+		};
+		static const uint8_t A[EM_ROW_BYTES]  = EM_SLOT_A;
+		static const uint8_t B0[EM_ROW_BYTES] = EM_SLOT_B_TYPE0;
+		static const uint8_t B1[EM_ROW_BYTES] = EM_SLOT_B_TYPE1;
+		/* Distinct in every byte, so a field wired to the wrong source
+		 * cannot pass by looking like its neighbour. */
+		static const uint8_t OTHER_A[EM_ROW_BYTES] = {
+			0xB1, 0x11, 0x22, 0x33, 0x44, 0x55
+		};
+		static const uint8_t OTHER_B0[EM_ROW_BYTES] = {
+			0x24, 0x66, 0x77, 0x01, 0x02, 0x03
+		};
+		static const uint8_t OTHER_B1[EM_ROW_BYTES] = {
+			0xD1, 0x88, 0x99, 0x04, 0x05, 0x06
+		};
+		const uint8_t *want[4], *then[4];
+		unsigned r, k;
+
+		want[0] = A;  want[1] = B0; want[2] = A;  want[3] = B1;
+		then[0] = OTHER_A;  then[1] = OTHER_B0;
+		then[2] = OTHER_A;  then[3] = OTHER_B1;
+
+		for (r = 0; r < 4; r++) {
+			for (k = 0; k < EM_ROW_BYTES; k++) {
+				if (ea9_data[ROW[r].off + k] != want[r][k]) {
+					fail("%s byte %u is %#04x, expected "
+					     "%#04x", ROW[r].name, k,
+					     ea9_data[ROW[r].off + k],
+					     want[r][k]);
+				}
+			}
+			/* Bit 7 of byte 0 is the row type.  Get it wrong and
+			 * the body is handed the right numbers as the wrong
+			 * physical quantity, which no value check catches. */
+			if (!!(ea9_data[ROW[r].off] & 0x80) != ROW[r].type) {
+				fail("%s is not a type %u row (byte 0 %#04x)",
+				     ROW[r].name, ROW[r].type,
+				     ea9_data[ROW[r].off]);
+			}
+		}
+
+		em_set_optical_rows(OTHER_A, OTHER_B0, OTHER_B1);
+		for (r = 0; r < 4; r++) {
+			for (k = 0; k < EM_ROW_BYTES; k++) {
+				if (ea9_data[ROW[r].off + k] != then[r][k]) {
+					fail("%s did not follow "
+					     "em_set_optical_rows (byte %u)",
+					     ROW[r].name, k);
+				}
+			}
+		}
+		em_set_optical_rows(A, B0, B1);
+	}
+
 	/* Message 0x05 payload[4] is the APERTURE settle countdown -- how many
 	 * status frames the iris still needs to reach the aperture the body
 	 * commanded.  Not a focus field.  This adapter has no iris, so the
@@ -773,7 +844,13 @@ int main(void)
 				{ 0x16, 4544 },   /* Viltrox + EF 50/1.8   f/1.834 */
 				{ 0x20, 4864 },   /* Viltrox + EF-S 24/2.8 f/2.828 */
 				{ 0x18, 4608 },   /* stock LM-EA9, at boot f/2.0   */
-				{ 0x18, EM_APERTURE_NOW },  /* what we declare  f/2.0  */
+				/* What we declare -- the same f/1.834 the
+				 * Viltrox sends, which is why the first row
+				 * and this one now agree.  Both are here on
+				 * purpose: one is a measured device, the other
+				 * is a constant in this build, and the test
+				 * is that the conversion serves both. */
+				{ 0x16, EM_APERTURE_NOW },
 			};
 			unsigned k;
 
@@ -861,9 +938,15 @@ int main(void)
 		 * build was ever free with is pl[46], and getting it wrong
 		 * advertised an aperture the lens does not have.
 		 *
-		 * pl[52], the minimum, is the single deliberate deviation --
-		 * f/2.0 rather than the stock's f/90, because this device has
-		 * no iris.  Restoring f/90 was tried and changed nothing.
+		 * FOUR bytes are ours, and only those four: pl[44], pl[46] and
+		 * pl[51] carry the declared maximum, which is f/1.8 here and
+		 * f/2.0 on a stock unit, and pl[52] carries the declared
+		 * minimum, which is the same f/1.8 rather than the stock's
+		 * f/90 because this device has no iris.  Restoring f/90 was
+		 * tried and changed nothing.
+		 *
+		 * The maximum moved to f/1.8 so the descriptor block and the
+		 * slot B type 1 optical row describe one lens (emount.h).
 		 *
 		 * A future deviation has to edit this array, deliberately and
 		 * with a reason. */
@@ -872,12 +955,21 @@ int main(void)
 				0x18, 0x00, 0x18, 0x00, 0xA0, 0x00, 0x00, 0x18,
 				0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
 			};
+			/* The indices this build writes from its own
+			 * declarations: pl[44], pl[46], pl[51] and pl[52]. */
+			static const uint8_t OURS[16] = {
+				1, 0, 1, 0, 0, 0, 0, 1,
+				2, 0, 0, 0, 0, 0, 0, 0
+			};
+			const uint8_t MAXB = em_aperture_to_descriptor(EM_APERTURE_MAX);
 			const uint8_t MINB = em_aperture_to_descriptor(EM_APERTURE_MIN);
-			unsigned k;
+			unsigned k, deviations = 0;
 
 			em_set_aperture_range(EM_APERTURE_MAX, EM_APERTURE_MIN);
 			for (k = 0; k < 16; k++) {
-				uint8_t want = (k == 8) ? MINB : STOCK[k];
+				uint8_t want = OURS[k] == 1 ? MAXB
+				               : OURS[k] == 2 ? MINB
+				               : STOCK[k];
 
 				if (ea9_data[EA9_OFF_05 + 0x32 + k] != want) {
 					fail("pl[%u] is %#04x, expected %#04x "
@@ -886,13 +978,17 @@ int main(void)
 					     ea9_data[EA9_OFF_05 + 0x32 + k],
 					     want, STOCK[k]);
 				}
+				if (want != STOCK[k]) {
+					deviations++;
+				}
 			}
-			/* And pl[52] really is the ONLY one that differs, so a
-			 * second deviation cannot hide behind this exemption. */
-			if (MINB == STOCK[8]) {
-				fail("test stale: pl[52] no longer deviates, so "
-				     "the exemption above hides nothing and "
-				     "should go");
+			/* Every byte not in OURS matched a stock literal above,
+			 * so the only way to deviate is through OURS -- and the
+			 * exemption is not allowed to become vacuous either. */
+			if (!deviations) {
+				fail("test stale: nothing deviates from the "
+				     "stock block any more, so the exemption "
+				     "hides nothing and should go");
 			}
 		}
 
