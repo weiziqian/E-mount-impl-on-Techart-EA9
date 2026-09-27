@@ -1,6 +1,6 @@
 /* main.c -- the E-mount responder plus the closed-loop focus mechanism.
  *
- * This is the ONLY configuration built (NOTES.md §53).  The shutdown path is
+ * This is the ONLY configuration built.  The shutdown path is
  * the stock's in full: park -> acknowledge -> UART off -> wait for the frame
  * sync -> PA23 -> delay.  Every step of it is measured, not assumed.
  *
@@ -9,9 +9,9 @@
  * 50% duty this mechanism covers more than its entire advertised travel in
  * that time, so every pulse ended against an end stop, and the 100% step
  * over-travelled hard enough that the stock firmware needed two power cycles
- * before it would drive the helicoid again (NOTES.md §26).
+ * before it would drive the helicoid again.
  *
- * It answered its question -- the motor works, and §17's two candidate
+ * It answered its question -- the motor works, and a measurement run's two candidate
  * explanations were both wrong -- but the parameters were sized against a
  * result that had already been withdrawn, and it had no end-stop protection of
  * any kind.
@@ -81,7 +81,7 @@
  *
  * A frame is delimited by its chip select, but the number of bytes clocked
  * inside that window is not necessarily the frame's length -- and reading the
- * window as the frame drove the helicoid into its stop (NOTES.md §82).  The
+ * window as the frame drove the helicoid into its stop.  The
  * receiver already captures the first two windows of every kind, with the
  * declared length beside the byte count, and `trail_cap()` has existed to
  * write them out since the responder did.  Nothing ever called it.
@@ -118,7 +118,7 @@
  * One page per focus move.  They must not overlap the homing record
  * (MOTOR_PAGE0) or the park records (MOTOR_PAGE0 + 2 + n): a flash page cannot
  * be rewritten between erases, so two writers sharing a page leave the bitwise
- * AND of both records, which is silent nonsense (NOTES.md §35). */
+ * AND of both records, which is silent nonsense. */
 static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29,
                                        0, 1, 2, 4, 5, 6, 7, 16 };
 #define FOCUS_PAGES (sizeof(FOCUS_PAGE) / sizeof(FOCUS_PAGE[0]))
@@ -128,7 +128,7 @@ static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29,
  * The five pages above cover the first five moves and then stop, which is the
  * wrong end of the session: focus5 ran for 61 s, made at least five moves, and
  * everything after move #4 -- including whatever happened when autofocus died
- * -- left no record at all (NOTES.md §70).  A rolling record in RAM costs
+ * -- left no record at all.  A rolling record in RAM costs
  * nothing and covers the end.
  *
  * Page 27 was the SECOND park attempt's encoder trace.  A second park attempt
@@ -195,7 +195,7 @@ static void quiet_idlog_page(void)
  *   homing   the stock main loop at 0x5e00 drives BOTH "minus" coils at
  *            800/2560 = 31.25% for 300 ms, releases, waits 500 ms, then
  *            latches the position as its reference.  At the speed measured in
- *            §25 that covers ~7200 counts against a 5952-count travel, so it
+ *            a measurement run that covers ~7200 counts against a 5952-count travel, so it
  *            deliberately runs into the end stop and parks there.  Every
  *            LM-EA9 does this at every power-on; it is the most thoroughly
  *            proven operation this mechanism has.
@@ -236,71 +236,116 @@ static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
  * because it is what drives it into the end stop at every power-on. */
 #define PARK_DUTY       800
 
-/* 1280 = 50%: the focus duty, raised from 800 on the user's instruction.
+/* 1280 = 50% of PER, the stock's own limiter.
  *
- * It is the TOP of the stock servo's own working range, not a number past it:
- * the stock's PID limiter at 0x8bfc clamps to +-1280 and floors the magnitude
- * at 200, so 200 (7.8%) .. 1280 (50%) is what every shipped LM-EA9 applies to
- * this mechanism.  This build has been running at the bottom half of that
- * range deliberately, to find out what the body objects to without risking the
- * hardware; 1280 is the other end of the same range, not new territory.
+ * RAISED TO 1664 (65%) AND PUT BACK.  The reason for raising it was sound --
+ * some places along the travel report `duty_first` 1280, pinned against the
+ * cap with the boost having nowhere to go, and those moves take a median of
+ * 370 ms against 186 for the rest.
  *
- * Flat, still: ramping is what made the body cut power (§31).
+ * But the cap is also what clamps the feedforward's first-step kick, which
+ * for any move over 163 counts is asking for far more than the cap anyway
+ * (2248 at 300 counts, 4009 at 2000).  So raising the ceiling raised the
+ * opening kick on EVERY move, not only the stuck ones, and the camera run
+ * that tried it came back slower across the board: median 402 ms against
+ * 208, and seven of twenty-six moves cut short by the body.
  *
- * What changes is the CRUISE speed.  The final approach does not: within
- * `approach_counts` of the target the duty steps down to `duty_approach`, so
- * the mechanism still arrives slowly and the braking distance that governs
- * overshoot is unchanged.  What a faster cruise does cost is deceleration room
- * inside that segment -- it enters the approach going faster and has the same
- * 500 counts to shed it in. */
+ * If it is worth trying again it should be as two ceilings -- the profile
+ * clamped here and only the breakaway boost allowed past -- and on its own,
+ * not alongside three other changes as it was in 5.03. */
 #define MOVE_DUTY       1280
 
-/* The speed range a Scan or a Drive is mapped into.  Both carry a speed the
- * body chose, in a unit the protocol does not define (autofocus.md 3.3, 3.4),
- * so the magnitude is spread across this servo's own working range rather than
- * converted into a velocity nobody has measured.  The floor is the stock
- * servo's own 200; below it the mechanism draws current without moving. */
-#define SCAN_DUTY_MIN   200
-#define SCAN_DUTY_MAX   MOVE_DUTY
+/* The speed range a Scan or a Drive is mapped into, in COUNTS PER SECOND.
+ *
+ * It used to be a duty range, because there was no velocity loop to give a
+ * speed to and no measurement to convert one into.  There is now: the body's
+ * magnitude maps onto a real speed and the loop delivers it, whatever duty
+ * that takes.  Both fields still carry a speed in a unit the protocol does
+ * not define (autofocus.md 3.3, 3.4), so the mapping is still a choice -- but
+ * it is now a choice of speeds rather than of forces.
+ *
+ * The floor is about what duty 250 produces, i.e. just above the measured
+ * breakaway band; below that no duty reliably moves anything. */
+#define SCAN_V_MIN      4000
+#define SCAN_V_MAX      40000
 
-/* No ramp: duty_start == duty_max and duty_step 0.  That is the point of this
- * run -- the stock does not ramp, and ramping is one of the few things that
- * differed between the build the body tolerated and the one it did not. */
+/* A scan must NOT slow down as it approaches the end of its window -- that is
+ * the one thing a constant-speed sweep may not do -- but the profile slows
+ * down near any target by construction.  Giving the scan a very short stop_ms
+ * keeps v_target above v_cruise until the last hundred counts or so, which is
+ * "constant speed, then stop" expressed in the same one law rather than as a
+ * special case bolted beside it. */
+#define SCAN_STOP_MS    8
+
+/* THE FOCUS CONFIGURATION.  Every constant here was measured on the
+ * adapter; see struct servo_cfg for which measurement, and why. */
 static const struct servo_cfg STOCK = {
-	.duty_start   = MOVE_DUTY,
-	.duty_max     = MOVE_DUTY,
-	.duty_step    = 0,
-	.ramp_ms      = 50,
-	.min_progress = 8,
-	.stall_ms     = 60,
-	.timeout_ms   = 3000,       /* ~24 counts/ms at this duty -> ~85 ms;
-	                               3 s is margin for real stiction, and a
-	                               timeout partway is harmless */
-	.tolerance    = 8,
-	.noise        = 8,
-	.pump         = pump,
+	/* Profile: v = remaining / 42 ms, the worst measured stopping distance
+	 * per count/ms, so friction alone can always stop it. */
+	.stop_ms   = 30,
+	/* 25 counts/ms.  The stock's staircase tops out at 22.7 and the
+	 * mechanism will do 61 at 65% duty, so this is deliberately near the
+	 * stock's own working speed rather than near the hardware's limit --
+	 * the first thing to raise if focus feels slow, and the easiest to
+	 * raise safely because the profile bounds the approach regardless. */
+	.v_cruise  = 25000,
 
-	/* The body may redirect a move in flight, as the stock does (EA9.md
-	 * §3.2).  16 legs and a 5 s ceiling bound it; a reversal goes through a
-	 * 20 ms brake rather than straight into reverse.  retarget_min matches
-	 * FOCUS_DEADBAND_COUNTS, so a repeated identical target is not a
-	 * redirection. */
-	.abort            = focus_abort,
-	.retarget         = focus_retarget,
-	.retarget_max     = 16,
-	.retarget_min     = 12,
-	.reverse_brake_ms = 20,
-	.total_ms         = 5000,
+	/* v = 0.0399 * (duty - 134) counts/ms, twenty points, both runs. */
+	.ff_div    = 40,
+	.ff_offset = 134,
+	.tau_ms    = 26,          /* the DRIVEN time constant, not the coast */
+	.kp_div    = 50,
+	/* Arrival also requires the mechanism to be slow enough that the
+	 * coast cannot carry it out of tolerance: 16 counts over a 33 ms
+	 * coast is 0.5 counts/ms. */
+	.v_arrive     = 500,
+	.arrive_steps = 2,
 
-	/* TODO: slow down before arriving.  At 800 the mechanism runs about 20
-	 * counts/ms and braking carries it 470-850 counts past the target
-	 * (NOTES.md §60); stepping once to 250 for the last 500 counts brings
-	 * that to about 70 in simulation.
+	/* THE BREAKAWAY SEARCH: climb 2.5% of PER per 5 ms step while stuck,
+	 * and drop the whole lot the instant the mechanism goes.
 	 *
-	 * Further tuning of these two numbers is the TODO; the segment itself
-	 * is on. */
-	.approach_counts = 500,
-	.duty_approach   = 250,
+	 * The cost of too gentle a climb, measured on a camera: 13 of 36 moves
+	 * needed a duty of 1200 or more to start, and those had a median of
+	 * 370 ms against 186 for the rest.  At 12 per step the search from the
+	 * feedforward's value up to 1200 takes 400 ms on its own.
+	 *
+	 * The climb rate has a broad optimum and both ends are worse --
+	 * 12/cycle gives 189 ms and leaves stalls, 128/cycle gives 170, and
+	 * anywhere from 40 to 100 gives 126-139.  64 is the middle of that
+	 * plateau rather than its argmax, which is 80: a flat optimum should
+	 * be taken at its centre, where being wrong about the mechanism costs
+	 * least.
+	 *
+	 * boost_max has to let the total reach duty_max from a short move's
+	 * small feedforward, so it is no longer 800. */
+	.boost_up   = 12,
+	.boost_down = 8,
+	.boost_max  = 800,
+
+	.duty_floor = 200,        /* below it, zero -- see servo.h */
+	.duty_max   = MOVE_DUTY,
+
+	.tolerance     = 12,
+	.settle_counts = 40,
+	.aim_ahead     = 0,       /* zero at this profile speed; see servo.h */
+	.noise     = 8,
+	.stall_ms  = 300,         /* must outlast the integral's climb */
+	.timeout_ms = 3000,
+	.total_ms   = 5000,
+	.pump       = pump,
+
+	/* Mid-move retargeting, as the stock does (EA9.md a measurement run).  retarget_min
+	 * matches FOCUS_DEADBAND_COUNTS so a repeated identical target is not
+	 * a redirection. */
+	.abort        = focus_abort,
+	.retarget     = focus_retarget,
+	.retarget_max = 16,
+	.retarget_min = 12,
+
+	/* Only a genuine slam goes through the brake: above 15 counts/ms the
+	 * old way.  Unconditionally it cost 362 counts of extra overrun. */
+	.reverse_brake_ms    = 20,
+	.reverse_brake_above = 15000,
 };
 
 static uint16_t g_home_trace[SERVO_TRACE_N];
@@ -315,7 +360,7 @@ static int      g_homed;
  * erases -- programming only clears bits -- so two parks writing the same page
  * leave the bitwise AND of both records, which is silent nonsense.  It happened:
  * boot 0 of the motor6 run reported duty_first = 0 alongside 2802 counts moved
- * in 60 ms, a speed never measured (NOTES.md §35). */
+ * in 60 ms, a speed never measured. */
 #define PARK_ATTEMPTS 2
 static unsigned g_park_n;
 static uint32_t g_pa23_at;
@@ -324,7 +369,7 @@ static uint32_t g_boot;
 static uint32_t g_flash_boots;
 static int      g_aborted;
 
-/* The build marker.  There is one configuration now (NOTES.md §53), but the
+/* The build marker.  There is one configuration now, but the
  * page stays: an ASCII tag in the image is greppable before flashing and
  * self-identifying in a dump, and the whole point of it was that a bare
  * numeric flag is indistinguishable in a binary. */
@@ -495,19 +540,29 @@ static void motor_home(void)
 /* The park keeps the stock homing duty.  It runs at shutdown, with the body
  * waiting on the acknowledgement, and it is not the thing under test. */
 static const struct servo_cfg PARK = {
-	.duty_start   = PARK_DUTY,
-	.duty_max     = PARK_DUTY,
-	.duty_step    = 0,
-	.ramp_ms      = 50,
-	.min_progress = 8,
-	.stall_ms     = 60,
-	.timeout_ms   = 1200,
-	.tolerance    = 16,          /* looser than a normal move: near enough */
-	.noise        = 8,
-	.pump         = pump,
+	.stop_ms    = 30,
+	.v_cruise   = 25000,
+	.ff_div     = 40,
+	.ff_offset  = 134,
+	.tau_ms     = 26,
+	.kp_div     = 50,
+	.v_arrive     = 900,      /* looser: the body is waiting */
+	.arrive_steps = 2,
+	.boost_up   = 12,
+	.boost_down = 8,
+	.boost_max  = 800,
+	.duty_floor = 200,
+	.duty_max   = PARK_DUTY,
+	.tolerance     = 32,          /* looser than a move: near enough, and the
+	                                body is waiting on the acknowledgement */
+	.settle_counts = 80,
+	.noise      = 8,
+	.stall_ms   = 300,
+	.timeout_ms = 1200,
+	.pump       = pump,
 };
 
-/* The tail of the stock shutdown (EA9.md §2.6), after the acknowledgement.
+/* The tail of the stock shutdown (EA9.md a measurement run), after the acknowledgement.
  *
  * WHY PA23 IS NOW REPLICATED.  I left it out before as "unexplained", and the
  * shutdown still hung.  What is now known: the body does send message 0x16, we
@@ -530,7 +585,7 @@ static const struct servo_cfg PARK = {
  * after announcing shutdown -- is better fixed in the protocol layer, where it
  * is reversible: after the acknowledgement the responder stays silent to
  * everything except a fresh session opener (emount.c).  Same observable
- * silence, no trap (NOTES.md §38).
+ * silence, no trap.
  */
 static void powerdown_signal(void)
 {
@@ -544,7 +599,7 @@ static void powerdown_signal(void)
 	 * waiting for the frame sync and before PA23.
 	 *
 	 * Reverted once on the user's objection that a deaf lens cannot be
-	 * woken (§38), and proposed again by them now.  The objection is
+	 * woken, and proposed again by them now.  The objection is
 	 * weaker than it was: the body is measured cutting power about 700 ms
 	 * after PA23, so the deaf window ends in power loss.  em_uart_send()
 	 * returns immediately once disabled -- it waits on DRE, which a
@@ -553,9 +608,9 @@ static void powerdown_signal(void)
 	 *
 	 * 2026-09-20: MEASURED, and it is load-bearing.  This step is the only
 	 * difference between an image that boots normally and one that stalls
-	 * on the next power-on -- a clean single-variable A/B on the a9 II
-	 * (NOTES.md §52).  Do not remove it again without a measurement; it was
-	 * dropped once on an argument and cost six hardware runs. */
+	 * on the next power-on -- a clean single-variable A/B on the a9 II.
+	 * Do not remove it again without a measurement; it was dropped once
+	 * on an argument and cost six hardware runs. */
 	em_uart_disable();
 
 	/* Wait for the frame sync to stop, as the stock does -- two consecutive
@@ -578,6 +633,7 @@ static void powerdown_signal(void)
 
 static void park_to_infinity(void)
 {
+
 	struct servo_result r;
 	uint32_t w[16];
 	int32_t  here;
@@ -1047,16 +1103,10 @@ static void focus_scan(const struct em_focus_cmd *c)
 		struct servo_cfg sweep = STOCK;
 		uint16_t         mag   = c->scan_speed & 0x7Fu;
 
-		sweep.duty_start = SCAN_DUTY_MIN
-		                   + (uint16_t)((uint32_t)mag
-		                                * (SCAN_DUTY_MAX - SCAN_DUTY_MIN)
-		                                / 0x7Fu);
-		sweep.duty_max   = sweep.duty_start;
-		/* A sweep is meant to be at CONSTANT speed across the window,
-		 * so it does not get the approach segment a positioning move
-		 * uses -- slowing down before the end is exactly what a scan
-		 * must not do. */
-		sweep.approach_counts = 0;
+		sweep.v_cruise = SCAN_V_MIN
+		                 + (int32_t)((uint32_t)mag
+		                             * (SCAN_V_MAX - SCAN_V_MIN) / 0x7Fu);
+		sweep.stop_ms  = SCAN_STOP_MS;
 		outcome = focus_run(finish, focus_counts_to_em06(finish), &sweep);
 	}
 
@@ -1086,10 +1136,10 @@ static void focus_drive(const struct em_focus_cmd *c)
 	if (mag > 0x7FFFu) {
 		mag = 0x7FFFu;
 	}
-	drv.duty_start = SCAN_DUTY_MIN
-	                 + (uint16_t)((uint32_t)mag
-	                              * (SCAN_DUTY_MAX - SCAN_DUTY_MIN) / 0x7FFFu);
-	drv.duty_max   = drv.duty_start;
+	drv.v_cruise = SCAN_V_MIN
+	               + (int32_t)((uint32_t)mag
+	                           * (SCAN_V_MAX - SCAN_V_MIN) / 0x7FFFu);
+	drv.stop_ms  = SCAN_STOP_MS;
 
 	if (focus_run(want, focus_counts_to_em06(want), &drv) != SERVO_ABORTED) {
 		/* Drive has no end of its own short of the limit, so its event
@@ -1216,9 +1266,9 @@ int main(void)
 	 * milliseconds" is an electrical hazard, not a style question.  The
 	 * stock drives them within microseconds of reset.
 	 *
-	 * Measured to make no difference to boot or shutdown on the a9 II
-	 * (NOTES.md §52), so this is chosen on principle, not on evidence --
-	 * which is why it is one ordering and not a switch. */
+	 * Measured to make no difference to boot or shutdown on the a9 II, so
+	 * this is chosen on principle, not on evidence -- which is why it is
+	 * one ordering and not a switch. */
 	board_init_pins();
 
 	clock_init();
@@ -1351,7 +1401,7 @@ int main(void)
 		 * arrive on every proper power-off it was a second, redundant
 		 * trigger for the same action -- and it fired in builds that
 		 * were supposed to have no park at all, which quietly ruined
-		 * the control in §46.
+		 * the control in a measurement run.
 		 *
 		 * The tick pages that measured how long the adapter stayed
 		 * powered afterwards are gone with the rest of the shut-down

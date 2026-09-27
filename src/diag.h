@@ -3,10 +3,16 @@
 #include <stdint.h>
 
 /* A progress trail in flash, so a run that produces no visible motion can still
- * be read back over USB afterwards.  Eight erased rows at 0x1f000, 64-byte
- * pages; each page is written exactly once, so whichever pages are present says
- * how far the firmware got before it stopped.  Dump the region with
- *   ea9flash.py --dump 0x1f000:0x800 */
+ * be read back over USB afterwards.  FOUR slots of eight erased rows each at
+ * DIAG_BASE, 64-byte pages; each page is written exactly once, so whichever
+ * pages are present says how far the firmware got before it stopped.  Dump the
+ * slots AND the tally row that follows them with
+ *
+ *   ea9flash.py --dump 0x16000:0x2100
+ *
+ * (0x16000 + 4 * 0x800 of slots, then 0x100 for the tally.)  The address here
+ * used to say 0x1f000 and 0x800, from when there was one slot somewhere else;
+ * following it dumps erased flash and decodes as an empty run. */
 
 /* TWO trail slots, alternating by boot.
  *

@@ -5,7 +5,8 @@
 # linked at 0x5000 and flashed there by tools/ea9flash.py.
 #
 #   make            build build/ea9-rebuild.bin
-#   make hosttest   run the host test suite (emount, servo, init)
+#   make hosttest   run the host test suite (emount, servo, no-body,
+#                   motor bench, init, focus map/distance/prediction)
 #   make clean
 #
 # ONE configuration.  The noshut / nopa23 / nobusoff / pins-early / dry-run
@@ -127,6 +128,11 @@ hosttest: src/emount_packets.c
 	  tools/hosttest/test_servo.c tools/hosttest/sim_motor.c \
 	  src/servo.c -o $(HOSTTEST)/test_servo
 	@$(HOSTTEST)/test_servo
+	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
+	  tools/hosttest/test_nobody.c tools/hosttest/shim.c \
+	  src/emount.c src/emount_packets.c -o $(HOSTTEST)/test_nobody
+	@$(HOSTTEST)/test_nobody nobody
+	@$(HOSTTEST)/test_nobody slowbody
 	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
 	  tools/hosttest/test_init.c tools/hosttest/shim.c \
 	  src/emount.c src/emount_packets.c -o $(HOSTTEST)/test_init

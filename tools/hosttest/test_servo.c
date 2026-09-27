@@ -5,11 +5,13 @@
  */
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "board.h"
 #include "servo.h"
 
 extern double sim_pos;
-extern int sim_stop_lo, sim_stop_hi, sim_stiction, sim_encoder_stuck, sim_noise;
+extern int sim_stop_lo, sim_stop_hi, sim_breakaway, sim_kinetic, sim_kinetic_rev, sim_encoder_stuck, sim_noise;
+extern int sim_stick_lo, sim_stick_hi, sim_stick_extra;
 extern double sim_encoder_gain;
 extern uint32_t host_millis;
 void sim_reset(void);
@@ -27,12 +29,34 @@ static void fail(const char *fmt, ...)
 	failures++;
 }
 
-/* The same numbers src/main.c uses. */
+/* The same numbers src/main.c uses, from the bench measurements. */
 static const struct servo_cfg SAFE = {
-	.duty_start = 2560 * 4 / 100, .duty_max = 2560 * 16 / 100,
-	.duty_step  = 2560 * 2 / 100, .ramp_ms = 20, .min_progress = 8,
-	.stall_ms = 40,
-	.timeout_ms = 400, .tolerance = 8, .noise = 8, .pump = count_pump,
+	.stop_ms   = 30,
+	.v_cruise  = 25000,
+	.ff_div    = 40,
+	.ff_offset = 134,
+	.tau_ms    = 26,
+	.kp_div    = 50,
+	.v_arrive  = 500,
+	.arrive_steps = 2,
+	.boost_up   = 12,
+	.boost_down = 8,
+	.boost_max  = 800,
+	.duty_floor = 200,
+	.duty_max   = 2560 * 50 / 100,
+	.tolerance = 12, .settle_counts = 40, .aim_ahead = 0,
+	.noise     = 8,
+	.stall_ms  = 300,
+	/* 3000, matching src/main.c.  It was 1200, which is a value the
+	 * firmware does not use -- and at e/30 against the worst breakaway
+	 * the ramp measured, a 50-count move takes 1793 ms and was failing
+	 * here as a TIMEOUT that the shipped configuration would never
+	 * produce.  A test config that differs from the shipped one tests
+	 * something nobody runs. */
+	.timeout_ms = 3000,
+	.pump      = count_pump,
+	.reverse_brake_ms    = 20,
+	.reverse_brake_above = 15000,
 };
 static const char *const NAME[] = { "OK", "STALL", "TIMEOUT", "RUNAWAY",
 				    "WRONG_WAY", "ABORTED" };
@@ -78,107 +102,276 @@ static void check_holds_after_move(void)
 	}
 }
 
-/* The whole point of the approach segment: arrive slowly enough that the brake
- * stops the mechanism near the target rather than hundreds of counts past. */
-static void check_overshoot(void)
+/* ARRIVING.  The one thing the old controller could not do.
+ *
+ * It drove flat out to the target and stopped, and stopping takes 30 ms of
+ * coasting whatever you do with the bridge -- so every move overshot by
+ * hundreds of counts and the body spent its time correcting (a measurement run
+ * measured 334-555 on hardware; this simulator, once calibrated to the
+ * mechanism, reproduces 337-514).
+ *
+ * The new law never asks for a speed the remaining distance cannot absorb, so
+ * there is nothing left to coast.  Across sizes and both directions, because
+ * testing one size and one direction is how the old suite missed that a whole
+ * move was running in the approach segment. */
+static void check_arrival(void)
 {
-	/* Flat drive, no ramp -- the shape the firmware ships. */
-	struct servo_cfg fast = {
-		.duty_start = 800, .duty_max = 800, .duty_step = 0,
-		.ramp_ms = 50, .min_progress = 8, .stall_ms = 60,
-		.timeout_ms = 3000, .tolerance = 8, .noise = 8,
-		.pump = count_pump,
-	};
-	struct servo_cfg slow = fast;
-	struct servo_cfg full = fast;
-	struct servo_result r;
-	double over_fast, over_slow, over_full;
+	static const int32_t SIZE[] = { 50, 100, 200, 500, 1000, 3000 };
+	unsigned i, d;
+	int32_t  worst_over = 0, worst_err = 0;
+	/* Signed, IN THE DIRECTION OF TRAVEL: negative means it came up
+	 * short.  Summed over every case, because the failure this exists to
+	 * catch is a bias, not a spread -- see below. */
+	int32_t  bias = 0;
+	int      n_bias = 0;
+	uint32_t total_ms = 0;
 
-	slow.approach_counts = 500;
-	slow.duty_approach   = 250;
+	for (d = 0; d < 2; d++) {
+		for (i = 0; i < sizeof SIZE / sizeof SIZE[0]; i++) {
+			struct servo_cfg cfg = SAFE;
+			struct servo_result r;
+			int32_t want = d ? -SIZE[i] : SIZE[i];
+			int32_t err, over;
+			int k;
 
-	/* The focus duty this build now uses: 1280 = 50%, the top of the stock
-	 * servo's own range.  Measured beside 800 because the whole reason the
-	 * approach segment exists is that overshoot grows with cruise speed --
-	 * if raising the duty undid it, this is where it would show. */
-	full = slow;
-	full.duty_start = 1280;
-	full.duty_max   = 1280;
+			sim_reset();
+			servo_move_rel(want, &cfg, &r);
+			/* Let whatever it is doing finish before judging. */
+			for (k = 0; k < 300; k++) {
+				(void)host_tick();
+			}
 
-	sim_reset();
-	servo_move_rel(4000, &fast, &r);
-	for (int i = 0; i < 400; i++) (void)host_tick();
-	over_fast = sim_pos - 4000;
+			err  = (int32_t)sim_pos - want;
+			over = d ? -err : err;
+			bias += over;
+			n_bias++;
+			total_ms += r.ms;
+			if (err < 0) {
+				err = -err;
+			}
+			if (err > worst_err) {
+				worst_err = err;
+			}
+			if (over > worst_over) {
+				worst_over = over;
+			}
 
-	sim_reset();
-	servo_move_rel(4000, &slow, &r);
-	for (int i = 0; i < 400; i++) (void)host_tick();
-	over_slow = sim_pos - 4000;
-
-	sim_reset();
-	servo_move_rel(4000, &full, &r);
-	for (int i = 0; i < 400; i++) (void)host_tick();
-	over_full = sim_pos - 4000;
-
-	printf("  overshoot: 800 flat %.0f counts, 800 + approach %.0f, "
-	       "1280 + approach %.0f\n", over_fast, over_slow, over_full);
-
-	/* The approach segment must still do its job at the higher duty.  A
-	 * cruise that arrives too fast to decelerate inside approach_counts
-	 * would give back everything the segment was added for. */
-	if (over_full > over_fast) {
-		fail("at duty 1280 the approach segment no longer helps: "
-		     "%.0f counts, worse than flat 800 (%.0f)",
-		     over_full, over_fast);
-	}
-
-	/* The other direction.  Testing only one hid a missing absolute value
-	 * on the remaining distance: with a negative move the comparison is
-	 * true from the first iteration, so the WHOLE move runs at the approach
-	 * duty.  It still arrives, and still arrives gently, so every overshoot
-	 * assertion passes -- what gives it away is the time. */
-	{
-		struct servo_result rn;
-		uint16_t flat_ms;
-
-		sim_reset();
-		servo_move_rel(-4000, &fast, &rn);
-		flat_ms = rn.ms;
-
-		sim_reset();
-		servo_move_rel(-4000, &slow, &rn);
-		for (int i = 0; i < 400; i++) (void)host_tick();
-		if (sim_pos + 4000 < -150 || sim_pos + 4000 > 150) {
-			fail("negative move ended %.0f counts off target",
-			     sim_pos + 4000);
-		}
-		if (rn.ms > flat_ms * 2 + 200) {
-			fail("negative move took %u ms against %u flat -- the "
-			     "approach segment is engaging for the whole move",
-			     rn.ms, flat_ms);
+			if (r.outcome != SERVO_OK) {
+				fail("%+d counts: %s, not OK",
+				     (int)want, NAME[r.outcome]);
+			}
+			/* The tolerance is 16, but the mechanism cannot be
+			 * placed finer than one control step at the floor
+			 * duty -- about 13 counts -- and then it coasts.  60
+			 * is the honest bar for a powered move, and is 15
+			 * PROTOCOL units inside the body's own +-70 scatter. */
+			if (err > 60) {
+				fail("%+d counts ended %d off target",
+				     (int)want, (int)err);
+			}
 		}
 	}
-	if (over_slow >= over_fast) {
-		fail("the approach segment did not reduce overshoot (%.0f vs %.0f)",
-		     over_slow, over_fast);
+	printf("  arrival: worst error %d counts, worst overshoot %d, "
+	       "mean bias %+d, %u ms over %d moves\n",
+	       (int)worst_err, (int)worst_over, (int)(bias / n_bias),
+	       total_ms, n_bias);
+
+	/* HOW LONG IT TAKES, which nothing checked until the first autofocus
+	 * run said the lens was visibly slow.
+	 *
+	 * Every constant in this controller had a guard except the one the
+	 * user could actually perceive.  Slackening the profile back to e/60
+	 * nearly trebles this and no other assertion here notices.
+	 *
+	 * 2200 sits between the settings that matter: 1374 ms at the shipped
+	 * e/22, 1529 at e/30, 4089 at e/60.  Loose enough to admit e/30 --
+	 * that is a defensible choice, not a regression -- and tight enough
+	 * to reject the one that made the lens visibly crawl. */
+	if (total_ms > 2200) {
+		fail("%u ms for %d moves -- the approach profile has been "
+		     "slowed; a lens that arrives late is the complaint this "
+		     "controller exists to answer", total_ms, n_bias);
 	}
-	if (over_slow > 150) {
-		fail("still %.0f counts past the target after the approach segment",
-		     over_slow);
+
+	/* And the worst single error, which the per-move check at 60 is too
+	 * loose to catch.  A wider arrival band no longer shows up as a bias
+	 * -- the faster profile carries the mechanism through it rather than
+	 * stopping at its edge -- so it shows up here instead, at 29 counts
+	 * against the 11 the shipped configuration gives. */
+	if (worst_err > 20) {
+		fail("worst arrival error %d counts", (int)worst_err);
+	}
+
+	/* NO SYSTEMATIC BIAS.
+	 *
+	 * A move approaches its target from one side, so anything that lets
+	 * it stop early stops it early EVERY TIME and in the same direction.
+	 * On hardware, with the arrival band set to 32, all twenty-two moves
+	 * came up short and a 40-count move could finish after travelling
+	 * eight -- and the suite passed, because it only ever looked at the
+	 * worst absolute error.
+	 *
+	 * A bias is worse than a spread of the same size: the body has to
+	 * correct it on every single command, which is indistinguishable
+	 * from the lens not going where it was told. */
+	/* The threshold is 9, not zero and not the 16 it was.
+	 *
+	 * A move stops at the near edge of the arrival band, so before
+	 * cfg->aim_ahead existed the bias was the band width -- about -12,
+	 * and narrowing the band only bought a count or two while trebling
+	 * the time.  Aiming a band's width beyond the target cancels the
+	 * geometry and leaves -4, which is the pulse-and-coast endgame dying
+	 * against Coulomb friction: the mechanism's resolution, not a tuning
+	 * choice.
+	 *
+	 * 9 sits between the two, so removing the aim offset fails here
+	 * rather than passing quietly at -12. */
+	if (bias / n_bias > 9 || bias / n_bias < -9) {
+		fail("mean error %+d counts across %d moves -- that is a BIAS, "
+		     "not scatter; the servo is stopping early in the "
+		     "direction of travel", (int)(bias / n_bias), n_bias);
+	}
+
+	/* The number this replaces: 337-514 counts of overshoot. */
+	if (worst_over > 120) {
+		fail("worst overshoot %d counts -- the profile is not "
+		     "taking the speed away before the target",
+		     (int)worst_over);
 	}
 }
 
-/* The body must be told where the mechanism ENDED UP, not just where it was on
- * the last iteration before the stop condition fired.  Without a report after
- * the loop the final position waits for the main loop to come round, and the
- * frames sent in between carry a position the lens has already left -- the same
- * staleness the in-loop pump was added to fix, just moved to the end. */
+/* A STIFF SPOT PART WAY ALONG, which is where the boost turns into a lurch.
+ *
+ * One +500 move on the camera accelerated to 387, slid back 25 counts,
+ * crawled for 280 ms while the boost wound the duty up to 526, broke free and
+ * shot 84 counts past the target -- and then the servo declared arrival AT THE
+ * TOP OF THE ARC, where the mechanism was momentarily stationary with a hard reverse
+ * drive already applied.  It let go and ran another 110 counts backwards,
+ * finishing 82 short.
+ *
+ * Two faults in one move: a mechanism that cannot be expected to move
+ * smoothly, and an arrival test that cannot tell standing still from having
+ * stopped.  This case holds both. */
+static void check_stiff_spot(void)
+{
+	struct servo_cfg cfg = SAFE;
+	struct servo_result r;
+	double peak;
+	int i;
+
+	cfg.duty_max = 1280;
+
+	sim_reset();
+	/* Positioned so it breaks free CLOSE TO THE TARGET, which is what
+	 * makes the mechanism swing past and turn round near it -- and a
+	 * turnaround is the only place the arrival test can mistake standing
+	 * still for having stopped.  A stiff spot earlier in the travel is
+	 * survivable without the dwell and proves nothing about it. */
+	sim_stick_lo = 380; sim_stick_hi = 470; sim_stick_extra = 400;
+	servo_move_rel(500, &cfg, &r);
+	peak = sim_pos;
+	for (i = 0; i < 400; i++) {
+		(void)host_tick();
+		if (sim_pos > peak) {
+			peak = sim_pos;
+		}
+	}
+
+	if (r.outcome != SERVO_OK) {
+		fail("stiff spot: %s -- the boost did not get it through",
+		     NAME[r.outcome]);
+	}
+	/* WHERE IT STOPS MUST BE WHERE IT ARRIVED.  The hardware failure was
+	 * not the lurch -- it is a mechanism, it lurches -- but the servo
+	 * letting go mid-reversal and the mechanism then travelling on. */
+	/* 25, which is between the two behaviours rather than outside both:
+	 * with the dwell in place the mechanism runs on 10 counts past where
+	 * it stops being driven, and without it 37.  A threshold of 40 admits
+	 * them both and guards nothing -- which is what it did. */
+	if (peak - sim_pos > 25) {
+		fail("stiff spot: peaked at %.0f and ended at %.0f -- it let "
+		     "go while still moving", peak, sim_pos);
+	}
+	if (sim_pos - 500 > 60 || sim_pos - 500 < -60) {
+		fail("stiff spot: ended %.0f counts off target", sim_pos - 500);
+	}
+}
+
+/* BREAKAWAY IS A DISTRIBUTION, so the integral has to find it every time.
+ *
+ * Twelve ramp trials on the camera gave 180..340.  A fixed
+ * duty cannot serve that range, which is why the old duty_approach of 250
+ * stalled on the tail.  The integral climbs until the mechanism goes; this
+ * checks it does so across the whole measured band and beyond it. */
+static void check_breakaway_band(void)
+{
+	/* Up to 420 only.  Camera runs have found spots on the real helicoid
+	 * that report duty_first 1280 -- pinned against the ceiling -- and a
+	 * case at 1300 was briefly in this list while duty_max was 65%.
+	 * That ceiling is back at the stock's 1280, so a 1300-count
+	 * breakaway is now a KNOWN LIMITATION rather than something to
+	 * assert against: the mechanism cannot be freed from such a spot and
+	 * the move will stall until the body re-commands it. */
+	static const int band[] = { 180, 210, 240, 280, 340, 420 };
+	unsigned i;
+
+	for (i = 0; i < sizeof band / sizeof band[0]; i++) {
+		struct servo_cfg cfg = SAFE;
+		struct servo_result r;
+
+		sim_reset();
+		sim_breakaway = band[i];
+		servo_move_rel(400, &cfg, &r);
+
+		if (r.outcome != SERVO_OK) {
+			fail("breakaway %d: %s -- the integral did not get it "
+			     "moving", band[i], NAME[r.outcome]);
+		}
+		if (r.duty_first && (int)r.duty_first < band[i] - 40) {
+			fail("breakaway %d: reported moving at duty %u, which "
+			     "is below what it takes", band[i], r.duty_first);
+		}
+	}
+
+	/* AND THE CASE THE BOOST ACTUALLY EXISTS FOR.
+	 *
+	 * A move long enough to command real speed gets a large drive on its
+	 * very first control step -- the reference jumps from nothing to the
+	 * cruise speed, which asks for an acceleration the clamp turns into
+	 * one step at duty_max -- and that alone happens to clear the whole
+	 * breakaway band.  So the cases above pass with the boost disabled,
+	 * which makes them no test of it: mutating boost_up to zero cost one
+	 * failure out of the entire suite.
+	 *
+	 * A SHORT move gets no such kick.  At 40 counts the profile asks for
+	 * 0.95 counts/ms, the first step reaches about duty 270, and a
+	 * mechanism that needs 340 simply sits there until something climbs.
+	 * That something is the boost, and this is where it is tested. */
+	{
+		struct servo_cfg cfg = SAFE;
+		struct servo_result r;
+
+		sim_reset();
+		sim_breakaway = 340;      /* the worst trial measured */
+		servo_move_rel(40, &cfg, &r);
+
+		if (r.outcome != SERVO_OK) {
+			fail("a 40-count move against a 340 breakaway ended "
+			     "%s -- nothing climbed the duty to meet it",
+			     NAME[r.outcome]);
+		}
+	}
+}
+
 static void check_reports_final_position(void)
 {
 	struct servo_cfg cfg = {
-		.duty_start = 800, .duty_max = 800, .duty_step = 0,
-		.ramp_ms = 50, .min_progress = 8, .stall_ms = 60,
-		.timeout_ms = 3000, .tolerance = 8, .noise = 8,
+		.stop_ms = 30, .v_cruise = 25000,
+		.ff_div = 40, .ff_offset = 134, .tau_ms = 26, .kp_div = 50, .v_arrive = 500, .arrive_steps = 2,
+		.boost_up = 12, .boost_down = 8, .boost_max = 800,
+		.duty_floor = 200, .duty_max = 800,
+		.stall_ms = 300,
+		.timeout_ms = 3000, .tolerance = 12, .settle_counts = 40, .aim_ahead = 0, .noise = 8,
 		.pump = count_pump,
 	};
 	struct servo_result r;
@@ -212,7 +405,7 @@ static int     rt_invert_encoder;
 static int     rt_give_up_after; /* stop firing after this many calls */
 static int32_t rt_break_below;   /* invert the encoder once pos drops here */
 static int     rt_coast_forever; /* motor loses authority; momentum does not */
-extern int     sim_stiction;
+extern int     sim_breakaway, sim_kinetic, sim_kinetic_rev;
 extern int     sim_encoder_stuck;
 extern double  sim_encoder_gain;
 extern double  sim_brake_decay;
@@ -257,8 +450,14 @@ static uint8_t rt_hook(int32_t *target)
 		sim_encoder_gain = -1.0;
 	}
 	if (rt_coast_forever) {
-		sim_stiction    = 2000;   /* no duty we apply can move it */
-		sim_brake_decay = 1.0;    /* and nothing slows it down     */
+		/* BOTH friction numbers.  Setting only the breakaway left the
+		 * motor its full authority, because the mechanism was already
+		 * moving and a moving mechanism is governed by the kinetic
+		 * figure -- so the test that was meant to remove the drive
+		 * entirely removed nothing, and passed. */
+		sim_breakaway   = 2000;
+		sim_kinetic = 2000; sim_kinetic_rev = 2000;   /* no duty we apply can move it */
+		sim_brake_decay = 1.0;    /* and nothing slows it down    */
 	}
 	return 1;
 }
@@ -266,11 +465,12 @@ static uint8_t rt_hook(int32_t *target)
 static struct servo_cfg rt_cfg(void)
 {
 	struct servo_cfg c = {
-		.duty_start = 800, .duty_max = 800, .duty_step = 0,
-		.ramp_ms = 50, .min_progress = 8, .stall_ms = 60,
-		.timeout_ms = 3000, .tolerance = 8, .noise = 8,
+		.stop_ms = 30, .v_cruise = 25000,
+		.ff_div = 40, .ff_offset = 134, .tau_ms = 26, .kp_div = 50, .v_arrive = 500, .arrive_steps = 2,
+		.boost_up = 12, .boost_down = 8, .boost_max = 800,
+		.duty_floor = 200, .duty_max = 800, .stall_ms = 300,
+		.timeout_ms = 3000, .tolerance = 12, .settle_counts = 40, .aim_ahead = 0, .noise = 8,
 		.pump = count_pump,
-		.approach_counts = 500, .duty_approach = 250,
 		.retarget = rt_hook, .retarget_max = 16, .retarget_min = 12,
 		.reverse_brake_ms = 20, .total_ms = 5000,
 	};
@@ -375,6 +575,153 @@ static void check_no_abort_hook(void)
 	servo_move_rel(2000, &cfg, &r);
 	if (r.outcome != SERVO_OK) {
 		fail("no abort hook: ended %s, expected OK", NAME[r.outcome]);
+	}
+}
+
+/* THE SAME MOVES, AGAINST A MECHANISM THAT DOES NOT WANT TO START.
+ *
+ * check_arrival runs at the simulator's default breakaway of 210, which is
+ * the easy end of what the ramp measured -- and at that end the breakaway
+ * search barely matters, so nothing there protected it.  Mutating the climb
+ * rate back to its old value, or removing the first-step kick, failed not one
+ * assertion in the whole suite.
+ *
+ * The real mechanism is not that: on one camera run 13 of 36 moves needed a
+ * duty of 1200 or more to start, and those took a median of 370 ms against
+ * 186 for the rest.  536 is the worst the ramp ever measured directly.
+ *
+ * Times at 536, for the six sizes below, both directions:
+ *     old search (+12/cycle, bleed, no kick)   3424 ms, worst error 17
+ *     as shipped (+64, drop on move, kick)     1514 ms, worst error  9
+ */
+static void check_arrival_stiff(void)
+{
+	static const int32_t SIZE[] = { 50, 100, 200, 500, 1000, 3000 };
+	unsigned i, d;
+	uint32_t total_ms = 0;
+	int32_t  worst_err = 0;
+
+	for (d = 0; d < 2; d++) {
+		for (i = 0; i < sizeof SIZE / sizeof SIZE[0]; i++) {
+			struct servo_cfg cfg = SAFE;
+			struct servo_result r;
+			int32_t want = d ? -SIZE[i] : SIZE[i];
+			int32_t err;
+			int k;
+
+			sim_reset();
+			sim_breakaway = 536;
+			servo_move_rel(want, &cfg, &r);
+			for (k = 0; k < 300; k++) {
+				(void)host_tick();
+			}
+			if (r.outcome != SERVO_OK) {
+				fail("stiff %+d counts: %s",
+				     (int)want, NAME[r.outcome]);
+			}
+			total_ms += r.ms;
+			err = (int32_t)sim_pos - want;
+			if (err < 0) {
+				err = -err;
+			}
+			if (err > worst_err) {
+				worst_err = err;
+			}
+		}
+	}
+	printf("  stiff:   worst error %d counts, %u ms over 12 moves\n",
+	       (int)worst_err, total_ms);
+
+	/* NO TIMING ASSERTION HERE, and that is a deliberate retreat.
+	 *
+	 * A bound was put on this when the fast breakaway search went in, and
+	 * the search has since been reverted -- it was much worse on the
+	 * camera.  Re-measuring what is left shows why a bound would
+	 * be worthless anyway: against a stiff mechanism the total is not a
+	 * monotonic function of the profile at all.
+	 *
+	 *     e/22  2772 ms     e/26  3684     e/30  5283     e/60  4656
+	 *
+	 * The endgame is a pulse-and-coast and a small change in where the
+	 * pulses land changes how many there are.  A threshold over that is
+	 * a threshold over noise.  What this case still checks is the part
+	 * that IS stable: a stiff mechanism must still be reached, and
+	 * reached accurately.
+	 *
+	 * The timing guard that does work lives in check_arrival, where the
+	 * mechanism is the easy one and e/60 shows up as 4089 ms against
+	 * 1409. */
+	/* 25, not 20.  Against the worst breakaway the ramp measured, the
+	 * shipped e/30 lands within 22 counts; e/22 and e/26 manage 14 and
+	 * 19.  The slower profile spends longer creeping through the dead
+	 * zone at the end and picks up a few more counts of error doing it.
+	 * That is a real cost of the setting, chosen on how it shoots, and
+	 * the bound records it rather than hiding it. */
+	if (worst_err > 25) {
+		fail("stiff: worst arrival error %d counts", (int)worst_err);
+	}
+
+}
+
+/* IN POSITION IS NOT ARRIVED -- and this case can no longer prove it.
+ *
+ * The rule is real and was found on hardware: a move
+ * overshot to 7 counts past the aim, the loop was already driving it back,
+ * and at the top of the arc the measured speed was momentarily nothing.  The
+ * servo read position-in-band and speed-below-threshold, declared arrival,
+ * let go, and the mechanism carried on backwards for another 110 counts.
+ * `arrive_steps` requires the condition to hold for two consecutive control
+ * steps, which a turnaround cannot do.
+ *
+ * WHAT THIS CASE NOW SHOWS IS THAT IT CANNOT BE ISOLATED, which is worth a
+ * test of its own kind.  The tau feedforward handles the same situation, and
+ * handles it so well that the dwell is never reached: move the target to 60
+ * counts ahead of a mechanism at cruise and the derivative term swings the
+ * output to full reverse, stopping it 3 counts past -- with the dwell or
+ * without it.  Disabling the feedforward does not help either, because then
+ * the drive is too weak to overshoot at all.
+ *
+ * So the dwell is a second line of defence behind a first line that is
+ * currently very effective, and the suite has no scenario that reaches past
+ * the first.  It is kept on hardware evidence, not on simulation: the stiff
+ * spots that produced a measurement run's overshoot are not something this model makes.
+ *
+ * The case is kept as a regression on the OUTCOME -- a move cut short at
+ * speed must still end up in the right place -- which is what it can honestly
+ * assert.
+ */
+static void check_shortened_at_speed(void)
+{
+	struct servo_cfg cfg = rt_cfg();
+	struct servo_result r;
+	double peak;
+	int i;
+
+	cfg.duty_max = 1280;
+
+	sim_reset();
+	rt_arm(1200, 1260);          /* 60 counts ahead, at cruise */
+	servo_move_rel(3000, &cfg, &r);
+	peak = sim_pos;
+	for (i = 0; i < 400; i++) {
+		(void)host_tick();
+		if (sim_pos > peak) {
+			peak = sim_pos;
+		}
+	}
+
+	if (!rt_count) {
+		fail("shortened move: the hook never fired");
+	}
+	if (r.outcome != SERVO_OK) {
+		fail("a move cut short at speed ended %s", NAME[r.outcome]);
+	}
+	if (sim_pos - 1260 > 60 || sim_pos - 1260 < -60) {
+		fail("a move cut short at speed ended %.0f counts out",
+		     sim_pos - 1260);
+	}
+	if (peak - 1260 > 400) {
+		fail("and overshot by %.0f counts on the way", peak - 1260);
 	}
 }
 
@@ -541,10 +888,18 @@ static void check_retarget_resets_the_deadline(void)
 	 * longer than the rest of the move, which would put the two legs on
 	 * wildly different clocks and make any single deadline meaningless as a
 	 * test of whether the deadline was reset. */
-	cfg.approach_counts = 0;
-	cfg.timeout_ms = 120;      /* shorter than the whole two-leg journey */
+	/* Shorter than the whole two-leg journey, longer than either leg.
+	 *
+	 * Re-sized twice now.  120 ms was the old bang-bang's, which arrived
+	 * fast and overshot.  320 was the profile's, before the endgame
+	 * became a pulse-and-coast -- at which point a single 1500-count leg
+	 * took 367 ms and the whole two-leg journey only 408, so the test had
+	 * almost no window left to discriminate in and failed on the first
+	 * leg.  Redirecting FURTHER out gives the second leg real length:
+	 * ~350 ms for the first, ~600 for the second, ~950 together. */
+	cfg.timeout_ms = 700;
 	sim_reset();
-	rt_arm(1500, 3000);
+	rt_arm(1500, 4000);
 	servo_move_rel(2000, &cfg, &r);
 
 	if (!rt_count) {
@@ -605,54 +960,56 @@ static void check_reverse_brake_is_not_a_stall(void)
 	sim_brake_decay = 0.5;
 	rt_arm(1500, 300);
 	servo_move_rel(3000, &cfg, &r);
-	sim_brake_decay = 0.955;
 
+
+	if (getenv("SV_DEBUG")) {
+		printf("  [rb] outcome %s ms %u end %d target %d retargets %u\n",
+		       NAME[r.outcome], r.ms, r.end, r.target, r.retargets);
+	}
 	if (r.outcome == SERVO_STALL) {
 		fail("a %u ms reverse brake against a %u ms stall window was "
 		     "reported as a stall", cfg.reverse_brake_ms, cfg.stall_ms);
 	}
 }
 
-/* Under a RAMPING configuration, a redirected move gets a fresh ramp: the duty
- * goes back to duty_start, so the progress reference it is measured against has
- * to go back too.  Left stale, the first comparison sees the whole previous leg
- * as "progress", declines to raise the duty, and the mechanism sits below
- * stiction until the stall detector gives up. */
-static void check_retarget_restarts_the_ramp(void)
+/* A redirect while the mechanism is still stuck must not lose the integral's
+ * work.  The body re-issues a target every 16 ms or so, and a mechanism that
+ * will not break loose has to keep accumulating force across the whole burst
+ * rather than starting from the feedforward each time -- which is exactly why
+ * the stock never resets its accumulator (servo.md a measurement run) and why this one does
+ * not reset it on a retarget either. */
+static void check_retarget_keeps_the_integral(void)
 {
 	struct servo_cfg cfg = rt_cfg();
 	struct servo_result r;
 
-	cfg.duty_start      = 100;     /* below the simulated stiction of 150 */
-	cfg.duty_max        = 800;
-	cfg.duty_step       = 100;
-	cfg.ramp_ms         = 20;
-	cfg.approach_counts = 0;
+	cfg.duty_max = 800;
 
 	sim_reset();
-	rt_arm(1500, 3000);
+	sim_breakaway = 400;           /* well past the feedforward's reach */
+	rt_arm(20, 3000);              /* redirect almost immediately */
 	servo_move_rel(2000, &cfg, &r);
 
 	if (!rt_count) {
-		fail("ramp restart: the hook never fired");
+		fail("integral retention: the hook never fired");
 	}
 	if (r.outcome != SERVO_OK) {
-		fail("a redirected move under a ramp ended %s -- the ramp's "
-		     "progress reference was not restarted", NAME[r.outcome]);
+		fail("a redirect while still stuck ended %s -- the integral "
+		     "was thrown away and had to start again", NAME[r.outcome]);
 	}
 }
 
-/* Redirecting out of the approach segment must put the approach segment back
- * in play for the new target.  Otherwise the mechanism runs the whole new leg
- * flat out and arrives at full speed -- the overshoot the segment exists to
- * remove, reappearing only when the body redirects. */
-static void check_retarget_reopens_the_approach(void)
+/* Redirecting must put the profile back in play for the NEW target: the
+ * remaining distance is what sets the commanded speed, so a stale target
+ * would have the mechanism decelerating toward the wrong place. */
+static void check_retarget_reprofiles(void)
 {
 	struct servo_cfg cfg = rt_cfg();
 	struct servo_result r;
 
 	sim_reset();
-	/* Fire inside the approach zone of the original 2000-count move. */
+	/* Fire when the original 2000-count move is nearly done, so the
+	 * profile has already wound the speed right down. */
 	rt_arm(1700, 4000);
 	servo_move_rel(2000, &cfg, &r);
 	for (int i = 0; i < 400; i++) {
@@ -660,18 +1017,22 @@ static void check_retarget_reopens_the_approach(void)
 	}
 
 	if (!rt_count) {
-		fail("approach reopen: the hook never fired");
+		fail("reprofile: the hook never fired");
 	}
-	if (sim_pos - 4000 > 200) {
-		fail("overshot the redirected target by %.0f counts -- the "
-		     "approach segment did not re-engage", sim_pos - 4000);
+	if (sim_pos - 4000 > 200 || sim_pos - 4000 < -200) {
+		fail("ended %.0f counts from the redirected target",
+		     sim_pos - 4000);
 	}
-	/* And the duty has to go back up, not stay at the approach duty for the
-	 * whole new leg.  That failure arrives at the right place, gently, and
-	 * every overshoot assertion passes -- what gives it away is the clock. */
-	if (r.ms > 400) {
-		fail("the redirected move took %u ms -- it ran the new leg at "
-		     "the approach duty", r.ms);
+	/* And it must speed up again for the new distance rather than crawl
+	 * the rest at the speed the old target had wound it down to.  That
+	 * failure arrives in the right place, gently, and every position
+	 * assertion passes -- only the clock shows it. */
+	/* 786 ms measured with the throttle reopening properly; 1000 leaves
+	 * margin without admitting a leg run at the old wound-down speed,
+	 * which would be several times longer. */
+	if (r.ms > 1000) {
+		fail("the redirected move took %u ms -- it never re-opened "
+		     "the throttle for the new distance", r.ms);
 	}
 }
 
@@ -691,7 +1052,7 @@ static void check_reversal_coast_window_is_bounded(void)
 	rt_coast_forever = 1;
 	servo_move_rel(3000, &cfg, &r);
 	rt_coast_forever = 0;
-	sim_stiction = 150; sim_brake_decay = 0.955;
+
 
 	if (r.outcome != SERVO_WRONG_WAY) {
 		fail("a mechanism coasting the wrong way after a reversal "
@@ -727,6 +1088,7 @@ int main(void)
 	check_abort_stops_the_move();
 	check_abort_silent_is_a_normal_move();
 	check_no_abort_hook();
+	check_shortened_at_speed();
 	check_retarget_forward();
 	check_retarget_reversal();
 	check_retarget_deadband();
@@ -736,13 +1098,16 @@ int main(void)
 	check_retarget_resets_the_deadline();
 	check_total_ceiling();
 	check_reverse_brake_is_not_a_stall();
-	check_retarget_restarts_the_ramp();
-	check_retarget_reopens_the_approach();
+	check_retarget_keeps_the_integral();
+	check_retarget_reprofiles();
 	check_reversal_coast_window_is_bounded();
 	check_no_retarget_unchanged();
 	check_holds_after_move();
 	check_reports_final_position();
-	check_overshoot();
+	check_arrival();
+	check_arrival_stiff();
+	check_breakaway_band();
+	check_stiff_spot();
 	struct servo_result r;
 
 	/* 1. a normal move arrives, and stops near the target */
@@ -751,8 +1116,15 @@ int main(void)
 	if (r.outcome != SERVO_OK) {
 		fail("free move: outcome %s, expected OK", NAME[r.outcome]);
 	}
-	/* +-3 counts of jitter on both the arrival test and this readback. */
-	if (r.end < 185 || r.end > 265) {
+	/* The band is no longer one-sided.  The old controller could only
+	 * overshoot -- it drove to the target and stopped -- so a lower bound
+	 * of 185 was safe.  This one finishes by letting go and coasting the
+	 * last stretch, which lands it slightly SHORT about as often as
+	 * slightly long, and that is the correct behaviour: the alternative
+	 * is holding the floor duty all the way in and arriving 86 counts
+	 * past.  40 counts is 10 protocol units, against the body's own
+	 * +-70-unit target scatter. */
+	if (r.end < 160 || r.end > 240) {
 		fail("free move: ended at %d, expected near 200", r.end);
 	}
 	if (!r.duty_first) {
@@ -762,21 +1134,26 @@ int main(void)
 	/* 2. reverse works and is symmetric */
 	sim_reset();
 	servo_move_rel(-200, &SAFE, &r);
-	if (r.outcome != SERVO_OK || r.end > -185 || r.end < -265) {
+	/* The band is symmetric now.  The tolerance is 32 and the endgame
+	 * finishes by coasting, so a move may land a little short as readily
+	 * as a little long -- 200 +- 45 is the honest window, and it is 11
+	 * protocol units against the body's own +-70 of target scatter. */
+	if (r.outcome != SERVO_OK || r.end > -155 || r.end < -245) {
 		fail("reverse: %s, ended %d", NAME[r.outcome], r.end);
 	}
 
-	/* 3. stiction above duty_start: it must RAMP, not give up */
+	/* 3. breakaway well above what the feedforward asks for: the integral
+	 * must climb until it goes, rather than giving up. */
 	sim_reset();
-	sim_stiction = 2560 * 9 / 100;      /* needs ~9%, ramp starts at 4% */
+	sim_breakaway = 2560 * 9 / 100;      /* 230, inside the measured band */
 	servo_move_rel(200, &SAFE, &r);
 	if (r.outcome != SERVO_OK) {
-		fail("stiction: outcome %s, expected the ramp to break it free",
-		     NAME[r.outcome]);
+		fail("breakaway: outcome %s, expected the integral to break "
+		     "it free", NAME[r.outcome]);
 	}
-	if (r.duty_first <= SAFE.duty_start) {
-		fail("stiction: duty_first %u, expected above the start %u",
-		     r.duty_first, SAFE.duty_start);
+	if (r.duty_first && r.duty_first < 2560 * 9 / 100 - 40) {
+		fail("breakaway: duty_first %u, below what it takes",
+		     r.duty_first);
 	}
 
 	/* 4. AN END STOP.  The case that damaged nothing only by luck last time.
@@ -790,7 +1167,13 @@ int main(void)
 	if (r.end > 55) {
 		fail("end stop: ended at %d, past the stop at 50", r.end);
 	}
-	if (r.ms > 250) {
+	/* The stall window is 300 ms now, against the old bang-bang's 60: it
+	 * has to outlast the boost's climb through the breakaway band, which
+	 * takes about 130 ms at the worst measured figure.  Pushing into a
+	 * stop for that long is what the stock's own homing does at every
+	 * power-on (300 ms at duty 800), so it is inside normal operation
+	 * rather than a new risk. */
+	if (r.ms > 380) {
 		fail("end stop: took %u ms to give up", r.ms);
 	}
 
@@ -806,13 +1189,13 @@ int main(void)
 		fail("noisy end stop: outcome %s, expected STALL -- jitter must "
 		     "not look like movement", NAME[r.outcome]);
 	}
-	if (r.ms > 250) {
+	if (r.ms > 380) {              /* the 300 ms stall window; see above */
 		fail("noisy end stop: pushed for %u ms before giving up", r.ms);
 	}
 
 	/* 5. stiction so high nothing can move it: still stalls, never hangs */
 	sim_reset();
-	sim_stiction = 2560;
+	sim_breakaway = 2560;
 	servo_move_rel(200, &SAFE, &r);
 	if (r.outcome != SERVO_STALL) {
 		fail("immovable: outcome %s, expected STALL", NAME[r.outcome]);
@@ -834,11 +1217,22 @@ int main(void)
 		fail("dead encoder: ran %u ms before giving up", host_millis);
 	}
 
-	/* 7. feedback wildly wrong -- runaway guard */
+	/* 7. feedback wildly wrong.
+	 *
+	 * WRONG_WAY is accepted alongside RUNAWAY, and the reason is worth
+	 * stating rather than hiding in a list.  The old controller latched a
+	 * direction and could only ever drive past the target, so a
+	 * mis-scaled encoder could only ever look like a runaway.  This one
+	 * corrects an overshoot, so it turns round and drives back -- and an
+	 * encoder reading forty times the truth then makes that correction
+	 * look like travelling away from the start.  Both verdicts say the
+	 * same thing: the feedback is not to be trusted, stop.  The assertion
+	 * that carries the weight is the next one. */
 	sim_reset();
 	sim_encoder_gain = 40.0;
 	servo_move_rel(200, &SAFE, &r);
-	if (r.outcome != SERVO_OK && r.outcome != SERVO_RUNAWAY) {
+	if (r.outcome != SERVO_OK && r.outcome != SERVO_RUNAWAY
+	    && r.outcome != SERVO_WRONG_WAY) {
 		fail("runaway: outcome %s", NAME[r.outcome]);
 	}
 	if (sim_pos > 400) {
@@ -857,7 +1251,16 @@ int main(void)
 		fail("inverted feedback: outcome %s, expected WRONG_WAY",
 		     NAME[r.outcome]);
 	}
-	if (sim_pos < -60 || sim_pos > 60) {
+	/* WRONG_WAY_MARGIN is 120, so it cannot possibly stop in less than
+	 * that, and whatever speed it has reached by then it still has to
+	 * coast: 161 counts measured.  200 leaves room without admitting a
+	 * guard that has stopped firing -- removing the guard entirely lets
+	 * the move run to its timeout, thousands of counts away.
+	 *
+	 * The margin went from 40 to 120 because 40 was inside the
+	 * mechanism's own spring-back and a camera tripped it on a perfectly
+	 * good move.  This bound moved with it. */
+	if (sim_pos < -200 || sim_pos > 200) {
 		fail("inverted feedback: travelled %.0f counts before stopping",
 		     sim_pos);
 	}
@@ -887,7 +1290,7 @@ int main(void)
 
 	/* The pump is how the protocol keeps running during a move.  A servo
 	 * that forgets to call it goes silent for the whole move, which is what
-	 * made a real body re-run its init handshake mid-move (NOTES.md §27). */
+	 * made a real body re-run its init handshake mid-move. */
 	sim_reset();
 	pump_calls = 0;
 	servo_move_rel(200, &SAFE, &r);

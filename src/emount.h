@@ -46,15 +46,32 @@
  *                   FIXED the a9 II re-metering after every exposure
  *     0x37 = 3.07   that field now follows the capability bit in the body's
  *                   message 0x08 request, and the request is captured
+ *     0x38..0x44   the motor characterisation work: a scripted suite that
+ *                   measured the mechanism -- encoder noise, breakaway
+ *                   spread, speed gain, time constant, stopping distance --
+ *                   and the controller built from those numbers.  The suite
+ *                   itself is gone; what it produced is in servo.h.
+ *     0x50 = 5.00   autofocus on the new controller
+ *     0x51..0x54   tuning the approach profile against camera runs, and one
+ *                   round (5.03: a faster breakaway search, a 40% first-step
+ *                   kick, a 65% duty ceiling) tried and reverted -- more
+ *                   force overshoots, and correcting an overshoot costs more
+ *                   than the breakaway saved
+ *     0x55 = 5.05   profile e/26 -> e/30, on the user's judgement across
+ *                   four sessions.  The logs cannot separate e/22, e/26 and
+ *                   e/30 -- all three land within 12 counts, worst case --
+ *                   so the choice is made on how it feels to shoot.
  *
  * Not to be confused with the bootloader's own version triplet, which is what
  * ea9flash.py --check reports and lives nowhere in the app image (CLAUDE.md,
  * "There are TWO independent version records"). */
-#define EM_FW_VERSION_BCD   0x37u
+#define EM_FW_VERSION_BCD   0x55u
 
 /* Blocks until the body brings its chip select up and back down, then arms the
  * receiver.  Never returns on a bench supply with no body attached -- the same
- * as the stock firmware's protocol_init at 0x551c. */
+ * as the stock firmware's protocol_init at 0x551c.  It does mark the tally
+ * after two seconds of silence so a dump can tell that case apart from a
+ * camera that cut power early. */
 void em_init(void);
 
 /* Run pending work: replies to init-class requests and the periodic status
@@ -551,6 +568,7 @@ extern volatile uint32_t em_first_window_ms;  /* how long the body held it open 
 extern volatile uint32_t em_cs_edges;   /* both edges of the body's chip select */
 extern volatile uint32_t em_vd_edges;
 extern volatile uint32_t em_t_first_vd;
+
 
 /* The body's frame period, MEASURED from the frame-sync line rather than
  * assumed, and only updated from deltas inside the band below -- a lens that

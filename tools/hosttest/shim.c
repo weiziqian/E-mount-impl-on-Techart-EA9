@@ -129,12 +129,41 @@ static int host_cs_pin = 0;
 static const int level_script[] = { 1, 0 };
 static unsigned level_idx;
 
+/* BRING-UP SCRIPTING for the two cases the scripted window cannot express: a
+ * body that is slow to appear, and no body at all.  em_init's chip-select wait
+ * is a bare spin, so nothing advances the clock inside it -- which is why the
+ * two-second timeout in there had never once been executed by this suite.
+ *
+ *   host_cs_rise_ms   when the chip select goes high; 0 = never
+ *   host_vd_after_ms  when the frame sync starts clocking; <0 = never
+ */
+int      host_wait_mode;
+uint32_t host_cs_rise_ms;
+int      host_vd_after_ms = -1;
+
 /* PER PIN.  em_init polls the chip select twice -- once for the rising edge,
  * once for the falling -- and polls the frame sync freely in between.  One
  * shared script meant the frame-sync polls ate the chip-select entries and
  * em_init spun forever. */
 int em_pin_level(uint8_t pin)
 {
+	if (host_wait_mode) {
+		if (pin == EM_PIN_BODY_VD) {
+			if (host_vd_after_ms >= 0
+			    && (int)host_millis >= host_vd_after_ms) {
+				return (host_millis / 2) & 1;
+			}
+			return 0;
+		}
+		/* Time advances only when the code under test looks at it, as
+		 * it does in sim_motor.c.  One millisecond per turn of
+		 * em_init's wait loop. */
+		host_millis++;
+		if (!host_cs_rise_ms || host_millis < host_cs_rise_ms) {
+			return 0;
+		}
+		return host_millis < host_cs_rise_ms + 2;
+	}
 	if (pin == EM_PIN_BODY_VD) {
 		return 0;              /* idle: no frame sync during bring-up */
 	}

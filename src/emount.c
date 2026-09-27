@@ -1342,11 +1342,31 @@ void em_init(void)
 			 * really just the flashing session.  A camera clocks
 			 * its frame sync before raising chip select; a USB
 			 * port does not, so 2 s of silence says so. */
-			if (!marked && (uint32_t)(millis() - t0) >= 2000u) {
+			/* A diagnostic, not a decision.  em_init waits for
+			 * the body's chip select forever, as the stock's
+			 * protocol_init at 0x551c does -- but a boot on a bench
+			 * supply or the USB flasher waits forever too, and in
+			 * the trail that is byte-for-byte what a camera cutting
+			 * power early looks like.  Every dump this project has
+			 * taken carries at least one, because taking the dump
+			 * is one.
+			 *
+			 * A camera clocks its frame sync before it raises chip
+			 * select; a USB port does not.  So two seconds of
+			 * silence with no VD edge at all says nobody is there.
+			 *
+			 * It does NOT give up.  An earlier version returned
+			 * early here so that a bench session could get past
+			 * it and drive the motor; that turned out to be the
+			 * wrong place to drive it from, since USB does not
+			 * power the motor and a bench supply would not be the
+			 * one the mechanism sees in service.  The bail-out
+			 * bought nothing and cost a way for a slow body to be
+			 * read as absent. */
+			if (!marked && em_vd_edges == 0
+			    && (uint32_t)(millis() - t0) >= 2000u) {
 				marked = 1;
-				diag_tally_mark(DIAG_MARK_NOBODY,
-				                em_vd_edges > 255u
-				                ? 255u : (uint8_t)em_vd_edges);
+				diag_tally_mark(DIAG_MARK_NOBODY, 0);
 			}
 		}
 	}

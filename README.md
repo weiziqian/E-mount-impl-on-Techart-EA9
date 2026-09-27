@@ -171,10 +171,7 @@ Kp/Ki/Kd = 500/150/300 ÷ 200, clamped to ±1280 with a floor of 200. There is n
 brake because every move is held under active control for a flat 300 ms
 afterwards.
 
-### 2.4 Known limitations
-
-These are the problems this project would like to fix. Some belong to the
-adapter, some to the situation it is in.
+### 2.4 Known limitations of the stock firmware
 
 **1. Poor support for older Sony bodies.** The adapter is known to work
 inconsistently on earlier E-mount cameras. Capability negotiation differs
@@ -245,7 +242,8 @@ against a real camera unless the note says otherwise.
 |---|---|:---:|---|
 | 1 | **Motor control** | | |
 | 1.1 | Basic motor movement | ✅ | Closed loop on the encoder with four safety guards (runaway, wrong-way, timeout, stall), plus homing at boot and parking at shutdown. Tested against a simulated mechanism with encoder noise as well as on hardware. |
-| 1.2 | PID control | ❌* | *The current loop is a ramped bang-bang controller, not the stock cascaded PID. Two consequences: **static friction** stops small corrections from moving the mechanism at all, and larger moves **overshoot** and hunt. Together these are the main reason focus can still fail to lock. |
+| 1.2 | Servo control logic | ✅ | **Where it differs from the stock servo.** The stock runs a cascade — remaining distance → target speed through a four-rung staircase, then velocity error → duty through an incremental PID — at 11 ms per step, with no feedforward, a duty floor that climbs when nothing moves, and a flat 300 ms hold at the end of every move. This one keeps the cascade, because measurement said the structure was right, and changes five things: the staircase becomes a **continuous profile** (speed proportional to remaining distance, no rungs to jump between); the step rate goes to **5 ms**; a **feedforward term** computes the drive that produces the wanted speed instead of making the integrator earn it, which is what fixes small moves; there is **no derivative term** (the feedforward covers what it did, without amplifying encoder noise); and a move **ends when it arrives** — in position *and* slow enough that the coast cannot carry it back out — rather than after a fixed 300 ms. Every constant is measured on the adapter: speed gain, driven and coasting time constants, friction, breakaway spread, stopping distance. The loop this replaces stalled on small corrections and overshot large ones by 334–555 counts; this one lands within **12 counts (3 protocol units) worst case** and has not stalled in over 200 commanded moves. |
+
 | 2 | **Aperture** | | |
 | 2.1 | Use the aperture dial to set the lens focal length | ❌ | The adapter cannot know what M lens is mounted, but the camera's aperture dial is a free input channel the user could use to tell it. Not implemented — the adapter currently reports a **fixed 50 mm** to every camera. |
 

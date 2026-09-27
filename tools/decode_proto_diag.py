@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """decode_proto_diag.py -- read the trail left by the protocol build.
 
-  tools/ea9flash.py --dump 0x1f000:0x900 -o dumps/proto.bin
-  rebuild/tools/decode_proto_diag.py dumps/proto.bin
+  sudo tools/ea9flash.py --dump 0x16000:0x2100 -o dumps/proto.bin
+  tools/decode_proto_diag.py dumps/proto.bin
 
-Sixteen pages in four rows, erased at boot and written one at a time, so THE
-LAST PAGE PRESENT IS WHERE IT STOPPED.  Pages 0 and 1 are milestones written
+The address was 0x1f000:0x900 here for a long time and has not been right
+since the trail grew to four slots: it dumps erased flash, which decodes as a
+run that never happened.
+
+Thirty-two pages in eight rows per slot, four slots alternating by boot,
+erased at boot and written one at a time, so THE LAST PAGE PRESENT IS WHERE IT
+STOPPED.  Pages 0 and 1 are milestones written
 before and after the bus comes up; pages 4..15 are timed snapshots that
 straddle the two-second cutoff on both sides, which is what dates the power cut.
 
@@ -379,9 +384,30 @@ def decode_trail(blob, label):
             oi = (w[12] >> 16) & 0xFF
             eb = w[8] - (1 << 32) if w[8] >> 31 else w[8]
             ea = w[9] - (1 << 32) if w[9] >> 31 else w[9]
-            print(f"         encoder {eb} -> {ea}  ({ea - eb:+d} counts), "
-                  f"duty {w[7] & 0xFFFF}, "
-                  f"{outc[oi] if oi < len(outc) else oi} in {w[12] & 0xFFFF} ms")
+            ms = w[12] & 0xFFFF
+            moved = ea - eb
+            rt = (w[15] >> 16) & 0xFF
+            print(f"         encoder {eb} -> {ea}  ({moved:+d} counts), "
+                  f"duty {w[7] & 0xFFFF} at breakaway, peak {w[7] >> 16}, "
+                  f"{outc[oi] if oi < len(outc) else oi} in {ms} ms")
+            # ERROR AND AVERAGE SPEED, computed rather than left to the reader.
+            #
+            # The error is what says whether the controller arrived; the
+            # average speed is what says whether it took a sensible time to.
+            # Both had to be worked out by hand from the af1 dump, and the
+            # second one is where that run's finding was: a 69-count move
+            # took 446 ms, LONGER than a 1660-count one, because every move
+            # pays a fixed endgame in the dead zone whatever its length.
+            if ms:
+                print(f"         error {moved - delta:+d} counts, "
+                      f"average {abs(moved) / ms:.2f} counts/ms "
+                      f"(cruise allows 25)")
+            # RETARGETS.  Recorded since format 3 and never printed.  Zero
+            # across every move of the af1 run, which says this body does not
+            # redirect in flight at all -- it waits, or it sends a Stop.  All
+            # the mid-move retargeting machinery is therefore untouched by
+            # this camera, and that is worth knowing before tuning any of it.
+            print(f"         retargets {rt}")
             # w[6]'s low half-word was a second copy of em_t04_n until
             # format 3.  Reading it as a frame period on an older page would
             # print a plausible number built out of an unrelated counter, so
