@@ -185,6 +185,14 @@
  * 12 bytes into the packet at 0x4a38). */
 #define EM07_VERSION      12
 
+/* Message 0x08 payload[13] = frame offset 0x13 declares which message 0x05
+ * the lens sends: (v & 0xFE) == 0x80 is the 105-byte form, anything else
+ * the 117-byte one (protocol docs/msg_0x08.md).  The stock ships 0x20 --
+ * the LONG form -- while always sending 105.  0x81 is what the Yongnuo
+ * YN35 / 50 DA send, both short-form lenses. */
+#define EM08_STATUS_FORM  0x13
+#define EM08_STATUS_SHORT 0x81u
+
 volatile uint32_t em_frames_rx;
 volatile uint32_t em_frames_tx;
 volatile uint8_t  em_handshake_done;
@@ -1277,6 +1285,10 @@ void em_init(void)
 	/* The lens ID, message 0x07 payload[9..10] = frame offset 15..16. */
 	ea9_data[EA9_OFF_07 + 15] = (uint8_t)(EM_LENS_ID & 0xFFu);
 	ea9_data[EA9_OFF_07 + 16] = (uint8_t)(EM_LENS_ID >> 8);
+
+	/* Declare the 105-byte message 0x05 -- the only one em_pump_status
+	 * sends.  The stored 0x20 promises 117. */
+	ea9_data[EA9_OFF_08 + EM08_STATUS_FORM] = EM08_STATUS_SHORT;
 
 	/* The status frames are never sent as stored.  `main` calls the patcher
 	 * at 0x8a90 once before the loop starts, so every message 0x05 and 0x06

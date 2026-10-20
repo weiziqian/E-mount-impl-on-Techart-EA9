@@ -225,6 +225,31 @@ int main(void)
 		}
 	}
 
+	/* The 0x08 reply's payload[13] must declare the 105-byte message 0x05,
+	 * the only form this build sends.  The stock's 0x20 declares 117. */
+	{
+		int seen = 0;
+
+		for (i = 0; i < sent_n; i++) {
+			if (sent[i][5] != 0x08) {
+				continue;
+			}
+			seen++;
+			if ((sent[i][0x13] & 0xFEu) != 0x80u) {
+				fail("the 0x08 reply's payload[13] is %#04x, which "
+				     "declares a 117-byte message 0x05",
+				     sent[i][0x13]);
+			}
+		}
+		if (!seen) {
+			fail("no 0x08 reply to check payload[13] in");
+		}
+		if (EA9_LEN_05 != 105u) {
+			fail("message 0x05 is %u bytes, but 0x08 declares 105",
+			     (unsigned)EA9_LEN_05);
+		}
+	}
+
 	/* --- the status pair --------------------------------------------- */
 	{
 		int before = sent_n;
