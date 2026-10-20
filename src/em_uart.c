@@ -1,12 +1,14 @@
-/* em_uart.c -- SERCOM1 at 750 kbaud, 8N1, LSB first.
+/* em_uart.c -- SERCOM1, 8N1, LSB first: 750 kbaud from reset, 1.5 Mbaud once
+ * message 0x0C has been answered (em_uart_set_baud).
  *
  * The stock firmware runs this port through ASF4's async USART driver with the
  * DMAC moving both directions (a 16-byte RX ring plus DMAC channel 1 into a
  * 255-byte buffer at 0x20000694).  This does the same job with an RX interrupt
  * and a polled transmitter, which is a deliberate simplification:
  *
- *   - RX: one byte every 13.3 us at 750 kbaud is ~640 cycles at 48 MHz, so a
- *     two-instruction ISR has three orders of magnitude of headroom.  The DMA
+ *   - RX: one byte every 13.3 us at 750 kbaud is ~640 cycles at 48 MHz, and
+ *     ~320 at 1.5 Mbaud -- still ample for a two-instruction ISR at the top
+ *     NVIC priority, with nothing in the image masking interrupts.  The DMA
  *     buys nothing here and costs a channel plus its callback plumbing.
  *   - TX: the longest frame is message 0x08 at 210 bytes = 2.8 ms, and it is
  *     sent once during init.  The recurring frames are 105 and 48 bytes, i.e.
@@ -139,6 +141,21 @@ void em_uart_disable(void)
 {
 	g_disabled = 1;
 	EMSERCOM->USART.CTRLA.reg &= ~(uint32_t)SERCOM_USART_CTRLA_ENABLE;
+	em_uart_sync();
+}
+
+void em_uart_set_baud(uint16_t baud)
+{
+	if (g_disabled) {
+		return;
+	}
+	/* BAUD is enable-protected: take the SERCOM down, write, bring it back.
+	 * Anything half-received is dropped, which is harmless here -- this runs
+	 * only between messages 0x0C and 0x0B, a ~20 ms silence on the bus. */
+	EMSERCOM->USART.CTRLA.reg &= ~(uint32_t)SERCOM_USART_CTRLA_ENABLE;
+	em_uart_sync();
+	EMSERCOM->USART.BAUD.reg = baud;
+	EMSERCOM->USART.CTRLA.reg |= SERCOM_USART_CTRLA_ENABLE;
 	em_uart_sync();
 }
 

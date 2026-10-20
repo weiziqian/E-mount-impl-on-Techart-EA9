@@ -117,6 +117,19 @@ void em_poll(void);
  * counted and answered, never acted on. */
 #define EM_ID_APERTURE   0x1Bu
 
+/* Baud-rate negotiation.  Reply payload[0] = 01 means "switching to
+ * 1.5 Mbaud", 00 "staying at 750 kbaud"; the body follows the reply, so the
+ * lens must actually switch after answering 01 (protocol docs/msg_0x0C.md). */
+#define EM_ID_BAUD       0x0Cu
+#define EM_0C_FAST       0x01u
+
+/* The chip-select handshake that follows the 0x0C reply (emount.c,
+ * em_baud_switch).  Each wait on the body's CS gives up after
+ * EM_0C_WAIT_US; the body takes ~0.13 ms.  EM_0C_READY_US is how long the
+ * lens CS stays up after the body's drops (190-430 us on real devices). */
+#define EM_0C_WAIT_US    2000u
+#define EM_0C_READY_US   200u
+
 /* The lens ID we report in message 0x07 payload[9..10], u16 LE.
  *
  * Stock is 234 (0x00EA), in the legacy/A-mount range that every measured

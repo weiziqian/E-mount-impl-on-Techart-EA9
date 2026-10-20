@@ -93,6 +93,19 @@ void host_reset_cs(void)
 	host_port.Group[0].OUTCLR.reg = 0;
 }
 
+/* Every baud change, and how many frames had been sent when it happened --
+ * which is what says whether the switch came after the 0x0C reply. */
+uint16_t host_baud = EM_BAUD;
+int      host_baud_changes;
+int      host_baud_at_sent_n = -1;
+
+void em_uart_set_baud(uint16_t baud)
+{
+	host_baud = baud;
+	host_baud_changes++;
+	host_baud_at_sent_n = sent_n;
+}
+
 void em_uart_send(const uint8_t *buf, uint16_t len)
 {
 	if (sent_n < MAX_SENT) {
@@ -145,6 +158,9 @@ int      host_vd_after_ms = -1;
  * once for the falling -- and polls the frame sync freely in between.  One
  * shared script meant the frame-sync polls ate the chip-select entries and
  * em_init spun forever. */
+const int *host_cs_seq;
+unsigned   host_cs_seq_n, host_cs_seq_i;
+
 int em_pin_level(uint8_t pin)
 {
 	if (host_wait_mode) {
@@ -166,6 +182,13 @@ int em_pin_level(uint8_t pin)
 	}
 	if (pin == EM_PIN_BODY_VD) {
 		return 0;              /* idle: no frame sync during bring-up */
+	}
+	/* The body's chip select as a scripted sequence, one entry per read,
+	 * for the pulse that follows the 0x0C reply.  Played only once the
+	 * bring-up script below is used up. */
+	if (level_idx >= sizeof(level_script) / sizeof(level_script[0])
+	    && host_cs_seq_i < host_cs_seq_n) {
+		return host_cs_seq[host_cs_seq_i++];
 	}
 	if (level_idx < sizeof(level_script) / sizeof(level_script[0])) {
 		int v = level_script[level_idx++];

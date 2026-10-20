@@ -26,6 +26,11 @@ const uint8_t *em_uart_rx_buf(void);
  * shift register, so the caller can time the chip-select release from it. */
 void     em_uart_send(const uint8_t *buf, uint16_t len);
 
+/* Change the bus speed (a BAUD register value, EM_BAUD / EM_BAUD_FAST).
+ * Call only after em_uart_send() has returned, so the last frame went out
+ * whole at the old speed.  No-op once the bus is disabled. */
+void     em_uart_set_baud(uint16_t baud);
+
 /* Take the bus down, as the stock does in its shutdown tail.
  *
  * After this em_uart_send() returns immediately instead of transmitting.  That

@@ -396,6 +396,43 @@ static void em_shutdown_ack(void)
 	}
 }
 
+/* The baud switch after the 0x0C reply is a chip-select handshake, not just a
+ * register write.  Every A6000 capture (SELP1650, SEL55210, Viltrox) shows,
+ * after the lens's 0x0C reply:
+ *
+ *   body CS  up  ~110-130 us after the lens CS dropped, no data
+ *   lens CS  up   4-23 us later          -- "switching"
+ *   body CS  down ~60-70 us after it rose
+ *   lens CS  down 190-430 us after that  -- "ready at 1.5 Mbaud"
+ *
+ * Yongnuo does the same in code: wait for body CS high, raise its own CS,
+ * reconfigure the UART, wait for body CS low, drop its CS.  The first 1.5 Mbaud
+ * build switched without this pulse and an a9 II did not complete the
+ * handshake. */
+static void em_wait_body_cs(int level)
+{
+	uint32_t t;
+
+	for (t = 0; t < EM_0C_WAIT_US; t++) {
+		if (em_pin_level(EM_PIN_BODY_CS) == level) {
+			return;
+		}
+		delay_us(1);
+	}
+}
+
+static void em_baud_switch(void)
+{
+	/* A wait that times out is not fatal: the body follows the 01 either
+	 * way, so the switch happens regardless. */
+	em_wait_body_cs(1);
+	PORT->Group[0].OUTSET.reg = (1u << EM_PIN_LENS_CS);
+	em_uart_set_baud(EM_BAUD_FAST);
+	em_wait_body_cs(0);
+	delay_us(EM_0C_READY_US);
+	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_LENS_CS);
+}
+
 static void em_send_id(uint8_t id)
 {
 	const struct ea9_packet *p = find_packet(id);
@@ -443,10 +480,11 @@ static void em_send_id(uint8_t id)
 	frame = &ea9_data[p->offset];
 
 	/* Apply whatever the stock handler for this id writes into its frame
-	 * before sending.  NOT optional: the stored message 0x0c frame carries
-	 * payload[0] = 1 and the stock handler always forces it to 0.  Sending
-	 * the stored byte instead was enough for a real body to stop the
-	 * handshake after three messages (NOTES.md §19). */
+	 * before sending.  NOT optional in general.  Message 0x0c is the case
+	 * that taught it: the stock forces payload[0] to 0, and sending 1 while
+	 * staying at 750 kbaud made a real body stop after three messages
+	 * (NOTES.md §19) -- 1 means "switching to 1.5 Mbaud".  This build does
+	 * switch, so it overrides that one fixup below. */
 	for (i = 0; i < EA9_FIXUP_COUNT; i++) {
 		const struct ea9_fixup *f = &ea9_fixups[i];
 
@@ -473,6 +511,16 @@ static void em_send_id(uint8_t id)
 		frame[f->off] = (f->kind == EA9_FIXUP_RX)
 		                ? (f->val < EM_REQ_SNAP ? g_req[f->val] : 0)
 		                : f->val;
+	}
+
+	/* MESSAGE 0x0C: ANSWER 01 AND SWITCH TO 1.5 MBAUD, as native lenses do.
+	 * Nothing switches back: the bus is disabled at shutdown and the next
+	 * boot starts at 750. */
+	if (id == EM_ID_BAUD) {
+		frame[EM_HEADER_LEN] = EM_0C_FAST;
+		em_transmit(frame, p->len);
+		em_baud_switch();
+		return;
 	}
 
 	em_transmit(frame, p->len);

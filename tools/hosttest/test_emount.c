@@ -19,6 +19,11 @@ extern uint16_t sent_len[];
 extern int      sent_cs_asserted[];
 extern int      sent_n;
 extern int      sent_overflow;
+extern uint16_t host_baud;
+extern int      host_baud_changes;
+extern int      host_baud_at_sent_n;
+extern const int *host_cs_seq;
+extern unsigned   host_cs_seq_n, host_cs_seq_i;
 extern int      host_pad_to;
 extern uint32_t host_millis;
 void host_body_frame(const uint8_t *frame, uint16_t len);
@@ -164,7 +169,7 @@ static void check_frame(int i, uint8_t id, const char *what)
 
 int main(void)
 {
-	static const uint8_t HANDSHAKE[] = { 0x01, 0x07, 0x0B, 0x08,
+	static const uint8_t HANDSHAKE[] = { 0x01, 0x07, 0x0C, 0x0B, 0x08,
 	                                     0x09, 0x0D, 0x10, 0x0A };
 	uint8_t req[64];
 	uint16_t len;
@@ -192,6 +197,14 @@ int main(void)
 
 		len = make_request(req, 0x02, (uint8_t)(0x40 + i), id, 0, 0);
 		host_body_frame(req, len);
+		if (id == EM_ID_BAUD) {
+			/* The body's switch pulse: low, then up, then down. */
+			static const int PULSE[] = { 0, 0, 1, 1, 0 };
+
+			host_cs_seq   = PULSE;
+			host_cs_seq_n = sizeof(PULSE) / sizeof(PULSE[0]);
+			host_cs_seq_i = 0;
+		}
 		em_poll();
 
 		if (sent_n != before + 1) {
@@ -211,6 +224,41 @@ int main(void)
 	}
 	if (!em_handshake_done) {
 		fail("answering message 0x0a did not complete the handshake");
+	}
+
+	/* Message 0x0C: answer 01 and switch to 1.5 Mbaud -- once, and only
+	 * after the reply itself has gone out at the old speed. */
+	{
+		int k, idx = -1;
+
+		for (k = 0; k < sent_n; k++) {
+			if (sent[k][5] == EM_ID_BAUD) {
+				idx = k;
+				break;
+			}
+		}
+		if (idx < 0) {
+			fail("no 0x0C reply sent");
+		} else if (sent[idx][6] != EM_0C_FAST) {
+			fail("the 0x0C reply is %#04x, expected %#04x",
+			     sent[idx][6], EM_0C_FAST);
+		}
+		if (host_baud_changes != 1 || host_baud != EM_BAUD_FAST) {
+			fail("baud changed %d time(s), now %#06x; expected one "
+			     "switch to %#06x", host_baud_changes, host_baud,
+			     EM_BAUD_FAST);
+		}
+		if (idx >= 0 && host_baud_at_sent_n != idx + 1) {
+			fail("baud switched after %d frame(s), expected right "
+			     "after the 0x0C reply (frame %d)",
+			     host_baud_at_sent_n, idx + 1);
+		}
+		/* Both waits must have seen their edge: the rise and the fall
+		 * of the body's pulse are the last two reads of the script. */
+		if (host_cs_seq_i != host_cs_seq_n) {
+			fail("0x0C chip-select handshake: %u of %u body CS "
+			     "reads used", host_cs_seq_i, host_cs_seq_n);
+		}
 	}
 	if (em_frames_rx != sizeof(HANDSHAKE)) {
 		fail("counted %u frames, expected %u",
@@ -303,6 +351,12 @@ int main(void)
 			 * requester's.  Asserted on its own below, so exempting
 			 * it here hides nothing. */
 			if (f->id == EM_ID_APERTURE && f->kind == EA9_FIXUP_RX) {
+				continue;
+			}
+			/* Message 0x0C's fixup (payload[0] := 0) is overridden on
+			 * purpose -- this build answers 01 and switches baud,
+			 * asserted after the handshake above. */
+			if (f->id == EM_ID_BAUD) {
 				continue;
 			}
 			want = (f->kind == EA9_FIXUP_RX)

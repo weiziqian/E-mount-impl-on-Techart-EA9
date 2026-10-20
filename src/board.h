@@ -78,12 +78,14 @@
  *          SAMPR=0 (16x arithmetic), DORD=1 (LSB first)
  *   CTRLB: TXEN|RXEN, CHSIZE=0 (8 bit), SBMODE=0 (1 stop), no parity
  *   BAUD : 16x arithmetic, 48e6/16 * (1 - 0xc000/65536) = 750000 exactly
- * The baud rate is written once and never changed: the adapter has no code
- * path to the 1.5 Mbaud native lenses negotiate (NOTES.md §13). */
+ * The stock never changes it.  This build switches to EM_BAUD_FAST after
+ * answering message 0x0C with 01, as native lenses do (protocol
+ * docs/msg_0x0C.md): 48e6/16 * (1 - 0x8000/65536) = 1500000 exactly. */
 #define EM_SERCOM_ADDR          0x42000C00u   /* SERCOM1 */
 #define EM_CTRLA                0x40100004u
 #define EM_CTRLB                0x00030000u
 #define EM_BAUD                 0xC000u
+#define EM_BAUD_FAST            0x8000u
 
 /* ---- absolute position: a 14-bit magnetic encoder on SERCOM0 SPI ---------
  * This, not the EIC, is what the stock firmware servos on.  0x89a4 drops a
