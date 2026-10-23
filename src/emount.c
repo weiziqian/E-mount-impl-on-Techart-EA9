@@ -1300,11 +1300,20 @@ uint8_t em_take_focus_cmd(struct em_focus_cmd *out)
 	if (!em_focus_pending) {
 		return 0;
 	}
+	/* The chip-select interrupt writes g_cmd; a frame landing mid-copy
+	 * would hand over half of each instruction. */
+	__disable_irq();
 	em_focus_pending = 0;
 	for (k = 0; k < sizeof(*out); k++) {
 		((uint8_t *)out)[k] = ((const volatile uint8_t *)&g_cmd)[k];
 	}
+	__enable_irq();
 	return 1;
+}
+
+uint8_t em_peek_focus_op(void)
+{
+	return em_focus_pending ? g_cmd.op : (uint8_t)EM_OP_NONE;
 }
 
 uint8_t em_take_query(uint8_t *tag, uint16_t *operand)
@@ -1314,6 +1323,8 @@ uint8_t em_take_query(uint8_t *tag, uint16_t *operand)
 	if (!g_query_n) {
 		return 0;
 	}
+	/* The chip-select interrupt appends to this queue. */
+	__disable_irq();
 	*tag     = g_query_tag[0];
 	*operand = g_query_op[0];
 	for (k = 1; k < g_query_n; k++) {
@@ -1321,6 +1332,7 @@ uint8_t em_take_query(uint8_t *tag, uint16_t *operand)
 		g_query_op[k - 1]  = g_query_op[k];
 	}
 	g_query_n--;
+	__enable_irq();
 	return 1;
 }
 

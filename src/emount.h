@@ -584,6 +584,10 @@ struct em_focus_cmd {
 /* Consume the pending instruction.  Returns 0 if none is pending. */
 uint8_t em_take_focus_cmd(struct em_focus_cmd *out);
 
+/* The op of the pending instruction, without consuming it; EM_OP_NONE if
+ * none is pending. */
+uint8_t em_peek_focus_op(void);
+
 /* ------------------------------------------------------------------------
  * QUERIES.  0x22 and 0x2E ask the lens to convert between its own position
  * units and the distance code.  The answers ride in the tail of the next

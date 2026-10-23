@@ -6,6 +6,9 @@
 #ifndef HOST_SAM_H
 #define HOST_SAM_H
 
+static inline void __disable_irq(void) {}
+static inline void __enable_irq(void) {}
+
 #include <stdint.h>
 
 #define MUX_PA00D_SERCOM1_PAD0      2

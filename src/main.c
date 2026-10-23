@@ -500,6 +500,11 @@ static void pump(int32_t pos)
 		focus_report_at(pos);
 	}
 	em_poll();
+	/* Queries are answered on the next frame even mid-move, as Yongnuo
+	 * does; otherwise one asked during a leg waits for the leg to end. */
+	if (g_homed) {
+		focus_answer_queries();
+	}
 	vdd_track_sample();
 }
 
@@ -990,15 +995,41 @@ static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out)
 	return 1;
 }
 
-/* The servo's other hook: has the body called the move off?
+/* End the running leg and hand `c` forward -- or, for a Stop, report it from
+ * the leg it stopped. */
+static void focus_cut(const struct em_focus_cmd *c)
+{
+	g_abort_pending = 1;
+	g_abort_by_stop = (c->op == EM_OP_STOP);
+	if (!g_abort_by_stop) {
+		g_next         = *c;
+		g_next_pending = 1;
+	}
+}
+
+/* The servo's other hook: has the body called the move off?  A Stop is not a
+ * retarget -- the body wants the mechanism still, so the servo returns
+ * SERVO_ABORTED and the caller acknowledges.
  *
- * A stop is NOT a retarget.  The body is not asking for a different position,
- * it is asking for the mechanism to stand still, so the servo returns
- * SERVO_ABORTED and the caller acknowledges rather than starting a new move.
- *
- * Consumed here, once.  Leaving it set would abort the next move as well. */
+ * Called on EVERY servo iteration, unlike the retarget hook, which stops
+ * being called after retarget_max retargets and while holding.  So a Stop, a
+ * Scan or a Drive -- or anything at all during a Scan or a Drive -- is taken
+ * here and ends the leg, rather than waiting in the one-slot mailbox where
+ * the next Move would overwrite it.  A Move during a Move is left for the
+ * retarget hook, or for after the leg. */
 static uint8_t focus_abort(void)
 {
+	uint8_t op = em_peek_focus_op();
+
+	if (!g_abort_pending && op != EM_OP_NONE
+	    && (op == EM_OP_STOP || op == EM_OP_SCAN || op == EM_OP_DRIVE
+	        || g_last_op == EM_OP_SCAN || g_last_op == EM_OP_DRIVE)) {
+		struct em_focus_cmd c;
+
+		if (em_take_focus_cmd(&c)) {
+			focus_cut(&c);
+		}
+	}
 	return g_abort_pending;
 }
 
@@ -1029,13 +1060,11 @@ static uint8_t focus_retarget(int32_t *target)
 	 * shape of motion that has to start from rest.  A Stop is reported by
 	 * the leg it stopped; a Scan or a Drive is handed forward through
 	 * g_next so the main loop can run it. */
-	if (!focus_cmd_target(&c, &want)) {
-		g_abort_pending = 1;
-		g_abort_by_stop = (c.op == EM_OP_STOP);
-		if (!g_abort_by_stop) {
-			g_next         = c;
-			g_next_pending = 1;
-		}
+	if (g_last_op == EM_OP_SCAN || g_last_op == EM_OP_DRIVE
+	    || !focus_cmd_target(&c, &want)) {
+		/* A Scan or a Drive is never retargeted: whatever arrives --
+		 * a Move included -- replaces it (Yongnuo FUN_08016654). */
+		focus_cut(&c);
 		return 0;
 	}
 
@@ -1125,6 +1154,23 @@ static uint8_t focus_run(int32_t want, uint16_t target_u,
 }
 
 
+/* A Scan or Drive was cut short: report what Yongnuo reports (FUN_08016654,
+ * FUN_080164b0).  A Stop always answers 0x1C.  A Drive replaced by a Scan or
+ * a Drive answers 0x3C, a Scan replaced by a Drive answers 0x1F; any other
+ * replacement leaves the report to the newcomer. */
+static void focus_report_cut(uint8_t running, uint8_t drive_param)
+{
+	if (g_abort_by_stop) {
+		em_post_event(EM_REC_STOP, 0x01u);
+	} else if (g_next_pending && running == EM_OP_DRIVE
+	           && (g_next.op == EM_OP_SCAN || g_next.op == EM_OP_DRIVE)) {
+		em_post_event(EM_REC_DRIVE, (uint8_t)(drive_param >> 2));
+	} else if (g_next_pending && running == EM_OP_SCAN
+	           && g_next.op == EM_OP_DRIVE) {
+		em_post_event(EM_REC_SCAN, 0x00u);
+	}
+}
+
 /* ------------------------------------------------------------------------
  * SCAN -- the two-leg instruction (autofocus.md 3.3).
  *
@@ -1142,59 +1188,50 @@ static uint8_t focus_run(int32_t want, uint16_t target_u,
  * last one.  Acceleration and deceleration then happen outside the window,
  * where the body is not measuring.
  *
- * NOT YET OBSERVED ON AN a9 II.  Across every session captured so far that
- * body has sent only Move and Stop records -- 356 Moves and 59 Stops in one
- * 265-second run (NOTES.md 79), and no Scan at all.  This branch is written
- * from the protocol rather than from traffic, so it is the one part of the
- * focus path that has never executed on hardware.
+ * An a9 II sends it once message 0x07 pl[0] declares a native lens; with the
+ * stock 02 it sends only Move and Stop (NOTES.md 79).
  */
 #define SCAN_RUNUP_COUNTS   300
 #define SCAN_RUNOUT_COUNTS  240
 
 static void focus_scan(const struct em_focus_cmd *c)
 {
-	int32_t a, b, lo, hi, start, finish;
+	int32_t first, second, dir, start, finish;
 	uint8_t outcome;
 
-	/* The endpoint form gives two positions; the centred form gives a
-	 * centre and the extents either side of it. */
+	/* The sweep runs from `first` to `second` (Yongnuo FUN_0800a820 /
+	 * FUN_0800a692).  Endpoint form: A to B, and B to A when
+	 * rec[1] & 7 == 6.  Centred form: C+A down to C-B, flags ignored. */
 	if (c->scan_flags & 0x01u) {
 		int32_t centre = focus_em06_to_counts(c->scan_centre);
 
-		hi = centre + (int32_t)c->scan_a * FOCUS_COUNTS_PER_UNIT;
-		lo = centre - (int32_t)c->scan_b * FOCUS_COUNTS_PER_UNIT;
+		first  = centre + (int32_t)c->scan_a * FOCUS_COUNTS_PER_UNIT;
+		second = centre - (int32_t)c->scan_b * FOCUS_COUNTS_PER_UNIT;
+	} else if ((c->scan_flags & 0x07u) == 6u) {
+		first  = focus_em06_to_counts(c->scan_b);
+		second = focus_em06_to_counts(c->scan_a);
 	} else {
-		a  = focus_em06_to_counts(c->scan_a);
-		b  = focus_em06_to_counts(c->scan_b);
-		lo = (a < b) ? a : b;
-		hi = (a < b) ? b : a;
-	}
-	if (lo < 0) {
-		lo = 0;
-	}
-	if (hi > FOCUS_TRAVEL_COUNTS) {
-		hi = FOCUS_TRAVEL_COUNTS;
-	}
-	if (hi < lo) {
-		hi = lo;
+		first  = focus_em06_to_counts(c->scan_a);
+		second = focus_em06_to_counts(c->scan_b);
 	}
 
-	/* Direction.  Bits 0-2 = 6 reverses the sweep; bit 3 asks for whichever
-	 * end of the window is nearer where focus already is, which saves the
-	 * longer approach. */
-	{
-		int32_t here    = abs_encoder_track();
-		uint8_t reverse = ((c->scan_flags & 0x07u) == 6u);
+	/* Run-up beyond `first`, run-out beyond `second`, both outside the
+	 * window. */
+	dir    = (second > first) ? 1 : -1;
+	start  = first  - dir * SCAN_RUNUP_COUNTS;
+	finish = second + dir * SCAN_RUNOUT_COUNTS;
 
-		if (c->scan_flags & 0x08u) {
-			reverse = ((here - lo) > (hi - here));
-		}
-		if (reverse) {
-			start  = hi + SCAN_RUNUP_COUNTS;
-			finish = lo - SCAN_RUNOUT_COUNTS;
-		} else {
-			start  = lo - SCAN_RUNUP_COUNTS;
-			finish = hi + SCAN_RUNOUT_COUNTS;
+	/* Bit 3 (endpoint form): start from whichever end is nearer. */
+	if (!(c->scan_flags & 0x01u) && (c->scan_flags & 0x08u)) {
+		int32_t here = abs_encoder_track();
+		int32_t ds   = (here > start)  ? here - start  : start  - here;
+		int32_t df   = (here > finish) ? here - finish : finish - here;
+
+		if (df < ds) {
+			int32_t t = start;
+
+			start  = finish;
+			finish = t;
 		}
 	}
 	if (start < 0) {
@@ -1216,7 +1253,8 @@ static void focus_scan(const struct em_focus_cmd *c)
 	outcome = focus_run(start, focus_counts_to_em06(start), &STOCK);
 	if (outcome == SERVO_ABORTED || g_next_pending) {
 		em_set_scan_state(EM_SCAN_IDLE);
-		return;                 /* replaced or stopped: no event */
+		focus_report_cut(EM_OP_SCAN, 0);
+		return;
 	}
 
 	/* Leg 2: the sweep.  The scan speed code's magnitude is in the low bits
@@ -1234,10 +1272,13 @@ static void focus_scan(const struct em_focus_cmd *c)
 		outcome = focus_run(finish, focus_counts_to_em06(finish), &sweep);
 	}
 
-	em_scan_finish();
-	if (outcome != SERVO_ABORTED) {
-		em_post_event(EM_REC_SCAN, 0x00u);
+	if (outcome == SERVO_ABORTED) {
+		em_set_scan_state(EM_SCAN_IDLE);
+		focus_report_cut(EM_OP_SCAN, 0);
+		return;
 	}
+	em_scan_finish();
+	em_post_event(EM_REC_SCAN, 0x00u);
 }
 
 /* ------------------------------------------------------------------------
@@ -1265,12 +1306,14 @@ static void focus_drive(const struct em_focus_cmd *c)
 	                           * (SCAN_V_MAX - SCAN_V_MIN) / 0x7FFFu);
 	drv.stop_ms  = SCAN_STOP_MS;
 
-	if (focus_run(want, focus_counts_to_em06(want), &drv) != SERVO_ABORTED) {
-		/* Drive has no end of its own short of the limit, so its event
-		 * carries the top six bits of the record's rec[1] and a 4-byte
-		 * tail rather than the usual 2. */
-		em_post_event(EM_REC_DRIVE, (uint8_t)(c->drive_param >> 2));
+	if (focus_run(want, focus_counts_to_em06(want), &drv) == SERVO_ABORTED) {
+		focus_report_cut(EM_OP_DRIVE, c->drive_param);
+		return;
 	}
+	/* Drive has no end of its own short of the limit, so its event carries
+	 * the top six bits of the record's rec[1] and a 4-byte tail rather than
+	 * the usual 2. */
+	em_post_event(EM_REC_DRIVE, (uint8_t)(c->drive_param >> 2));
 }
 
 /* Act on one instruction from the body. */
