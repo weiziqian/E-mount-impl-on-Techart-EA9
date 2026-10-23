@@ -660,6 +660,16 @@ def decode_trail(blob, label):
             n, on, ln = w[3] >> 16, (w[3] >> 8) & 0xFF, w[3] & 0xFF
             raw = bytes((w[4 + i // 4] >> (8 * (i % 4))) & 0xFF for i in range(ln))
             print(f"page {p:2d}  {tag}: {n} arrived, {ln} byte(s) captured")
+            # The body's 0x0A request shares this page: payload in w[10..13],
+            # count / captured length / chosen 0x05 length in w[14].  Zero on
+            # dumps from builds that did not record it.
+            if w[14]:
+                an, aln, l05 = w[14] >> 16, (w[14] >> 8) & 0xFF, w[14] & 0xFF
+                apl = bytes((w[10 + i // 4] >> (8 * (i % 4))) & 0xFF
+                            for i in range(aln))
+                print(f"         message 0x0A request: {an} arrived, first payload "
+                      f"{apl.hex(' ') or '(none captured)'}")
+                print(f"         message 0x05 length sent: {l05}")
             if not ln:
                 print("         none seen -- the handshake never got this far")
                 continue

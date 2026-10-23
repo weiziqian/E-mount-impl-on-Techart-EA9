@@ -432,6 +432,19 @@ extern volatile uint8_t  em_m08_len;           /* how much of it was captured */
 extern volatile uint16_t em_m08_n;             /* how many arrived            */
 extern volatile uint8_t  em_m08_aperture_on;   /* the decoded capability bit  */
 
+/* MESSAGE 0x0A's REQUEST, and the message 0x05 length it selects.
+ *
+ * Message 0x05 has a 105- and a 117-byte form.  The lens starts from what its
+ * own message 0x08 pl[13] declares -- (v & 0xFE) == 0x80 is 105, anything else
+ * 117 -- and each 0x0A request can then force 105 with pl[0..1] = ff 7f;
+ * any other value leaves it alone (msg_0x0A.md; Yongnuo, three models).  The
+ * first request is kept raw so a dump shows what the body asked. */
+#define EM_M0A_LEN 16
+extern volatile uint8_t  em_m0a[EM_M0A_LEN];   /* first request's payload    */
+extern volatile uint8_t  em_m0a_len;           /* bytes of it captured       */
+extern volatile uint16_t em_m0a_n;             /* how many arrived           */
+extern volatile uint8_t  em_status05_len;      /* 105 or 117, as now chosen  */
+
 /* Message 0x03 payload[5..6] is the aperture the body is ASKING for, sent
  * every frame of the normal loop (msg_0x03.md).  Nothing here can act on it --
  * there is no iris -- so it is recorded for the same reason 0x1B's is: to see

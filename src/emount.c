@@ -185,13 +185,14 @@
  * 12 bytes into the packet at 0x4a38). */
 #define EM07_VERSION      12
 
-/* Message 0x08 payload[13] = frame offset 0x13 declares which message 0x05
- * the lens sends: (v & 0xFE) == 0x80 is the 105-byte form, anything else
- * the 117-byte one (protocol docs/msg_0x08.md).  The stock ships 0x20 --
- * the LONG form -- while always sending 105.  0x81 is what the Yongnuo
- * YN35 / 50 DA send, both short-form lenses. */
+/* Message 0x08 payload[13] = frame offset 0x13: (v & 0xFE) == 0x80 declares
+ * the 105-byte message 0x05, anything else the 117-byte one (msg_0x08.md). */
 #define EM08_STATUS_FORM  0x13
-#define EM08_STATUS_SHORT 0x81u
+
+/* The long message 0x05: the 105-byte frame with twelve more payload bytes
+ * before the checksum -- payload 96..107, the rest of the slot C/D record the
+ * short form cuts off.  This device has no table to put there, so zeros. */
+#define EM05_LEN_LONG     117u
 
 volatile uint32_t em_frames_rx;
 volatile uint32_t em_frames_tx;
@@ -218,6 +219,10 @@ volatile uint16_t em_aperture_req;
 volatile uint16_t em_m03_aperture;
 volatile uint16_t em_m03_n;
 volatile uint8_t  em_m08[EM_M08_LEN];
+volatile uint8_t  em_m0a[EM_M0A_LEN];
+volatile uint8_t  em_m0a_len;
+volatile uint16_t em_m0a_n;
+volatile uint8_t  em_status05_len = EA9_LEN_05;
 volatile uint8_t  em_m08_len;
 volatile uint16_t em_m08_n;
 volatile uint8_t  em_m08_aperture_on;
@@ -855,6 +860,28 @@ static void on_cs_edge(int level)
 		em_set_aperture(g_aperture);
 	}
 
+	/* MESSAGE 0x0A's REQUEST: capture the first, and let every one pick
+	 * the message 0x05 length (see emount.h). */
+	if (rx[3] == EM_CLASS_INIT && rx[5] == 0x0Au && n >= 10) {
+		uint16_t k;
+		uint8_t  pl13 = ea9_data[EA9_OFF_08 + EM08_STATUS_FORM];
+
+		if (em_m0a_n != 0xFFFFu) {
+			em_m0a_n++;
+		}
+		if (em_m0a_len == 0) {
+			for (k = 0; k < EM_M0A_LEN && (uint16_t)(6u + k + 3u) <= rx[1]; k++) {
+				em_m0a[k] = rx[6 + k];
+			}
+			em_m0a_len = (uint8_t)k;
+		}
+		if (rx[1] >= 11u && rx[6] == 0xFFu && rx[7] == 0x7Fu) {
+			em_status05_len = EA9_LEN_05;
+		} else if ((pl13 & 0xFEu) != 0x80u) {
+			em_status05_len = EM05_LEN_LONG;
+		}
+	}
+
 	if (rx[3] == EM_CLASS_INIT && rx[5] == EM_ID_APERTURE && n >= 11) {
 		if (em_focus_n != 0xFFFFu) {
 			em_focus_n++;
@@ -1346,9 +1373,12 @@ void em_init(void)
 	ea9_data[EA9_OFF_07 + 15] = (uint8_t)(EM_LENS_ID & 0xFFu);
 	ea9_data[EA9_OFF_07 + 16] = (uint8_t)(EM_LENS_ID >> 8);
 
-	/* Declare the 105-byte message 0x05 -- the only one em_pump_status
-	 * sends.  The stored 0x20 promises 117. */
-	ea9_data[EA9_OFF_08 + EM08_STATUS_FORM] = EM08_STATUS_SHORT;
+	/* Message 0x08 pl[13] as the full-frame natives send it (Yongnuo 50 DF,
+	 * Voigtlander 15 mm), instead of the stock 0x20.  0x81 -- bit 5 clear --
+	 * confined the a9 II's AF area to APS-C.  With 0xE1 the a9 II's 0x0A
+	 * asks for the 117-byte message 0x05 (ff ff 03), which em_pump_status
+	 * then sends (msg_0x08.md, msg_0x0A.md). */
+	ea9_data[EA9_OFF_08 + EM08_STATUS_FORM] = 0xE1u;
 
 	/* The status frames are never sent as stored.  `main` calls the patcher
 	 * at 0x8a90 once before the loop starts, so every message 0x05 and 0x06
@@ -1521,7 +1551,21 @@ void em_pump_status(void)
 	ea9_data[EA9_OFF_06 + 4] = g_reply_seq;
 
 	delay_us(EM_LEAD_US);
-	em_transmit(&ea9_data[EA9_OFF_05], EA9_LEN_05);
+	if (em_status05_len == EM05_LEN_LONG) {
+		/* Built aside: in ea9_data the next packet follows 0x05. */
+		static uint8_t long05[EM05_LEN_LONG];
+		uint8_t i;
+
+		for (i = 0; i < EA9_LEN_05 - 3u; i++) {
+			long05[i] = ea9_data[EA9_OFF_05 + i];
+		}
+		for (; i < EM05_LEN_LONG - 3u; i++) {
+			long05[i] = 0;
+		}
+		em_transmit(long05, EM05_LEN_LONG);
+	} else {
+		em_transmit(&ea9_data[EA9_OFF_05], EA9_LEN_05);
+	}
 	delay_us(EM_STATUS_GAP_US);
 
 	/* THE TAIL.  Message 0x06 is a 43-byte core plus zero or more tail

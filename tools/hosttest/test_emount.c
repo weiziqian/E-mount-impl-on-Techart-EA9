@@ -139,6 +139,23 @@ static int request(uint8_t id, uint8_t seq, uint8_t a0, uint8_t a1)
 	return (sent_n == before + 1) ? before : -1;
 }
 
+/* The body's message 0x0A request as an a9 II sends it -- 25 bytes,
+ * ff <b1> 00 00 00 00 00 00 3f 00 ... -- with pl[1] chosen by the caller. */
+static uint16_t make_0a(uint8_t *buf, uint8_t seq, uint8_t b1)
+{
+	uint16_t n = 25, sum = 0, k;
+
+	memset(buf, 0, n);
+	buf[0] = 0xF0; buf[1] = (uint8_t)n; buf[3] = 0x02; buf[4] = seq;
+	buf[5] = 0x0A; buf[6] = 0xFF; buf[7] = b1; buf[14] = 0x3F;
+	for (k = 1; k <= n - 4; k++) {
+		sum += buf[k];
+	}
+	buf[n - 3] = (uint8_t)sum; buf[n - 2] = (uint8_t)(sum >> 8);
+	buf[n - 1] = 0x55;
+	return n;
+}
+
 static void check_frame(int i, uint8_t id, const char *what)
 {
 	const uint8_t *f = sent[i];
@@ -196,6 +213,9 @@ int main(void)
 		int before = sent_n;
 
 		len = make_request(req, 0x02, (uint8_t)(0x40 + i), id, 0, 0);
+		if (id == 0x0A) {
+			len = make_0a(req, (uint8_t)(0x40 + i), 0x7F);
+		}
 		host_body_frame(req, len);
 		if (id == EM_ID_BAUD) {
 			/* The body's switch pulse: low, then up, then down. */
@@ -273,31 +293,6 @@ int main(void)
 		}
 	}
 
-	/* The 0x08 reply's payload[13] must declare the 105-byte message 0x05,
-	 * the only form this build sends.  The stock's 0x20 declares 117. */
-	{
-		int seen = 0;
-
-		for (i = 0; i < sent_n; i++) {
-			if (sent[i][5] != 0x08) {
-				continue;
-			}
-			seen++;
-			if ((sent[i][0x13] & 0xFEu) != 0x80u) {
-				fail("the 0x08 reply's payload[13] is %#04x, which "
-				     "declares a 117-byte message 0x05",
-				     sent[i][0x13]);
-			}
-		}
-		if (!seen) {
-			fail("no 0x08 reply to check payload[13] in");
-		}
-		if (EA9_LEN_05 != 105u) {
-			fail("message 0x05 is %u bytes, but 0x08 declares 105",
-			     (unsigned)EA9_LEN_05);
-		}
-	}
-
 	/* --- the status pair --------------------------------------------- */
 	{
 		int before = sent_n;
@@ -328,6 +323,49 @@ int main(void)
 				fail("status lengths %d/%d, expected %d/%d",
 				     sent_len[before], sent_len[before + 1],
 				     EA9_LEN_05, EA9_LEN_06);
+			}
+		}
+	}
+
+	/* --- the message 0x05 length, chosen by the body's 0x0A ------------
+	 * This build declares 0xE1 in 0x08 pl[13] -- the long form -- so a
+	 * request of ff ff leaves it long and ff 7f forces it short. */
+	{
+		static const struct { uint8_t b1; uint16_t want; } C[] = {
+			{ 0xFF, 117 }, { 0x7F, EA9_LEN_05 },
+		};
+		unsigned c;
+
+		for (c = 0; c < 2; c++) {
+			int before = sent_n;
+			unsigned k;
+
+			len = make_0a(req, (uint8_t)(0x60 + c), C[c].b1);
+			host_body_frame(req, len);
+			em_poll();
+			host_frame_sync();
+			em_poll();
+			if (sent_n != before + 3) {
+				fail("0x0A ff %02x: %d frames, expected echo + "
+				     "status pair", C[c].b1, sent_n - before);
+				continue;
+			}
+			check_frame(before + 1, 0x05, "status 0x05 after 0x0A");
+			if (sent_len[before + 1] != C[c].want) {
+				fail("0x0A ff %02x: 0x05 is %d bytes, expected %u",
+				     C[c].b1, sent_len[before + 1], C[c].want);
+			}
+			for (k = 102; k < sent_len[before + 1] - 3u; k++) {
+				if (sent[before + 1][k] != 0) {
+					fail("long 0x05 byte %u is %#04x, not 0",
+					     k, sent[before + 1][k]);
+					break;
+				}
+			}
+			if (em_m0a_n == 0 || em_m0a[0] != 0xFF
+			    || em_m0a[1] != 0x7F) {
+				fail("first 0x0A request not kept: %02x %02x",
+				     em_m0a[0], em_m0a[1]);
 			}
 		}
 	}

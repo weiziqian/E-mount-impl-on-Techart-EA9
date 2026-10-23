@@ -113,6 +113,13 @@ void trail_m08(uint32_t page)
 	for (i = 0; i < EM_M08_LEN && i < em_m08_len; i++) {
 		w[4 + i / 4] |= (uint32_t)em_m08[i] << (8 * (i % 4));
 	}
+	/* The 0x0A request rides in the spare words: its payload in w[10..13],
+	 * count / captured length / the 0x05 length it selected in w[14]. */
+	for (i = 0; i < EM_M0A_LEN && i < em_m0a_len; i++) {
+		w[10 + i / 4] |= (uint32_t)em_m0a[i] << (8 * (i % 4));
+	}
+	w[14] = ((uint32_t)em_m0a_n << 16) | ((uint32_t)em_m0a_len << 8)
+	        | em_status05_len;
 	diag_page(page, w, 16);
 }
 
