@@ -140,6 +140,7 @@ void motor_release(void) { sim_duty = 0; sim_released = 1; }
  * where the hardware measured 474-848. */
 void motor_brake(void)   { sim_duty = 0; sim_released = 0; }
 void motor_drive(int16_t d) { sim_duty = d; sim_released = 0; }
+int16_t sim_duty_now(void) { return sim_duty; }
 
 /* Advance the mechanism one millisecond. Called from millis(), which the servo
  * loop polls -- so time only moves when the code under test looks at it. */

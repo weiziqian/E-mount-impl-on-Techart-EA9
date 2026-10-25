@@ -31,6 +31,16 @@
  * a tenth of a second. */
 #define WRONG_WAY_MARGIN 120
 
+/* How recently the previous leg must have ended for its exit speed to stand
+ * for the mechanism's speed now: inside the ~33 ms coast. */
+#define SERVO_COAST_MS 50
+
+/* The speed and time at which the last leg ended -- a leg cut short at speed
+ * leaves the mechanism coasting into the next one. */
+static int32_t  s_v_exit;
+static uint32_t s_t_exit;
+static uint8_t  s_exit_valid;
+
 /* Trace sample spacing.  24 samples covers 192 ms of a 400 ms timeout. */
 #define SERVO_TRACE_MS 8
 
@@ -143,6 +153,25 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 		motor_attach_pins();
 	}
 
+	/* Starting against a mechanism still coasting the other way -- the
+	 * previous leg was cut short at speed -- goes through the same brake
+	 * as a reversing retarget, and the wrong-way guard waits out the
+	 * coast. */
+	if (s_exit_valid && cfg->reverse_brake_ms
+	    && (uint32_t)(t0 - s_t_exit) < SERVO_COAST_MS
+	    && ((leg_sign > 0 && s_v_exit < -cfg->reverse_brake_above)
+	        || (leg_sign < 0 && s_v_exit > cfg->reverse_brake_above))) {
+		v_meas   = s_v_exit;
+		holding  = 1;
+		t_hold   = t0;
+		rebase   = 1;
+		t_rebase = t0;
+		if (!cfg->dry) {
+			motor_drive(0);
+			motor_brake();
+		}
+	}
+
 	for (;;) {
 		int32_t  pos;
 		uint32_t now;
@@ -248,11 +277,21 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 		}
 
 		if (holding) {
-			/* A deliberate stop, not a stall. */
+			/* A deliberate stop, not a stall.  Braked until the speed
+			 * is back under reverse_brake_above, measured at the
+			 * control rate, or until reverse_brake_ms runs out. */
 			t_last_move = now;
-			if ((uint32_t)(now - t_hold) >= cfg->reverse_brake_ms) {
+			if ((uint32_t)(now - t_ctl) >= SERVO_STEP_MS) {
+				v_meas  = (pos - pos_ctl) * 1000
+				          / (int32_t)(now - t_ctl);
+				t_ctl   = now;
+				pos_ctl = pos;
+			}
+			if ((v_meas <= cfg->reverse_brake_above
+			     && v_meas >= -cfg->reverse_brake_above)
+			    || (uint32_t)(now - t_hold) >= cfg->reverse_brake_ms) {
 				holding = 0;
-				t_ctl   = now;      /* no velocity across the gap */
+				t_ctl   = now;
 				pos_ctl = pos;
 			}
 		}
@@ -275,6 +314,14 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 			} else {
 				leg_start = pos;
 			}
+		}
+
+		/* At a travel end and past it: done -- see cfg->ends_settle. */
+		if (cfg->ends_settle
+		    && ((target >= cfg->end_hi && pos >= target)
+		        || (target <= cfg->end_lo && pos <= target))) {
+			out->outcome = SERVO_OK;
+			break;
 		}
 
 		/* --- the body may call the whole thing off ---------------- */
@@ -459,6 +506,10 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 		motor_drive(0);
 		motor_brake();
 	}
+
+	s_v_exit     = v_meas;
+	s_t_exit     = millis();
+	s_exit_valid = 1;
 
 	out->end        = abs_encoder_track();
 	{

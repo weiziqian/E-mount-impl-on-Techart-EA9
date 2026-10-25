@@ -32,6 +32,9 @@ int  host_cs_released(void);
 
 static int failures;
 
+/* The aperture the templates carry, 256 x AV + 4096. */
+#define AP_NOW EM_APERTURE_NOW
+
 /* Stand-in for the motor build's park handler. */
 static int park_calls;
 static int park_sent_before;     /* frames already sent when the park ran */
@@ -195,16 +198,20 @@ int main(void)
 	em_init();
 
 	/* --- the version telltale ---------------------------------------- */
-	if (ea9_data[EA9_OFF_07 + 12] != EM_FW_VERSION_BCD) {
-		fail("em_init did not write the version byte");
+	if (em_msg_07[12] != 0x59) {
+		fail("the 0x07 template does not carry version 0x59");
 	}
 	{
-		uint16_t lid = ea9_data[EA9_OFF_07 + 15]
-		               | ((uint16_t)ea9_data[EA9_OFF_07 + 16] << 8);
+		uint16_t lid = em_msg_07[15]
+		               | ((uint16_t)em_msg_07[16] << 8);
 
-		if (lid != EM_LENS_ID) {
-			fail("lens ID is %u, expected %u", lid, EM_LENS_ID);
+		if (lid != 50496u) {
+			fail("lens ID is %u, expected %u", lid, 50496u);
 		}
+	}
+	if (em_msg_07[6] != 0x01) {
+		fail("0x07 pl[0] is %#04x, expected 01 (native)",
+		     em_msg_07[6]);
 	}
 
 	/* --- the init handshake ------------------------------------------ */
@@ -259,9 +266,9 @@ int main(void)
 		}
 		if (idx < 0) {
 			fail("no 0x0C reply sent");
-		} else if (sent[idx][6] != EM_0C_FAST) {
-			fail("the 0x0C reply is %#04x, expected %#04x",
-			     sent[idx][6], EM_0C_FAST);
+		} else if (sent[idx][6] != 0x01) {
+			fail("the 0x0C reply is %#04x, expected 01",
+			     sent[idx][6]);
 		}
 		if (host_baud_changes != 1 || host_baud != EM_BAUD_FAST) {
 			fail("baud changed %d time(s), now %#06x; expected one "
@@ -288,7 +295,7 @@ int main(void)
 	/* The reply to 0x07 must carry the version we report, and its checksum
 	 * must cover it -- this is the whole point of the build. */
 	for (i = 0; i < sent_n; i++) {
-		if (sent[i][5] == 0x07 && sent[i][12] != EM_FW_VERSION_BCD) {
+		if (sent[i][5] == 0x07 && sent[i][12] != 0x59) {
 			fail("the 0x07 reply carries version %#04x", sent[i][12]);
 		}
 	}
@@ -350,6 +357,12 @@ int main(void)
 				     "status pair", C[c].b1, sent_n - before);
 				continue;
 			}
+			/* The reply is the request, byte for byte. */
+			if (sent_len[before] != len
+			    || memcmp(sent[before], req, len) != 0) {
+				fail("0x0A ff %02x: the reply is not an exact "
+				     "echo of the request", C[c].b1);
+			}
 			check_frame(before + 1, 0x05, "status 0x05 after 0x0A");
 			if (sent_len[before + 1] != C[c].want) {
 				fail("0x0A ff %02x: 0x05 is %d bytes, expected %u",
@@ -370,92 +383,57 @@ int main(void)
 		}
 	}
 
-	/* --- the frame edits the stock handlers make --------------------- */
-	/* Driven straight off ea9_fixups so it cannot drift from the generator.
-	 * This is the test that was missing when message 0x0c went out with the
-	 * stored payload[0] = 1 and a real body stopped answering. */
+	/* --- message 0x34 echoes the request's pl[0..1] into pl[1..2] ---- */
 	{
-		const uint8_t A0 = 0x5A, A1 = 0xC3;
-		unsigned k;
-		int checked = 0;
+		int idx = request(0x34, 0x20, 0x5A, 0xC3);
 
-		for (k = 0; k < EA9_FIXUP_COUNT; k++) {
-			const struct ea9_fixup *f = &ea9_fixups[k];
-			uint8_t want;
-			int idx;
-
-			/* Message 0x1B's RX fixups are DELIBERATELY not applied:
-			 * its reply carries this device's own aperture, not the
-			 * requester's.  Asserted on its own below, so exempting
-			 * it here hides nothing. */
-			if (f->id == EM_ID_APERTURE && f->kind == EA9_FIXUP_RX) {
-				continue;
+		if (idx < 0) {
+			fail("no 0x34 reply");
+		} else {
+			if (sent[idx][6] != 0x00 || sent[idx][7] != 0x5A
+			    || sent[idx][8] != 0xC3) {
+				fail("0x34 reply pl[0..2] = %02x %02x %02x, "
+				     "want 00 5a c3", sent[idx][6],
+				     sent[idx][7], sent[idx][8]);
 			}
-			/* Message 0x0C's fixup (payload[0] := 0) is overridden on
-			 * purpose -- this build answers 01 and switches baud,
-			 * asserted after the handshake above. */
-			if (f->id == EM_ID_BAUD) {
-				continue;
-			}
-			want = (f->kind == EA9_FIXUP_RX)
-			       ? (f->val == 6 ? A0 : f->val == 7 ? A1 : 0)
-			       : f->val;
-			idx = request(f->id, 0x20, A0, A1);
-
-			if (idx < 0) {
-				fail("id %#04x: no reply, cannot check its fixups",
-				     f->id);
-				continue;
-			}
-			if (sent[idx][f->off] != want) {
-				fail("id %#04x: frame[%d] is %#04x, the stock "
-				     "handler writes %#04x",
-				     f->id, f->off, sent[idx][f->off], want);
-			}
-			check_frame(idx, f->id, "fixup");   /* checksum must cover it */
-			checked++;
-		}
-		if (!checked) {
-			fail("no fixups were exercised -- the generator found none?");
+			check_frame(idx, 0x34, "echo");
 		}
 	}
 
 	/* --- the status frames are never sent as stored ------------------- */
 	{
-		const uint8_t MAXD = em_aperture_to_descriptor(EM_APERTURE_MAX);
-		const uint8_t MIND = em_aperture_to_descriptor(EM_APERTURE_MIN);
-		const struct { uint16_t off; uint8_t want; } PATCH[] = {
-			{ EA9_OFF_06 + 0x20, 0x6C },
-			{ EA9_OFF_06 + 0x21, 0x02 }, { EA9_OFF_06 + 0x22, 0x06 },
-			{ EA9_OFF_06 + 0x23, 0x20 },
+		const uint8_t MAXD = 0x16, MIND = 0x16;   /* EM_APERTURE_MAX/MIN, f/1.8 */
+		const struct { const uint8_t *f; uint16_t off; uint8_t want; } PATCH[] = {
+			{ em_msg_06, 0x20, 0x6C },
+			{ em_msg_06, 0x21, 0x02 }, { em_msg_06, 0x22, 0x06 },
+			{ em_msg_06, 0x23, 0x20 },
 			/* The three message 0x05 bytes the stock patches here
 			 * are the aperture descriptor, and this build writes
 			 * them from its own declaration instead -- asserted
 			 * with the rest of the block further down. */
-			{ EA9_OFF_05 + 0x32, MAXD },
-			{ EA9_OFF_05 + 0x39, MAXD },
-			{ EA9_OFF_05 + 0x3A, MIND },
-			/* The focal-derived step, now from the ladder rather
-			 * than a literal: 52 mm falls in the 50..69 band. */
-			{ EA9_OFF_06 + 0x13, 0x08 },
+			{ em_msg_05, 0x32, MAXD },
+			{ em_msg_05, 0x39, MAXD },
+			{ em_msg_05, 0x3A, MIND },
+			/* The defocus scale, one constant. */
+			{ em_msg_06, 0x13, EM_DEFOCUS_SCALE },
 		};
 		unsigned k;
 
 		for (k = 0; k < sizeof(PATCH) / sizeof(PATCH[0]); k++) {
-			if (ea9_data[PATCH[k].off] != PATCH[k].want) {
-				fail("status patch at .data+%#05x is %#04x, "
+			if (PATCH[k].f[PATCH[k].off] != PATCH[k].want) {
+				fail("template byte at +%#04x is %#04x, "
 				     "expected %#04x", PATCH[k].off,
-				     ea9_data[PATCH[k].off], PATCH[k].want);
+				     PATCH[k].f[PATCH[k].off], PATCH[k].want);
 			}
 		}
 	}
 
 	/* --- the focus position pair -------------------------------------- */
 	em_set_focus_position(5000, 5000);
-	if (ea9_data[EA9_OFF_06 + 0x08] != (5000 & 0xFF)
-	    || ea9_data[EA9_OFF_06 + 0x09] != (5000 >> 8)
-	    || ea9_data[EA9_OFF_06 + 0x1A] != (5000 & 0xFF)
-	    || ea9_data[EA9_OFF_06 + 0x1B] != (5000 >> 8)) {
+	if (em_msg_06[0x08] != (5000 & 0xFF)
+	    || em_msg_06[0x09] != (5000 >> 8)
+	    || em_msg_06[0x1A] != (5000 & 0xFF)
+	    || em_msg_06[0x1B] != (5000 >> 8)) {
 		fail("em_set_focus_position did not write both fields");
 	}
 
@@ -464,25 +442,25 @@ int main(void)
 	 * exactly the check the old test made and the reason it could not have
 	 * caught a swap. */
 	em_set_focus_position(5000, 5100);
-	if (ea9_data[EA9_OFF_06 + 0x1A] != (5000 & 0xFF)
-	    || ea9_data[EA9_OFF_06 + 0x1B] != (5000 >> 8)) {
+	if (em_msg_06[0x1A] != (5000 & 0xFF)
+	    || em_msg_06[0x1B] != (5000 >> 8)) {
 		fail("pl[20:22] must carry the position NOW");
 	}
-	if (ea9_data[EA9_OFF_06 + 0x08] != (5100 & 0xFF)
-	    || ea9_data[EA9_OFF_06 + 0x09] != (5100 >> 8)) {
+	if (em_msg_06[0x08] != (5100 & 0xFF)
+	    || em_msg_06[0x09] != (5100 >> 8)) {
 		fail("pl[2:4] must carry the position one frame AHEAD");
 	}
 
 	em_set_focus_position(99999, 99999);
-	if (ea9_data[EA9_OFF_06 + 0x08] != (ENC_TRAVEL_HI & 0xFF)
-	    || ea9_data[EA9_OFF_06 + 0x1A] != (ENC_TRAVEL_HI & 0xFF)) {
+	if (em_msg_06[0x08] != (ENC_TRAVEL_HI & 0xFF)
+	    || em_msg_06[0x1A] != (ENC_TRAVEL_HI & 0xFF)) {
 		fail("em_set_focus_position did not clamp to the advertised travel");
 	}
 	/* The forecast is clamped on its own account: it is the one that runs
 	 * ahead of the mechanism and so the one that can leave the travel. */
 	em_set_focus_position(5000, 99999);
-	if (ea9_data[EA9_OFF_06 + 0x08] != (ENC_TRAVEL_HI & 0xFF)
-	    || ea9_data[EA9_OFF_06 + 0x09] != (ENC_TRAVEL_HI >> 8)) {
+	if (em_msg_06[0x08] != (ENC_TRAVEL_HI & 0xFF)
+	    || em_msg_06[0x09] != (ENC_TRAVEL_HI >> 8)) {
 		fail("the forecast field was not clamped");
 	}
 
@@ -491,15 +469,15 @@ int main(void)
 	 * 500 in message 0x28 -- so the check that matters is that every field
 	 * now carries the SAME number, not that any one of them is right. */
 	{
-		static const uint16_t FOCAL[] = {
-			EA9_OFF_05 + 0x1E, EA9_OFF_05 + 0x20,
-			EA9_OFF_28 + 0x0A, EA9_OFF_28 + 0x0C,
+		const uint8_t *FOCAL[] = {
+			&em_msg_05[0x1E], &em_msg_05[0x20],
+			&em_msg_28[0x0A], &em_msg_28[0x0C],
 		};
 		unsigned k;
 
 		for (k = 0; k < sizeof(FOCAL) / sizeof(FOCAL[0]); k++) {
-			uint16_t v = (uint16_t)ea9_data[FOCAL[k]]
-			             | ((uint16_t)ea9_data[FOCAL[k] + 1] << 8);
+			uint16_t v = (uint16_t)FOCAL[k][0]
+			             | ((uint16_t)FOCAL[k][1] << 8);
 
 			if (v != EM_FOCAL_MM10) {
 				fail("focal field %u reads %u, expected %u",
@@ -507,115 +485,35 @@ int main(void)
 			}
 		}
 
-		/* And it must actually be driven by the variable, not merely
-		 * happen to agree with it once. */
-		em_set_focal_length(1234);
-		for (k = 0; k < sizeof(FOCAL) / sizeof(FOCAL[0]); k++) {
-			uint16_t v = (uint16_t)ea9_data[FOCAL[k]]
-			             | ((uint16_t)ea9_data[FOCAL[k] + 1] << 8);
-
-			if (v != 1234) {
-				fail("focal field %u did not follow "
-				     "em_set_focal_length", k);
-			}
-		}
-
-		/* The 0x567c ladder, at every boundary it has.  A step size
-		 * that disagrees with the focal length in the same build is the
-		 * kind of inconsistency this whole change exists to remove. */
-		{
-			static const struct { uint16_t mm10; uint8_t step; }
-			LADDER[] = {
-				{ 1234, 0x06 }, {  700, 0x06 }, {  699, 0x08 },
-				{  520, 0x08 }, {  500, 0x08 }, {  499, 0x0A },
-				{  400, 0x0A }, {  350, 0x0A }, {  349, 0x0E },
-				{  240, 0x0E }, {  239, 0x10 }, {  160, 0x10 },
-				{  159, 0x14 }, {  100, 0x14 },
-			};
-			unsigned j;
-
-			for (j = 0; j < sizeof(LADDER) / sizeof(LADDER[0]); j++) {
-				em_set_focal_length(LADDER[j].mm10);
-				if (ea9_data[EA9_OFF_06 + 0x13] != LADDER[j].step) {
-					fail("focal %u mm10 gave step %#04x, "
-					     "expected %#04x", LADDER[j].mm10,
-					     ea9_data[EA9_OFF_06 + 0x13],
-					     LADDER[j].step);
-				}
-			}
-		}
-		em_set_focal_length(EM_FOCAL_MM10);
 	}
 
-	/* --- the optical rows, from three constants -----------------------
-	 * The stock sends no grid at all (slot A is six zero bytes, which is
-	 * not a row), a pupil row inherited from the Canon clone, and a slot B
-	 * in message 0x28 that is the WRONG TYPE for that field.  Checked
-	 * here: every field carries what its constant says, each field gets
-	 * the row type that field is supposed to carry, and the fields FOLLOW
-	 * the setter rather than happening to agree once. */
+	/* --- the optical rows: each field carries the row type it should --- */
 	{
-		static const struct {
-			uint16_t off;        /* into ea9_data           */
+		const struct {
+			const uint8_t *row;
 			uint8_t  type;       /* what bit 7 must say     */
 			const char *name;
 		} ROW[] = {
-			{ EA9_OFF_05 + 0x26, 1, "message 0x05 slot A" },
-			{ EA9_OFF_05 + 0x2C, 0, "message 0x05 slot B" },
-			{ EA9_OFF_28 + 0x11, 1, "message 0x28 slot A" },
-			{ EA9_OFF_28 + 0x17, 1, "message 0x28 slot B" },
+			{ &em_msg_05[0x2C], 0, "message 0x05 slot B" },
+			{ &em_msg_28[0x17], 1, "message 0x28 slot B" },
 		};
-		static const uint8_t A[EM_ROW_BYTES]  = EM_SLOT_A;
-		static const uint8_t B0[EM_ROW_BYTES] = EM_SLOT_B_TYPE0;
-		static const uint8_t B1[EM_ROW_BYTES] = EM_SLOT_B_TYPE1;
-		/* Distinct in every byte, so a field wired to the wrong source
-		 * cannot pass by looking like its neighbour. */
-		static const uint8_t OTHER_A[EM_ROW_BYTES] = {
-			0xB1, 0x11, 0x22, 0x33, 0x44, 0x55
-		};
-		static const uint8_t OTHER_B0[EM_ROW_BYTES] = {
-			0x24, 0x66, 0x77, 0x01, 0x02, 0x03
-		};
-		static const uint8_t OTHER_B1[EM_ROW_BYTES] = {
-			0xD1, 0x88, 0x99, 0x04, 0x05, 0x06
-		};
-		const uint8_t *want[4], *then[4];
-		unsigned r, k;
+		unsigned r;
 
-		want[0] = A;  want[1] = B0; want[2] = A;  want[3] = B1;
-		then[0] = OTHER_A;  then[1] = OTHER_B0;
-		then[2] = OTHER_A;  then[3] = OTHER_B1;
+		/* Bit 7 of byte 0 is the row type.  Get it wrong and the body
+		 * is handed the right numbers as the wrong physical quantity. */
+		for (r = 0; r < 2; r++) {
+			unsigned k;
 
-		for (r = 0; r < 4; r++) {
-			for (k = 0; k < EM_ROW_BYTES; k++) {
-				if (ea9_data[ROW[r].off + k] != want[r][k]) {
-					fail("%s byte %u is %#04x, expected "
-					     "%#04x", ROW[r].name, k,
-					     ea9_data[ROW[r].off + k],
-					     want[r][k]);
-				}
+			/* An all-zero row is the null row, which has no type. */
+			for (k = 0; k < EM_ROW_BYTES && !ROW[r].row[k]; k++) {
 			}
-			/* Bit 7 of byte 0 is the row type.  Get it wrong and
-			 * the body is handed the right numbers as the wrong
-			 * physical quantity, which no value check catches. */
-			if (!!(ea9_data[ROW[r].off] & 0x80) != ROW[r].type) {
+			if (k < EM_ROW_BYTES
+			    && !!(ROW[r].row[0] & 0x80) != ROW[r].type) {
 				fail("%s is not a type %u row (byte 0 %#04x)",
 				     ROW[r].name, ROW[r].type,
-				     ea9_data[ROW[r].off]);
+				     ROW[r].row[0]);
 			}
 		}
-
-		em_set_optical_rows(OTHER_A, OTHER_B0, OTHER_B1);
-		for (r = 0; r < 4; r++) {
-			for (k = 0; k < EM_ROW_BYTES; k++) {
-				if (ea9_data[ROW[r].off + k] != then[r][k]) {
-					fail("%s did not follow "
-					     "em_set_optical_rows (byte %u)",
-					     ROW[r].name, k);
-				}
-			}
-		}
-		em_set_optical_rows(A, B0, B1);
 	}
 
 	/* Message 0x05 payload[4] is the APERTURE settle countdown -- how many
@@ -626,7 +524,7 @@ int main(void)
 
 	/* pl[8] bit 0 means "aperture at rest", and the stored 0x07 has it set,
 	 * which is what a lens whose iris never moves should say. */
-	if (ea9_data[EA9_OFF_05 + 0x0E] != 0x07) {
+	if (em_msg_05[0x0E] != 0x07) {
 		fail("message 0x05 pl[8] was disturbed");
 	}
 
@@ -671,26 +569,11 @@ int main(void)
 			fail("%u truncations on well-formed frames", em_truncated);
 		}
 
-		/* The first two windows of each kind must be captured whole --
-		 * counters took this as far as they could, and the focus
-		 * command's contents are what the motor path needs. */
-		if (em_cap_used != 3) {
-			fail("captured %u windows, expected 3 (two 10-byte, "
-			     "one 27-byte)", em_cap_used);
-		} else {
-			if (em_cap[0].declared != 10 || em_cap[0].got != 10) {
-				fail("capture 0: declared %u got %u, expected 10/10",
-				     em_cap[0].declared, em_cap[0].got);
-			}
-			if (em_cap[2].declared != 27 || em_cap[2].id != 0x03) {
-				fail("capture 2: declared %u id %#04x, expected 27/0x03",
-				     em_cap[2].declared, em_cap[2].id);
-			}
-			if (em_cap[2].data[0] != 0xF0 || em_cap[2].data[4] != 0x33) {
-				fail("capture 2 did not keep the raw bytes: "
-				     "%#04x %#04x", em_cap[2].data[0],
-				     em_cap[2].data[4]);
-			}
+		/* Nothing so far may be captured: 0x03, and 0x04 frames too
+		 * short to carry a record, are skipped. */
+		if (em_cap_used != 0) {
+			fail("captured %u windows before any focus command",
+			     em_cap_used);
 		}
 		/* A frame that declares more than it delivers must be caught. */
 		{
@@ -923,27 +806,21 @@ int main(void)
 		}
 		aperture_cmd(0x7B, 4800);          /* restore: 0x1B has been seen */
 
-		/* The current aperture must reach every field that reports it:
-		 * message 0x05's pair and message 0x28's copy.  A body that
-		 * reads one at the shutter press and the other from the status
-		 * loop must not be told two different numbers. */
-		em_set_aperture(5000);
-		if (ea9_data[EA9_OFF_05 + 6] != 0x88
-		    || ea9_data[EA9_OFF_05 + 7] != 0x13
-		    || ea9_data[EA9_OFF_05 + 8] != 0x88
-		    || ea9_data[EA9_OFF_05 + 9] != 0x13) {
-			fail("message 0x05 did not get both copies of the aperture");
-		}
-		/* Message 0x28 pl[9..10] FOLLOWS THE CAPABILITY BIT, and nothing
-		 * else.  The handshake above sent a 0x08 whose pl[1] is zero --
-		 * bit 7 clear -- so by now the body has asked for it, and the
-		 * field must carry the aperture.  Both states are exercised
-		 * properly further down; this is the consistency check. */
+		/* The aperture, fixed in the templates: message 0x05's pair,
+		 * and message 0x28's copy only when the body's 0x08 asked. */
 		{
-			uint16_t got = ea9_data[EA9_OFF_28 + 0x0F]
-			               | ((uint16_t)ea9_data[EA9_OFF_28 + 0x10] << 8);
-			uint16_t want = em_m08_aperture_on ? 5000 : 0;
+			uint16_t a = em_msg_05[6]
+			             | ((uint16_t)em_msg_05[7] << 8);
+			uint16_t b = em_msg_05[8]
+			             | ((uint16_t)em_msg_05[9] << 8);
+			uint16_t got = em_msg_28[0x0F]
+			               | ((uint16_t)em_msg_28[0x10] << 8);
+			uint16_t want = em_m08_aperture_on ? AP_NOW : 0;
 
+			if (a != AP_NOW || b != AP_NOW) {
+				fail("message 0x05 aperture %u/%u, expected %u",
+				     a, b, AP_NOW);
+			}
 			if (got != want) {
 				fail("0x28 pl[9..10] is %u with the capability "
 				     "bit %s, expected %u",
@@ -951,217 +828,23 @@ int main(void)
 			}
 		}
 
-		/* The conversion from the Canon-convention descriptor, checked
-		 * against the three devices actually measured on the wire.  If
-		 * this drifts, the adapter reports one aperture in pl[0..1] and
-		 * a different one in pl[44] -- which is the inconsistency the
-		 * stock firmware ships. */
+		/* The descriptor block: f/1.8 at both ends (no iris), and
+		 * never all zero -- a build that zeroed it was shown as F1.0
+		 * by an a9 II and refused autofocus (EA9.md §8). */
 		{
-			static const struct { uint8_t v; uint16_t av; } AP[] = {
-				{ 0x16, 4544 },   /* Viltrox + EF 50/1.8   f/1.834 */
-				{ 0x20, 4864 },   /* Viltrox + EF-S 24/2.8 f/2.828 */
-				{ 0x18, 4608 },   /* stock LM-EA9, at boot f/2.0   */
-				/* What we declare -- the same f/1.834 the
-				 * Viltrox sends, which is why the first row
-				 * and this one now agree.  Both are here on
-				 * purpose: one is a measured device, the other
-				 * is a constant in this build, and the test
-				 * is that the conversion serves both. */
-				{ 0x16, EM_APERTURE_NOW },
+			static const struct { uint8_t off, want; } D[] = {
+				{ 0x32, 0x16 }, { 0x34, 0x16 }, { 0x36, 0xA0 },
+				{ 0x39, 0x16 }, { 0x3A, 0x16 }, { 0x41, 0x01 },
 			};
 			unsigned k;
-
-			for (k = 0; k < sizeof(AP) / sizeof(AP[0]); k++) {
-				if (em_aperture_from_descriptor(AP[k].v) != AP[k].av) {
-					fail("descriptor %#04x converted to %u, "
-					     "expected %u", AP[k].v,
-					     em_aperture_from_descriptor(AP[k].v),
-					     AP[k].av);
-				}
-			}
-		}
-
-		/* THE TWO ENCODINGS ROUND-TRIP.
-		 *
-		 * The declarations are aperture values; the descriptor block
-		 * is 1/8 stop.  Anything that lands on the coarser grid must
-		 * come back unchanged, or the block would disagree with the
-		 * live fields derived from the same constant. */
-		{
-			static const uint16_t ON_GRID[] = {
-				4096, 4352, 4608, 4864, 5120, 5632, 6656
-			};
-			unsigned k;
-
-			for (k = 0; k < sizeof(ON_GRID) / sizeof(ON_GRID[0]); k++) {
-				uint8_t  d = em_aperture_to_descriptor(ON_GRID[k]);
-				uint16_t v = em_aperture_from_descriptor(d);
-
-				if (v != ON_GRID[k]) {
-					fail("aperture %u -> descriptor %#04x -> %u",
-					     ON_GRID[k], d, v);
-				}
-			}
-			/* Off the grid it ROUNDS, and rounds to nearest --
-			 * truncating would always report the lens slower than
-			 * it is.  4608 + 16 is the midpoint; one count past it
-			 * must round up. */
-			if (em_aperture_to_descriptor(4608 + 17) != 0x19) {
-				fail("an aperture just past the midpoint rounded "
-				     "down (%#04x)",
-				     em_aperture_to_descriptor(4608 + 17));
-			}
-			if (em_aperture_to_descriptor(4608 + 15) != 0x18) {
-				fail("an aperture just below the midpoint rounded "
-				     "up (%#04x)",
-				     em_aperture_to_descriptor(4608 + 15));
-			}
-			/* Below the scale's floor it clamps rather than
-			 * wrapping: 4096 is f/1.0 and there is nothing below
-			 * it in an unsigned subtraction. */
-			if (em_aperture_to_descriptor(0) != 0x08
-			    || em_aperture_to_descriptor(4000) != 0x08) {
-				fail("an aperture below f/1.0 did not clamp");
-			}
-		}
-
-		/* THE ARGUMENT ORDER, pinned independently of the constants.
-		 *
-		 * This adapter declares the same aperture for both ends, so
-		 * with the shipped values a swapped max/min is invisible --
-		 * and a mutation that swapped them passed every other check
-		 * here.  Call it with a range that is actually a range. */
-		{
-			em_set_aperture_range(0x1100u, 0x1600u);  /* f/1.4 .. f/8 */
-			if (ea9_data[EA9_OFF_05 + 0x32] != 0x10) {
-				fail("pl[44] took the minimum, not the maximum "
-				     "(%#04x)", ea9_data[EA9_OFF_05 + 0x32]);
-			}
-			if (ea9_data[EA9_OFF_05 + 0x34] != 0x10) {
-				fail("pl[46] did not follow the maximum (%#04x)",
-				     ea9_data[EA9_OFF_05 + 0x34]);
-			}
-			if (ea9_data[EA9_OFF_05 + 0x3A] != 0x38) {
-				fail("pl[52] took the maximum, not the minimum "
-				     "(%#04x)", ea9_data[EA9_OFF_05 + 0x3A]);
-			}
-		}
-
-		/* THE BLOCK MATCHES A STOCK LM-EA9 EXCEPT AT pl[52].
-		 *
-		 * The strongest statement available about a block whose fields
-		 * are half unknown: not "our values are reasonable" but "they
-		 * are the ones a shipped adapter sends".  The one field this
-		 * build was ever free with is pl[46], and getting it wrong
-		 * advertised an aperture the lens does not have.
-		 *
-		 * FOUR bytes are ours, and only those four: pl[44], pl[46] and
-		 * pl[51] carry the declared maximum, which is f/1.8 here and
-		 * f/2.0 on a stock unit, and pl[52] carries the declared
-		 * minimum, which is the same f/1.8 rather than the stock's
-		 * f/90 because this device has no iris.  Restoring f/90 was
-		 * tried and changed nothing.
-		 *
-		 * The maximum moved to f/1.8 so the descriptor block and the
-		 * slot B type 1 optical row describe one lens (emount.h).
-		 *
-		 * A future deviation has to edit this array, deliberately and
-		 * with a reason. */
-		{
-			static const uint8_t STOCK[16] = {
-				0x18, 0x00, 0x18, 0x00, 0xA0, 0x00, 0x00, 0x18,
-				0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
-			};
-			/* The indices this build writes from its own
-			 * declarations: pl[44], pl[46], pl[51] and pl[52]. */
-			static const uint8_t OURS[16] = {
-				1, 0, 1, 0, 0, 0, 0, 1,
-				2, 0, 0, 0, 0, 0, 0, 0
-			};
-			const uint8_t MAXB = em_aperture_to_descriptor(EM_APERTURE_MAX);
-			const uint8_t MINB = em_aperture_to_descriptor(EM_APERTURE_MIN);
-			unsigned k, deviations = 0;
-
-			em_set_aperture_range(EM_APERTURE_MAX, EM_APERTURE_MIN);
-			for (k = 0; k < 16; k++) {
-				uint8_t want = OURS[k] == 1 ? MAXB
-				               : OURS[k] == 2 ? MINB
-				               : STOCK[k];
-
-				if (ea9_data[EA9_OFF_05 + 0x32 + k] != want) {
-					fail("pl[%u] is %#04x, expected %#04x "
-					     "(a stock LM-EA9 sends %#04x)",
-					     44 + k,
-					     ea9_data[EA9_OFF_05 + 0x32 + k],
-					     want, STOCK[k]);
-				}
-				if (want != STOCK[k]) {
-					deviations++;
-				}
-			}
-			/* Every byte not in OURS matched a stock literal above,
-			 * so the only way to deviate is through OURS -- and the
-			 * exemption is not allowed to become vacuous either. */
-			if (!deviations) {
-				fail("test stale: nothing deviates from the "
-				     "stock block any more, so the exemption "
-				     "hides nothing and should go");
-			}
-		}
-
-		/* The descriptor block, written from the three declarations.
-		 * Checked against the live table, NOT by re-running em_init --
-		 * that blocks on the body's chip select. */
-		em_set_aperture_range(EM_APERTURE_MAX, EM_APERTURE_MIN);
-		em_set_aperture(EM_APERTURE_NOW);
-		{
-			const uint8_t MAXD = em_aperture_to_descriptor(EM_APERTURE_MAX);
-			const uint8_t MIND = em_aperture_to_descriptor(EM_APERTURE_MIN);
-			const struct { uint16_t off; uint8_t want;
-			               const char *what; } D[] = {
-				{ 0x32, MAXD,     "pl[44] maximum" },
-				{ 0x39, MAXD,     "pl[51] maximum copy" },
-				{ 0x3A, MIND,     "pl[52] minimum" },
-				/* pl[46] EQUALS the maximum.  The "one stop
-				 * wider" relation is in the STORED descriptor;
-				 * the boot patch moves pl[44] and not this, so
-				 * what the stock sends has them equal.  Getting
-				 * this wrong advertises an aperture the lens
-				 * does not have. */
-				{ 0x34, MAXD,     "pl[46] = the maximum" },
-				{ 0x36, 0xA0,     "pl[48] constant" },
-				{ 0x41, 0x01,     "pl[59] constant" },
-			};
-			unsigned k;
-			uint16_t got, want;
 
 			for (k = 0; k < sizeof(D) / sizeof(D[0]); k++) {
-				if (ea9_data[EA9_OFF_05 + D[k].off] != D[k].want) {
-					fail("descriptor %s is %#04x, expected %#04x",
-					     D[k].what,
-					     ea9_data[EA9_OFF_05 + D[k].off],
+				if (em_msg_05[D[k].off] != D[k].want) {
+					fail("descriptor at frame %#04x is %#04x, "
+					     "expected %#04x", D[k].off,
+					     em_msg_05[D[k].off],
 					     D[k].want);
 				}
-			}
-
-			/* NEVER all zero.  A build that zeroed this block was
-			 * displayed as F1.0 by an a9 II and refused autofocus
-			 * altogether (EA9.md §8). */
-			if (ea9_data[EA9_OFF_05 + 0x32] == 0
-			    && ea9_data[EA9_OFF_05 + 0x39] == 0
-			    && ea9_data[EA9_OFF_05 + 0x3A] == 0) {
-				fail("the aperture descriptor is empty");
-			}
-
-			/* And the reported aperture must agree with the
-			 * declaration -- now the same number, not a
-			 * conversion of it. */
-			got  = (uint16_t)ea9_data[EA9_OFF_05 + 6]
-			       | ((uint16_t)ea9_data[EA9_OFF_05 + 7] << 8);
-			want = EM_APERTURE_NOW;
-			if (got != want) {
-				fail("reported aperture %u disagrees with the "
-				     "declaration %u", got, want);
 			}
 		}
 
@@ -1171,29 +854,28 @@ int main(void)
 		 * aperture it cannot produce would contradict message 0x05
 		 * pl[0..1] in the same frame pair.  Ask for something we do not
 		 * have and the answer must still be what we do have. */
-		em_set_aperture(EM_APERTURE_NOW);
 		idx = aperture_cmd(0x73, 4864);          /* f/2.83, not ours */
 		if (idx >= 0) {
 			const uint8_t *g = sent[idx];
 			uint16_t a = g[6] | ((uint16_t)g[7] << 8);
 			uint16_t b = g[8] | ((uint16_t)g[9] << 8);
 
-			if (a != EM_APERTURE_NOW || b != EM_APERTURE_NOW) {
+			if (a != AP_NOW || b != AP_NOW) {
 				fail("0x1B reply carried %u/%u -- it must report "
 				     "our own %u, not the request's 4864",
-				     a, b, EM_APERTURE_NOW);
+				     a, b, AP_NOW);
 			}
 			check_frame(idx, EM_ID_APERTURE, "aperture reply");
 		}
 		/* And it must AGREE with message 0x05, which is the whole point
 		 * of not echoing. */
 		{
-			uint16_t m5 = ea9_data[EA9_OFF_05 + 6]
-			              | ((uint16_t)ea9_data[EA9_OFF_05 + 7] << 8);
+			uint16_t m5 = em_msg_05[6]
+			              | ((uint16_t)em_msg_05[7] << 8);
 
-			if (m5 != EM_APERTURE_NOW) {
+			if (m5 != AP_NOW) {
 				fail("message 0x05 says %u while 0x1B says %u",
-				     m5, EM_APERTURE_NOW);
+				     m5, AP_NOW);
 			}
 		}
 		/* The request is RECORDED even though it is not obeyed: a body
@@ -1379,6 +1061,35 @@ int main(void)
 			}
 			if (em_take_query(&tag, &operand)) {
 				fail("a third query came out of a two-query frame");
+			}
+		}
+
+		/* THE COMMAND CAPTURES: one per (length, first tag, Move
+		 * mode), the first being the mode-0 Move sent first above. */
+		{
+			unsigned a, b;
+
+			if (em_cap_used < 2 || em_cap[0].data[19] != 0x1D
+			    || em_cap[0].data[23] != 0x00
+			    || em_cap[0].declared != 27) {
+				fail("command capture 0 is not the first Move "
+				     "(%u captured)", em_cap_used);
+			}
+			for (a = 0; a < em_cap_used; a++) {
+				if (em_cap[a].id != 0x04) {
+					fail("capture %u is id %#04x", a,
+					     em_cap[a].id);
+				}
+				for (b = 0; b < a; b++) {
+					if (em_cap[a].declared == em_cap[b].declared
+					    && em_cap[a].data[19] == em_cap[b].data[19]
+					    && (em_cap[a].data[19] != 0x1D
+					        || em_cap[a].data[23]
+					           == em_cap[b].data[23])) {
+						fail("captures %u and %u are the "
+						     "same kind", b, a);
+					}
+				}
 			}
 		}
 
@@ -1636,7 +1347,7 @@ int main(void)
 			unsigned k;
 
 			for (k = 0; k < 8; k++) {
-				saved[k] = ea9_data[EA9_OFF_01 + k];
+				saved[k] = em_msg_01[k];
 			}
 			em_post_event(EM_REC_DRIVE, 0x10);
 			em_post_query_answer(0x22, 0x0111);
@@ -1652,7 +1363,7 @@ int main(void)
 				     sent_len[before + 1]);
 			}
 			for (k = 0; k < 8; k++) {
-				if (ea9_data[EA9_OFF_01 + k] != saved[k]) {
+				if (em_msg_01[k] != saved[k]) {
 					fail("the tail wrote into packet 0x01 "
 					     "at +%u", k);
 					break;
@@ -1719,145 +1430,195 @@ int main(void)
 	 * build stepped it on every move, which is not what the field means.
 	 */
 	{
-		const uint16_t OFF = EA9_OFF_06 + 0x1F;
+		const uint16_t OFF = 0x1F;
 		int before;
 
+		static const uint8_t WANT[] = {
+			EM_SCAN_ACCEPTED, EM_SCAN_SWEEPING, EM_SCAN_SWEEPING,
+			EM_SCAN_DONE, EM_SCAN_IDLE, EM_SCAN_IDLE,
+		};
+		unsigned k, ev_frame = 0;
+
+		/* Through the approach it is 0x00, however long that takes. */
 		em_set_scan_state(EM_SCAN_IDLE);
-		if (ea9_data[OFF] != EM_SCAN_IDLE) {
-			fail("the scan byte did not latch idle");
+		host_frame_sync(); em_poll();
+		if (em_msg_06[OFF] != EM_SCAN_IDLE) {
+			fail("the scan byte is %#04x during the approach",
+			     em_msg_06[OFF]);
 		}
 
-		em_set_scan_state(EM_SCAN_ACCEPTED);
-		/* It must HOLD.  An approach leg runs for many frames, and a
-		 * byte that decayed on its own would tell the body the sweep
-		 * had finished while it had not started. */
-		host_frame_sync(); em_poll();
-		host_frame_sync(); em_poll();
-		if (ea9_data[OFF] != EM_SCAN_ACCEPTED) {
-			fail("the scan byte decayed to %#04x", ea9_data[OFF]);
+		/* Launch, two frames of sweep, finish: one value per frame,
+		 * read off the frames actually sent. */
+		em_scan_launch();
+		for (k = 0; k < sizeof(WANT); k++) {
+			if (k == 3) {
+				em_scan_finish();
+			}
+			before = sent_n;
+			host_frame_sync();
+			em_poll();
+			if (sent[before + 1][0x1F] != WANT[k]) {
+				fail("scan frame %u carried %#04x, expected %#04x",
+				     k, sent[before + 1][0x1F], WANT[k]);
+			}
 		}
 
-		em_set_scan_state(EM_SCAN_SWEEPING);
+		/* 1F 00 five frames after the byte returned to 0x00, and only
+		 * once.  Frame 4 above was the return; count on from there. */
+		for (k = 0; k < 8; k++) {
+			before = sent_n;
+			host_frame_sync();
+			em_poll();
+			if (sent_len[before + 1] > EM06_LEN_IDLE
+			    && sent[before + 1][0x2D] == EM_REC_SCAN) {
+				if (ev_frame) {
+					fail("1F 00 sent twice");
+				}
+				ev_frame = k + 6;
+			}
+		}
+		if (ev_frame != 9) {
+			fail("1F 00 came %u frames after the return to idle, "
+			     "expected 5", ev_frame ? ev_frame - 4 : 0);
+		}
+
+		/* A new instruction cancels a pending 1F 00. */
+		em_scan_launch();
 		em_scan_finish();
-		if (ea9_data[OFF] != EM_SCAN_DONE) {
-			fail("the sweep did not end at 0x30 (%#04x)",
-			     ea9_data[OFF]);
+		for (k = 0; k < 6; k++) {
+			host_frame_sync(); em_poll();
 		}
-
-		/* The frame carrying 0x30 goes out BEFORE the byte moves on.
-		 * Stepping before the transmit would pass every table-side
-		 * check and still never put 0x30 on the wire. */
-		before = sent_n;
-		host_frame_sync();
-		em_poll();
-		if (sent[before + 1][0x1F] != EM_SCAN_DONE) {
-			fail("the frame sent carried %#04x, expected 0x30",
-			     sent[before + 1][0x1F]);
-		}
-		if (ea9_data[OFF] != EM_SCAN_IDLE) {
-			fail("the scan byte did not return to idle");
-		}
-
-		/* And it stays idle: the sequence must not wrap. */
-		host_frame_sync(); em_poll();
-		host_frame_sync(); em_poll();
-		if (ea9_data[OFF] != EM_SCAN_IDLE) {
-			fail("the scan sequence restarted itself");
+		em_set_scan_state(EM_SCAN_IDLE);
+		for (k = 0; k < 8; k++) {
+			before = sent_n;
+			host_frame_sync();
+			em_poll();
+			if (sent_len[before + 1] > EM06_LEN_IDLE
+			    && sent[before + 1][0x2D] == EM_REC_SCAN) {
+				fail("a cancelled 1F 00 was still sent");
+			}
 		}
 	}
 
 	/* --- message 0x06 payload[0..1]: motion and direction ------------- */
 	{
-		const uint16_t MOT = EA9_OFF_06 + 0x06;
-		const uint16_t DIR = EA9_OFF_06 + 0x07;
+		const uint16_t MOT = 0x06;
+		const uint16_t DIR = 0x07;
 
 		/* At rest, mid-travel: 0x82 and no direction. */
 		em_set_motion(0, 0x00, 4800);
-		if (ea9_data[MOT] != 0x82 || ea9_data[DIR] != 0x00) {
+		if (em_msg_06[MOT] != 0x82 || em_msg_06[DIR] != 0x00) {
 			fail("at rest reported %#04x %#04x",
-			     ea9_data[MOT], ea9_data[DIR]);
+			     em_msg_06[MOT], em_msg_06[DIR]);
 		}
 		em_set_motion(1, 0x02, 4800);
-		if (ea9_data[MOT] != 0x02 || ea9_data[DIR] != 0x02) {
+		if (em_msg_06[MOT] != 0x02 || em_msg_06[DIR] != 0x02) {
 			fail("moving reported %#04x %#04x",
-			     ea9_data[MOT], ea9_data[DIR]);
+			     em_msg_06[MOT], em_msg_06[DIR]);
 		}
 
 		/* The near-limit bits are derived from the position against the
 		 * limits IN THE FRAME, so they cannot contradict it. */
 		em_set_motion(0, 0x00, 4144);
-		if (!(ea9_data[MOT] & 0x10)) {
+		if (!(em_msg_06[MOT] & 0x10)) {
 			fail("at the lower limit, bit 4 is clear (%#04x)",
-			     ea9_data[MOT]);
+			     em_msg_06[MOT]);
 		}
 		em_set_motion(0, 0x00, 5632);
-		if (!(ea9_data[MOT] & 0x08)) {
+		if (!(em_msg_06[MOT] & 0x08)) {
 			fail("at the upper limit, bit 3 is clear (%#04x)",
-			     ea9_data[MOT]);
+			     em_msg_06[MOT]);
 		}
 		em_set_motion(0, 0x00, 4800);
-		if (ea9_data[MOT] & 0x18) {
+		if (em_msg_06[MOT] & 0x18) {
 			fail("mid-travel set a near-limit bit (%#04x)",
-			     ea9_data[MOT]);
+			     em_msg_06[MOT]);
 		}
 	}
 
-	/* --- message 0x06 payload[32..38]: the velocity history ----------- */
+	/* --- message 0x06 payload[32..38]: the trace within the frame ------ */
 	{
-		const uint8_t *h = &ea9_data[EA9_OFF_06 + 0x26];
-		unsigned k;
+		const uint8_t *h = &em_msg_06[0x26];
+		uint32_t base;
+		unsigned f, t, k;
+		int sum = 0;
 
+		/* Three 20 ms frames, the lens moving +2 units per ms, sampled
+		 * every millisecond as the servo loop would. */
+		for (f = 0; f < 3; f++) {
+			base = host_millis;
+			host_frame_sync();
+			for (t = 0; t < 20; t++) {
+				host_millis = base + t;
+				em_sample_position(4800 + 2 * (int)(f * 20 + t));
+			}
+			host_millis = base + 20;
+		}
+		if (em_frame_period_ms != 20) {
+			fail("frame period %u, test assumes 20", em_frame_period_ms);
+		}
+		host_frame_sync();
+		em_sample_position(4800 + 2 * 60);
+
+		/* Eighths of 20 ms fall at 2.5 ms steps, taken on the first
+		 * millisecond past each: 3 5 8 10 13 15 18, then 20 at the sync.
+		 * Older minus newer, so a move up reads negative. */
+		{
+			static const int8_t want[7] = { -4, -6, -4, -6, -4, -6, -4 };
+
+			for (k = 0; k < 7; k++) {
+				sum += (int8_t)h[k];
+				if ((int8_t)h[k] != want[k]) {
+					fail("pl[%u] = %d, want %d", 32 + k,
+					     (int8_t)h[k], want[k]);
+				}
+			}
+		}
+		if (sum != -34) {
+			fail("the trace sums to %d, not -34 (L[1]..L[8])", sum);
+		}
+
+		/* At rest it is all zero again one frame later. */
+		base = host_millis;
+		for (t = 0; t < 20; t++) {
+			host_millis = base + t;
+			em_sample_position(4800 + 2 * 60);
+		}
+		host_millis = base + 20;
+		host_frame_sync();
+		em_sample_position(4800 + 2 * 60);
 		for (k = 0; k < 7; k++) {
-			em_push_velocity(0);
-		}
-		em_push_velocity(5);
-		if ((int8_t)h[6] != 5) {
-			fail("the newest difference is not last (%d)",
-			     (int8_t)h[6]);
-		}
-		em_push_velocity(-3);
-		if ((int8_t)h[6] != -3 || (int8_t)h[5] != 5) {
-			fail("the history did not shift");
-		}
-		/* It is SIGNED and it saturates rather than wrapping: a move
-		 * faster than 127 counts per frame must not report a reversal. */
-		em_push_velocity(10000);
-		if ((int8_t)h[6] != 127) {
-			fail("a fast frame wrapped to %d", (int8_t)h[6]);
-		}
-		em_push_velocity(-10000);
-		if ((int8_t)h[6] != -128) {
-			fail("a fast reverse frame wrapped to %d", (int8_t)h[6]);
-		}
-		for (k = 0; k < 7; k++) {
-			em_push_velocity(0);
+			if (h[k] != 0) {
+				fail("a lens at rest reported pl[%u] = %d", 32 + k,
+				     (int8_t)h[k]);
+			}
 		}
 	}
 
 	/* --- message 0x05's focus reports --------------------------------- */
 	{
 		em_set_subject_distance(0x0700, 0xFF, 0x00);
-		if (ea9_data[EA9_OFF_05 + 0x1A] != 0x00
-		    || ea9_data[EA9_OFF_05 + 0x1B] != 0x07) {
+		if (em_msg_05[0x1A] != 0x00
+		    || em_msg_05[0x1B] != 0x07) {
 			fail("the subject distance is not at pl[20..21]");
 		}
-		if (ea9_data[EA9_OFF_05 + 0x1D] != 0xFF) {
+		if (em_msg_05[0x1D] != 0xFF) {
 			fail("the coarse distance is not at pl[23]");
 		}
 
 		/* pl[22]: bit 7 always set on a lens that reports motion, bit 6
 		 * only while something is moving.  Setting bit 6 must not
 		 * disturb the per-lens bits below it. */
-		ea9_data[EA9_OFF_05 + 0x1C] = 0x80;
+		em_msg_05[0x1C] = 0x80;
 		em_set_in_motion(1);
-		if (ea9_data[EA9_OFF_05 + 0x1C] != 0xC0) {
+		if (em_msg_05[0x1C] != 0xC0) {
 			fail("in-motion did not set bit 6 (%#04x)",
-			     ea9_data[EA9_OFF_05 + 0x1C]);
+			     em_msg_05[0x1C]);
 		}
 		em_set_in_motion(0);
-		if (ea9_data[EA9_OFF_05 + 0x1C] != 0x80) {
+		if (em_msg_05[0x1C] != 0x80) {
 			fail("at rest did not clear bit 6 (%#04x)",
-			     ea9_data[EA9_OFF_05 + 0x1C]);
+			     em_msg_05[0x1C]);
 		}
 	}
 
@@ -1888,7 +1649,7 @@ int main(void)
 		if (em_m08_aperture_on) {
 			fail("pl[1] bit 7 SET was read as \"the body wants it\"");
 		}
-		if (ea9_data[EA9_OFF_28 + 0x0F] || ea9_data[EA9_OFF_28 + 0x10]) {
+		if (em_msg_28[0x0F] || em_msg_28[0x10]) {
 			fail("0x28 pl[9..10] was filled although bit 7 was set");
 		}
 
@@ -1905,22 +1666,14 @@ int main(void)
 			fail("pl[1] bit 7 CLEAR was not read as \"wanted\"");
 		}
 		{
-			uint16_t got = ea9_data[EA9_OFF_28 + 0x0F]
-			               | ((uint16_t)ea9_data[EA9_OFF_28 + 0x10] << 8);
+			uint16_t got = em_msg_28[0x0F]
+			               | ((uint16_t)em_msg_28[0x10] << 8);
 
-			if (got != EM_APERTURE_NOW) {
+			if (got != AP_NOW) {
 				fail("0x28 pl[9..10] is %u, expected the current "
-				     "aperture %u", got, EM_APERTURE_NOW);
+				     "aperture %u", got, AP_NOW);
 			}
 		}
-		/* ...and it tracks a later aperture change, rather than being
-		 * a one-shot copy made when the bit arrived. */
-		em_set_aperture(0x1400u);
-		if ((ea9_data[EA9_OFF_28 + 0x0F]
-		     | ((uint16_t)ea9_data[EA9_OFF_28 + 0x10] << 8)) != 0x1400u) {
-			fail("0x28 pl[9..10] did not follow a later aperture");
-		}
-
 		/* THE FIRST REQUEST IS THE ONE CAPTURED.  The body sends 0x08
 		 * once per session, so the capture must be the handshake's --
 		 * a 10-byte frame with pl[1] = 0 -- and neither of the two
@@ -1945,7 +1698,6 @@ int main(void)
 		f[7] = 0xE1;
 		host_body_frame(f, n);
 		em_poll();
-		em_set_aperture(EM_APERTURE_NOW);
 	}
 
 	/* --- the body's capability offer -------------------------------- */

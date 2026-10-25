@@ -532,6 +532,140 @@ static void check_abort_stops_the_move(void)
 	}
 }
 
+/* A LEG CUT SHORT AT SPEED, then one the other way -- a Scan interrupted by
+ * its Move.  On a camera the second leg tripped the wrong-way guard within
+ * 5 ms, because the mechanism was still coasting at 20 counts/ms the old way.
+ * It must instead brake the coast down to reverse_brake_above, never drive
+ * against a mechanism moving faster than that, and arrive. */
+int16_t sim_duty_now(void);
+static int rv_violations;
+static double rv_vel_at_reverse;
+static void rv_pump(int32_t pos)
+{
+	int16_t d = sim_duty_now();
+
+	(void)pos;
+	if (d < 0 && sim_vel > 5.0 + 0.5) {
+		rv_violations++;
+	}
+	if (d < 0 && rv_vel_at_reverse < -900.0) {
+		rv_vel_at_reverse = sim_vel;
+	}
+}
+
+static void check_reverse_after_abort_at_speed(void)
+{
+	struct servo_cfg cfg = rt_cfg();
+	struct servo_result r1, r2;
+	double v_exit;
+
+	cfg.retarget = 0;
+	cfg.reverse_brake_ms    = 100;
+	cfg.reverse_brake_above = 5000;
+
+	sim_reset();
+	rt_arm(0, 0);
+	cfg.abort  = ab_hook;
+	ab_fire_at = 2000;
+	ab_count   = 0;
+	servo_move_rel(5000, &cfg, &r1);
+	v_exit = sim_vel;
+	if (r1.outcome != SERVO_ABORTED || v_exit < 10.0) {
+		fail("reverse-after-abort: setup ended %s at %.1f counts/ms; "
+		     "needs ABORTED at speed", NAME[r1.outcome], v_exit);
+		return;
+	}
+
+	cfg.abort = 0;
+	cfg.pump  = rv_pump;
+	rv_violations     = 0;
+	rv_vel_at_reverse = -1000.0;
+	servo_move_rel(500 - abs_encoder_track(), &cfg, &r2);
+
+	if (getenv("SV_DEBUG")) {
+		printf("  [rv] exit %.1f c/ms, reversed at %.1f, %s end %ld\n",
+		       v_exit, rv_vel_at_reverse, NAME[r2.outcome],
+		       (long)r2.end);
+	}
+	if (r2.outcome != SERVO_OK) {
+		fail("reverse-after-abort: ended %s at %ld, expected OK at 500",
+		     NAME[r2.outcome], (long)r2.end);
+	}
+	if (rv_violations) {
+		fail("reverse-after-abort: drove backwards %d time(s) while "
+		     "still moving forwards faster than 5 counts/ms",
+		     rv_violations);
+	}
+}
+
+/* A target at a travel end, with the mechanism already past it -- the
+ * overshoot into the close-focus stop.  It must be accepted where it is, not
+ * pulled back: on a camera that pull-back wedged and whined for 3 s. */
+static void check_end_target_is_not_pulled_back(void)
+{
+	struct servo_cfg cfg = rt_cfg();
+	struct servo_result r;
+	int32_t before;
+
+	cfg.retarget    = 0;
+	cfg.ends_settle = 1;
+	cfg.end_lo      = 0;
+	cfg.end_hi      = 3000;
+
+	sim_reset();
+	sim_pos = 3110;                     /* 110 past the end */
+	before  = abs_encoder_track();
+	servo_move_rel(3000 - before, &cfg, &r);
+	if (r.outcome != SERVO_OK || r.ms > 20
+	    || r.end < before - 20) {
+		fail("end target: %s in %u ms, %ld -> %ld; expected OK where "
+		     "it stood", NAME[r.outcome], r.ms, (long)before,
+		     (long)r.end);
+	}
+
+	/* The same at the low end. */
+	sim_reset();
+	sim_pos = -90;
+	before  = abs_encoder_track();
+	servo_move_rel(0 - before, &cfg, &r);
+	if (r.outcome != SERVO_OK || r.ms > 20 || r.end > before + 20) {
+		fail("low end target: %s in %u ms, %ld -> %ld", NAME[r.outcome],
+		     r.ms, (long)before, (long)r.end);
+	}
+
+	/* A target short of the end is still corrected back to. */
+	sim_reset();
+	sim_pos = 3110;
+	before  = abs_encoder_track();
+	servo_move_rel(2900 - before, &cfg, &r);
+	if (r.outcome != SERVO_OK || r.end > 2900 + 40) {
+		fail("inside target: %s at %ld, expected 2900",
+		     NAME[r.outcome], (long)r.end);
+	}
+}
+
+/* A SWEEP at scan speed braking with the ordinary profile must stop at its
+ * target.  With the old 8 ms stop it overran by 100-180 counts at 40
+ * counts/ms and reached the close-focus stop. */
+static void check_fast_sweep_stops_short_of_overrun(void)
+{
+	struct servo_cfg cfg = SAFE;
+	struct servo_result r;
+
+	cfg.v_cruise = 38000;
+	sim_reset();
+	servo_move_rel(5000, &cfg, &r);
+	if (getenv("SV_DEBUG")) {
+		printf("  [sw] %s end %ld overshoot %ld in %u ms\n",
+		       NAME[r.outcome], (long)r.end, (long)r.peak_overshoot,
+		       r.ms);
+	}
+	if (r.outcome != SERVO_OK || r.peak_overshoot > 40) {
+		fail("fast sweep: %s, overshoot %ld counts (allowed 40)",
+		     NAME[r.outcome], (long)r.peak_overshoot);
+	}
+}
+
 /* A hook that never fires must change nothing.  Without this, an abort that
  * was simply always-on would pass the test above. */
 static void check_abort_silent_is_a_normal_move(void)
@@ -1098,6 +1232,9 @@ int main(void)
 	check_retarget_resets_the_deadline();
 	check_total_ceiling();
 	check_reverse_brake_is_not_a_stall();
+	check_reverse_after_abort_at_speed();
+	check_end_target_is_not_pulled_back();
+	check_fast_sweep_stops_short_of_overrun();
 	check_retarget_keeps_the_integral();
 	check_retarget_reprofiles();
 	check_reversal_coast_window_is_bounded();

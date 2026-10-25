@@ -164,6 +164,13 @@ static void norm_page(void)
 	}
 	g_norm_written = 1;
 	trail_norm(NORM_PAGE);
+	{
+		unsigned k;
+
+		for (k = 0; k < CAP_PAGES && k < em_cap_used; k++) {
+			trail_cap(CAP_PAGE0 + k, k);
+		}
+	}
 }
 
 /* The quiet id log, at most once, for the same reason.
@@ -337,12 +344,10 @@ static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
 #define SCAN_V_MIN      4000
 #define SCAN_V_MAX      40000
 
-/* A scan must NOT slow down as it approaches the end of its window -- that is
- * the one thing a constant-speed sweep may not do -- but the profile slows
- * down near any target by construction.  Giving the scan a very short stop_ms
- * keeps v_target above v_cruise until the last hundred counts or so, which is
- * "constant speed, then stop" expressed in the same one law rather than as a
- * special case bolted beside it. */
+/* A Drive's stop_ms: braking only in the last hundred counts or so.  A Scan
+ * no longer uses it -- at 40 counts/ms that overran by 100-180 counts into
+ * the close-focus stop; it brakes with the ordinary profile and keeps its
+ * window at speed with a run-out long enough to brake in (focus_scan). */
 #define SCAN_STOP_MS    8
 
 /* THE FOCUS CONFIGURATION.  Every constant here was measured on the
@@ -410,10 +415,18 @@ static const struct servo_cfg STOCK = {
 	.retarget_max = 16,
 	.retarget_min = 12,
 
-	/* Only a genuine slam goes through the brake: above 15 counts/ms the
-	 * old way.  Unconditionally it cost 362 counts of extra overrun. */
-	.reverse_brake_ms    = 20,
-	.reverse_brake_above = 15000,
+	/* A reversal faster than 5 counts/ms is braked down to 5 before the
+	 * drive turns round, to spare the gears -- including the first leg
+	 * after one cut short at speed, the case a Scan interrupted by its
+	 * Move produces.  100 ms is a bound, not the expected wait. */
+	.reverse_brake_ms    = 100,
+	.reverse_brake_above = 5000,
+
+	/* A target at either end of the advertised travel is reached once the
+	 * mechanism is there or beyond -- never pulled back off the stop. */
+	.ends_settle = 1,
+	.end_lo      = 0,
+	.end_hi      = FOCUS_TRAVEL_COUNTS,
 };
 
 static uint16_t g_home_trace[SERVO_TRACE_N];
@@ -773,7 +786,14 @@ static void park_to_infinity(void)
 	}
 	here = abs_encoder_track();
 	if (here > -PARK.tolerance && here < PARK.tolerance) {
-		return;                  /* already there */
+		/* Already there -- the session's pages are still owed. */
+		if (g_park_n == 0) {
+			trail_fhist(FHIST_PAGE);
+			focus_hist_page(FOCUS_LAST_PAGE);
+			norm_page();
+		}
+		g_park_n++;
+		return;
 	}
 
 	servo_move_rel(-here, &PARK, &r);
@@ -851,10 +871,6 @@ static uint8_t  g_abort_by_stop;
 static struct em_focus_cmd g_next;
 static uint8_t             g_next_pending;
 
-/* The last position reported, so the velocity history is a difference rather
- * than a level. */
-static int32_t             g_last_reported;
-
 struct focus_rec {
 	int32_t  delta;
 	uint16_t ms;
@@ -894,10 +910,10 @@ static void focus_report_at(int32_t counts)
 	em_set_motion(moving, moving ? (ahead > counts ? 0x02u : 0x04u) : 0x00u,
 	              focus_counts_to_em06(counts));
 
-	/* The velocity history the body follows a move with: one frame-to-frame
-	 * difference per frame, newest last. */
-	em_push_velocity((counts - g_last_reported) / FOCUS_COUNTS_PER_UNIT);
-	g_last_reported = counts;
+	/* The position trace within the frame, pl[32..38]: sampled here,
+	 * where the encoder has just been read, at each eighth of the body's
+	 * frame -- as Yongnuo samples it from a timer (emount.c). */
+	em_sample_position(focus_counts_to_em06(counts));
 
 	/* And the same state in message 0x05, in units the body can use without
 	 * knowing this lens: the subject distance, and the in-motion flag. */
@@ -1191,13 +1207,48 @@ static void focus_report_cut(uint8_t running, uint8_t drive_param)
  * An a9 II sends it once message 0x07 pl[0] declares a native lens; with the
  * stock 02 it sends only Move and Stop (NOTES.md 79).
  */
+/* The least run-up and run-out, at any speed. */
 #define SCAN_RUNUP_COUNTS   300
 #define SCAN_RUNOUT_COUNTS  240
 
 static void focus_scan(const struct em_focus_cmd *c)
 {
-	int32_t first, second, dir, start, finish;
+	int32_t first, second, dir, start, finish, v, runup, runout;
 	uint8_t outcome;
+
+	/* The sweep speed.  The speed code is a distance PER BODY FRAME
+	 * (Yongnuo 50 DF FUN_0800a3f0): rec[4] & 0x7F units, in defocus units
+	 * when bit 7 is set -- times the defocus scale we advertise -- and in
+	 * position units when it is clear.  Divided by the measured frame
+	 * period, and clamped to what the mechanism can do. */
+	{
+		uint32_t units = (uint32_t)(c->scan_speed & 0x7Fu)
+		                 * ((c->scan_speed & 0x80u)
+		                    ? em_defocus_scale() : 1u);
+		uint32_t frame = em_frame_period_ms ? em_frame_period_ms : 17u;
+
+		v = (int32_t)(units * FOCUS_COUNTS_PER_UNIT * 1000u / frame);
+		if (v < SCAN_V_MIN) {
+			v = SCAN_V_MIN;
+		} else if (v > SCAN_V_MAX) {
+			v = SCAN_V_MAX;
+		}
+	}
+
+	/* Run-up and run-out sized to the speed, as Yongnuo sizes its run-up
+	 * to the distance it takes to reach scan speed: the sweep brakes with
+	 * the ordinary profile, which starts v * stop_ms before the target, so
+	 * a run-out that long keeps the whole window at constant speed.  The
+	 * run-up is the same length: the driven time constant (26 ms) is close
+	 * to stop_ms, so reaching speed takes about as far. */
+	runout = v * (int32_t)STOCK.stop_ms / 1000;
+	runup  = runout;
+	if (runout < SCAN_RUNOUT_COUNTS) {
+		runout = SCAN_RUNOUT_COUNTS;
+	}
+	if (runup < SCAN_RUNUP_COUNTS) {
+		runup = SCAN_RUNUP_COUNTS;
+	}
 
 	/* The sweep runs from `first` to `second` (Yongnuo FUN_0800a820 /
 	 * FUN_0800a692).  Endpoint form: A to B, and B to A when
@@ -1216,10 +1267,12 @@ static void focus_scan(const struct em_focus_cmd *c)
 	}
 
 	/* Run-up beyond `first`, run-out beyond `second`, both outside the
-	 * window. */
+	 * window.  Where the window reaches a travel end there is no room for
+	 * them and the clamp below cuts them short; the sweep then slows over
+	 * the last part of the window rather than running into the stop. */
 	dir    = (second > first) ? 1 : -1;
-	start  = first  - dir * SCAN_RUNUP_COUNTS;
-	finish = second + dir * SCAN_RUNOUT_COUNTS;
+	start  = first  - dir * runup;
+	finish = second + dir * runout;
 
 	/* Bit 3 (endpoint form): start from whichever end is nearer. */
 	if (!(c->scan_flags & 0x01u) && (c->scan_flags & 0x08u)) {
@@ -1245,7 +1298,8 @@ static void focus_scan(const struct em_focus_cmd *c)
 		finish = FOCUS_TRAVEL_COUNTS;
 	}
 
-	em_set_scan_state(EM_SCAN_ACCEPTED);
+	/* 0x00 through the approach: the sweep has not launched yet. */
+	em_set_scan_state(EM_SCAN_IDLE);
 
 	/* Leg 1: get to the run-up point, at whatever speed suits.  Wait until
 	 * it is at rest before the sweep -- focus_run is blocking, so this is
@@ -1257,18 +1311,14 @@ static void focus_scan(const struct em_focus_cmd *c)
 		return;
 	}
 
-	/* Leg 2: the sweep.  The scan speed code's magnitude is in the low bits
-	 * of rec[4]; the unit is UNKNOWN, so it is mapped onto this servo's own
-	 * duty range rather than invented into a velocity. */
-	em_set_scan_state(EM_SCAN_SWEEPING);
+	/* Leg 2: the sweep, at speed v, braking with the ordinary profile --
+	 * early, inside the run-out -- so it stops at the target instead of
+	 * overrunning it into the close-focus stop. */
+	em_scan_launch();
 	{
 		struct servo_cfg sweep = STOCK;
-		uint16_t         mag   = c->scan_speed & 0x7Fu;
 
-		sweep.v_cruise = SCAN_V_MIN
-		                 + (int32_t)((uint32_t)mag
-		                             * (SCAN_V_MAX - SCAN_V_MIN) / 0x7Fu);
-		sweep.stop_ms  = SCAN_STOP_MS;
+		sweep.v_cruise = v;
 		outcome = focus_run(finish, focus_counts_to_em06(finish), &sweep);
 	}
 
@@ -1277,8 +1327,7 @@ static void focus_scan(const struct em_focus_cmd *c)
 		focus_report_cut(EM_OP_SCAN, 0);
 		return;
 	}
-	em_scan_finish();
-	em_post_event(EM_REC_SCAN, 0x00u);
+	em_scan_finish();               /* 1F 00 follows five frames later */
 }
 
 /* ------------------------------------------------------------------------
@@ -1328,6 +1377,10 @@ static void focus_exec(const struct em_focus_cmd *c)
 	g_last_op       = c->op;
 	g_abort_pending = 0;
 	g_abort_by_stop = 0;
+
+	/* A new instruction clears the scan status, and a 1F 00 still waiting
+	 * out its five frames (Yongnuo FUN_08016654). */
+	em_set_scan_state(EM_SCAN_IDLE);
 
 	switch (c->op) {
 	case EM_OP_STOP:
@@ -1547,16 +1600,11 @@ int main(void)
 			diag_tally_mark(DIAG_MARK_HANDSHAKE, 0);
 		}
 
-		/* The transfer-window captures, once the handshake is over so
-		 * the init frames are in them too.  One page each; they are
-		 * written once and never again. */
+		/* The body's 0x08 and 0x0A requests, once the handshake is over.
+		 * The command captures go out with the NORM page instead: they
+		 * fill whenever the body first focuses. */
 		if (!caps_written && em_handshake_done && millis() >= 3000u) {
-			unsigned k;
-
 			caps_written = 1;
-			for (k = 0; k < CAP_PAGES && k < em_cap_used; k++) {
-				trail_cap(CAP_PAGE0 + k, k);
-			}
 			trail_m08(M08_PAGE);
 		}
 

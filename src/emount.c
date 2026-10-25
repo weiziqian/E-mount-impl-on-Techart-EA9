@@ -83,36 +83,11 @@
  * 0x10 -> 0x20 -> 0x30 -> 0x00.  Zero for every other instruction. */
 #define EM06_SCAN_STATE   0x1F
 
-/* The current aperture, 256 x AV + 4096.  Message 0x05 payload[0..1] with a
- * second copy at [2..3] -- frame offsets 6 and 8 -- and message 0x28
- * payload[9..10] = frame offset 0x0F.
- *
- * The adapter has no iris, so all three carry its declared aperture, written
- * once at boot and never again. */
+/* The current aperture, 256 x AV + 4096: message 0x05 payload[0..1] (fixed,
+ * in the template -- there is no iris) and message 0x28 payload[9..10], which
+ * follows it only when the body asks (set_28_aperture). */
 #define EM05_AP_NOW_A     0x06
-#define EM05_AP_NOW_B     0x08
 #define EM28_AP_NOW       0x0F
-
-/* The aperture descriptor, message 0x05 payload[44..59] -- frame offsets 0x32
- * through 0x41.  Canon EF convention: 1/8 stop, 0x08 = f/1.0.
- *
- * The body reads it.  A stock adapter ships the cloned EF 40mm f/2.8's
- * f/2.8..f/22 and widens it to f/2.0..f/90 at boot; one built with the block
- * zeroed was displayed as F1.0 and refused autofocus (EA9.md §8). */
-#define EM05_AP_MAX       0x32          /* pl[44] maximum                  */
-#define EM05_AP_WIDE      0x34          /* pl[46] maximum - 8, purpose unknown */
-#define EM05_AP_CONST_A0  0x36          /* pl[48] constant 0xA0            */
-#define EM05_AP_MAX2      0x39          /* pl[51] second copy of pl[44]    */
-#define EM05_AP_MIN       0x3A          /* pl[52] minimum                  */
-#define EM05_AP_CONST_01  0x41          /* pl[59] constant 0x01            */
-
-/* The 6-byte optical rows, at frame offsets (payload index + 6).  See
- * emount.h for what each row is and why message 0x28's slot B is not one of
- * these. */
-#define EM05_SLOT_A       0x26          /* pl[32..37] the field grid       */
-#define EM05_SLOT_B       0x2C          /* pl[38..43] pupil magnification  */
-#define EM28_SLOT_A       0x11          /* pl[11..16] the same grid        */
-#define EM28_SLOT_B       0x17          /* pl[17..22] pupil size, type 1   */
 
 /* Message 0x05 payload[4] = frame offset 10 is the APERTURE settle countdown.
  * Nothing writes it: this adapter has no iris, so its aperture is never in
@@ -123,28 +98,13 @@
  * which is what a lens whose iris is always settled should say.
  */
 
-/* The focal length, mm x 10, as a u16 LE pair -- the wide/tele pair a zoom
- * fills in differently and a prime fills in twice with the same number.
- *
- * TWO messages carry it, and the stock table disagrees with itself: message
- * 0x05 says 400, message 0x28 says 500.  Both encodings are identical
- * (msg_0x28.md), so one variable feeds all four fields. */
-#define EM05_FOCAL_A      0x1E
-#define EM05_FOCAL_B      0x20
-#define EM28_FOCAL_A      0x0A
-#define EM28_FOCAL_B      0x0C
-
 /* Message 0x06 payload[13..14] = frame offsets 0x13/0x14: the DEFOCUS SCALE,
  * how many position counts one defocus unit is worth (autofocus.md 2.6).  It
  * is what Move mode 6 multiplies its operand by, and it depends on the
  * aperture -- roughly in proportion to the f-number, so it reads as a fixed
  * fraction of the depth of focus.
  *
- * The stock derives a byte here from the user's focal-length setting at
- * 0x567c, always overwriting the stored 0x20, which is the same field reached
- * by a cruder route: it has one fixed aperture, so focal length is the only
- * term left.  So is this one, for the same reason, and the same ladder is
- * kept. */
+ * Fixed, in the template (emount.h, em_defocus_scale). */
 #define EM06_DEFOCUS      0x13
 
 /* Message 0x06 payload[0] and payload[1]: the motion status and the direction
@@ -163,8 +123,7 @@
 #define EM06_NEAR_LIMIT   0x1F
 
 /* Message 0x06 payload[32..38] = frame offsets 0x26..0x2C: seven signed bytes,
- * the frame-to-frame position differences over the last eight frames, newest
- * last.  A short velocity history for the body to follow a move with. */
+ * the position trace within the last frame (em_sample_position). */
 #define EM06_VEL_HIST     0x26
 #define EM06_VEL_HIST_N   7
 
@@ -178,12 +137,6 @@
 #define EM05_RING_DIR     0x42          /* pl[60] focus ring direction      */
 #define EM05_FLAG_REPORTS 0x80u
 #define EM05_FLAG_MOVING  0x40u
-#define EM1B_POS_A        0x06
-#define EM1B_POS_B        0x08
-
-/* Message 0x07 payload[6] = frame offset 12 (CLAUDE.md: file offset 0x4a44 is
- * 12 bytes into the packet at 0x4a38). */
-#define EM07_VERSION      12
 
 /* Message 0x08 payload[13] = frame offset 0x13: (v & 0xFE) == 0x80 declares
  * the 105-byte message 0x05, anything else the 117-byte one (msg_0x08.md). */
@@ -226,7 +179,7 @@ volatile uint8_t  em_status05_len = EA9_LEN_05;
 volatile uint8_t  em_m08_len;
 volatile uint16_t em_m08_n;
 volatile uint8_t  em_m08_aperture_on;
-static volatile uint16_t g_aperture;
+static void set_28_aperture(void);
 
 /* The pending instruction, and the query queue.  Both are written from the
  * chip-select interrupt and read from the main loop. */
@@ -260,6 +213,7 @@ volatile uint32_t em_t_first_vd;
 volatile uint16_t em_frame_period_ms = EM_FRAME_PERIOD_DEFAULT;
 volatile uint16_t em_frame_period_n;
 static volatile uint32_t g_t_prev_vd;
+static volatile uint32_t g_t_vd_us;    /* micros() at the last frame sync */
 volatile uint32_t em_id_mask_lo;
 volatile uint32_t em_id_mask_hi;
 volatile uint8_t  em_id_log[EM_ID_LOG_LEN];
@@ -282,11 +236,12 @@ static volatile uint8_t  g_reply_id;
 static volatile uint8_t  g_status_due;
 static volatile uint8_t  g_reply_seq;
 
-/* Three handlers copy bytes out of the request into the reply (ids 0x1b and
- * 0x34; see ea9_fixups).  The reply goes out from em_poll, by which time the
- * body may already have opened another window and reset the receive buffer --
- * so the request is snapshotted here at parse time, in the interrupt. */
-#define EM_REQ_SNAP 16
+/* Three replies are built from the request: 0x0A and 0x16 echo it whole,
+ * 0x34 copies two bytes of it.  The reply goes out from em_poll, by which time
+ * the body may already have opened another window and reset the receive
+ * buffer -- so the request is snapshotted here at parse time, in the
+ * interrupt.  32 covers the longest of them, the 25-byte 0x0A. */
+#define EM_REQ_SNAP 32
 static volatile uint8_t  g_req[EM_REQ_SNAP];
 
 static const struct ea9_packet *find_packet(uint8_t id)
@@ -442,7 +397,6 @@ static void em_send_id(uint8_t id)
 {
 	const struct ea9_packet *p = find_packet(id);
 	uint8_t *frame;
-	unsigned i;
 
 	if (id == EM_ID_SHUTDOWN) {
 		if (g_shutdown_enabled) {
@@ -479,56 +433,77 @@ static void em_send_id(uint8_t id)
 	 * arms the body's AF request (0x59ae).  Anything else unknown is simply
 	 * not ours to answer -- the stock jump table sends 72 of its 91 ids to
 	 * the ignore exit. */
+	/* Message 0x0A: echo the request exactly, as every lens measured does
+	 * (msg_0x0A.md).  What it asked for -- the message 0x05 length -- was
+	 * read when it arrived. */
+	if (id == 0x0Au) {
+		uint8_t  echo[EM_REQ_SNAP];
+		uint16_t n = g_req[1];
+		uint16_t i;
+
+		if (n >= EM_HEADER_LEN + 3u && n <= EM_REQ_SNAP) {
+			for (i = 0; i < n; i++) {
+				echo[i] = g_req[i];
+			}
+			em_transmit(echo, n);
+		}
+		return;
+	}
+
 	if (!p) {
 		return;
 	}
-	frame = &ea9_data[p->offset];
+	frame = p->frame;
 
-	/* Apply whatever the stock handler for this id writes into its frame
-	 * before sending.  NOT optional in general.  Message 0x0c is the case
-	 * that taught it: the stock forces payload[0] to 0, and sending 1 while
-	 * staying at 750 kbaud made a real body stop after three messages
-	 * (NOTES.md §19) -- 1 means "switching to 1.5 Mbaud".  This build does
-	 * switch, so it overrides that one fixup below. */
-	for (i = 0; i < EA9_FIXUP_COUNT; i++) {
-		const struct ea9_fixup *f = &ea9_fixups[i];
-
-		if (f->id != id) {
-			continue;
-		}
-
-		/* MESSAGE 0x1B IS ANSWERED WITH OUR OWN APERTURE, not with the
-		 * requester's.
-		 *
-		 * The stock's four RX fixups copy the request's bytes back into
-		 * both copies of the reply, and for a lens with a real iris the
-		 * two converge anyway once it has moved.  This one has no iris.
-		 * If a body ever commanded something other than the single
-		 * aperture we declare, echoing would confirm an aperture we do
-		 * not have -- while message 0x05 payload[0..1] went on reporting
-		 * the one we do, so the two would contradict each other in the
-		 * same frame pair.
-		 *
-		 * A deviation from the stock, deliberately: see below. */
-		if (id == EM_ID_APERTURE && f->kind == EA9_FIXUP_RX) {
-			continue;
-		}
-		frame[f->off] = (f->kind == EA9_FIXUP_RX)
-		                ? (f->val < EM_REQ_SNAP ? g_req[f->val] : 0)
-		                : f->val;
+	/* The one reply with request-dependent content: message 0x34 echoes
+	 * the request's pl[0..1] into its own pl[1..2]. */
+	if (id == 0x34u) {
+		frame[7] = g_req[6];
+		frame[8] = g_req[7];
 	}
 
-	/* MESSAGE 0x0C: ANSWER 01 AND SWITCH TO 1.5 MBAUD, as native lenses do.
-	 * Nothing switches back: the bus is disabled at shutdown and the next
-	 * boot starts at 750. */
+	/* Message 0x0C: the template answers 01, and the switch to 1.5 Mbaud
+	 * follows the reply.  Nothing switches back: the bus is disabled at
+	 * shutdown and the next boot starts at 750. */
 	if (id == EM_ID_BAUD) {
-		frame[EM_HEADER_LEN] = EM_0C_FAST;
 		em_transmit(frame, p->len);
 		em_baud_switch();
 		return;
 	}
 
 	em_transmit(frame, p->len);
+}
+
+/* THE FOCUS INSTRUCTIONS, raw, into the capture slots: the first message
+ * 0x04 of each distinct kind -- frame length, first record tag, and for a
+ * Move its mode byte -- so a dump shows exactly which instruction and mode
+ * the body uses.  Bare 22-byte frames carry no record and are skipped. */
+static void em_cap_command(const uint8_t *rx, uint16_t n)
+{
+	uint8_t tag  = rx[19];
+	uint8_t mode = (tag == 0x1Du && n > 23u) ? rx[23] : 0u;
+	volatile struct em_capture *c;
+	uint8_t j;
+	uint16_t k;
+
+	if (em_cap_used >= EM_CAP_SLOTS || rx[5] != 0x04u || rx[1] <= 22u) {
+		return;
+	}
+	for (j = 0; j < em_cap_used; j++) {
+		c = &em_cap[j];
+		if (c->declared == rx[1] && c->data[19] == tag
+		    && (tag != 0x1Du || c->data[23] == mode)) {
+			return;
+		}
+	}
+	c = &em_cap[em_cap_used];
+	c->declared = rx[1];
+	c->got      = (uint8_t)n;
+	c->id       = rx[5];
+	for (k = 0; k < EM_CAP_BYTES; k++) {
+		c->data[k] = (k < n) ? rx[k] : 0;
+	}
+	em_cap_used++;
 }
 
 /* Where message 0x04's records begin: 6 frame-header bytes + the 13-byte
@@ -803,22 +778,7 @@ static void on_cs_edge(int level)
 				em_norm_count[i]++;
 			}
 
-			/* Keep the raw bytes of the first two windows of each
-			 * kind.  Two rather than one because a command frame's
-			 * interesting fields are the ones that DIFFER between
-			 * occurrences -- a single sample cannot show that. */
-			if (em_norm_count[i] <= 2 && em_cap_used < EM_CAP_SLOTS) {
-				volatile struct em_capture *c = &em_cap[em_cap_used];
-				uint16_t k;
-
-				c->declared = rx[1];
-				c->got      = (uint8_t)n;
-				c->id       = rx[5];
-				for (k = 0; k < EM_CAP_BYTES; k++) {
-					c->data[k] = (k < n) ? rx[k] : 0;
-				}
-				em_cap_used++;
-			}
+			em_cap_command(rx, n);
 		} else {
 			em_norm_overflow = 1;
 		}
@@ -857,14 +817,14 @@ static void on_cs_edge(int level)
 			em_m08_len = (uint8_t)k;
 		}
 		em_m08_aperture_on = ((rx[7] & 0x80u) == 0u);
-		em_set_aperture(g_aperture);
+		set_28_aperture();
 	}
 
 	/* MESSAGE 0x0A's REQUEST: capture the first, and let every one pick
 	 * the message 0x05 length (see emount.h). */
 	if (rx[3] == EM_CLASS_INIT && rx[5] == 0x0Au && n >= 10) {
 		uint16_t k;
-		uint8_t  pl13 = ea9_data[EA9_OFF_08 + EM08_STATUS_FORM];
+		uint8_t  pl13 = em_msg_08[EM08_STATUS_FORM];
 
 		if (em_m0a_n != 0xFFFFu) {
 			em_m0a_n++;
@@ -1000,6 +960,7 @@ static void on_vd_edge(void)
 {
 	uint32_t now = millis();
 
+	g_t_vd_us = micros();
 	em_vd_edges++;
 	if (!em_t_first_vd) {
 		em_t_first_vd = now;
@@ -1038,19 +999,19 @@ static uint16_t clamp_travel(int32_t pos)
 	return (uint16_t)pos;
 }
 
-static void put16(uint16_t off, uint16_t v)
+static void put16(uint8_t *frame, uint16_t off, uint16_t v)
 {
-	ea9_data[off]     = (uint8_t)(v & 0xFFu);
-	ea9_data[off + 1] = (uint8_t)(v >> 8);
+	frame[off]     = (uint8_t)(v & 0xFFu);
+	frame[off + 1] = (uint8_t)(v >> 8);
 }
 
 void em_set_motion(uint8_t moving, uint8_t dir, int32_t pos)
 {
 	uint8_t v = moving ? EM06_MOVING : EM06_AT_REST;
-	uint16_t lo = (uint16_t)ea9_data[EA9_OFF_06 + EM06_LIMIT_LO]
-	              | ((uint16_t)ea9_data[EA9_OFF_06 + EM06_LIMIT_LO + 1] << 8);
-	uint16_t hi = (uint16_t)ea9_data[EA9_OFF_06 + EM06_LIMIT_HI]
-	              | ((uint16_t)ea9_data[EA9_OFF_06 + EM06_LIMIT_HI + 1] << 8);
+	uint16_t lo = (uint16_t)em_msg_06[EM06_LIMIT_LO]
+	              | ((uint16_t)em_msg_06[EM06_LIMIT_LO + 1] << 8);
+	uint16_t hi = (uint16_t)em_msg_06[EM06_LIMIT_HI]
+	              | ((uint16_t)em_msg_06[EM06_LIMIT_HI + 1] << 8);
 
 	/* Read the limits back out of the frame rather than from a constant:
 	 * they are what the body clamps against, and a status byte derived from
@@ -1061,36 +1022,84 @@ void em_set_motion(uint8_t moving, uint8_t dir, int32_t pos)
 	if (pos >= (int32_t)hi - EM06_NEAR_LIMIT) {
 		v |= EM06_NEAR_HI;
 	}
-	ea9_data[EA9_OFF_06 + EM06_MOTION]    = v;
-	ea9_data[EA9_OFF_06 + EM06_DIRECTION] = dir;
+	em_msg_06[EM06_MOTION]    = v;
+	em_msg_06[EM06_DIRECTION] = dir;
 }
 
-void em_push_velocity(int32_t delta)
-{
-	uint8_t *h = &ea9_data[EA9_OFF_06 + EM06_VEL_HIST];
-	uint8_t  k;
+/* Message 0x06 payload[32..38]: the position trace WITHIN the last frame, as
+ * Yongnuo 50 DF builds it.  Its frame-sync handler (FUN_08015f80) latches the
+ * position into L[0] and starts a timer that samples L[1..7] at every eighth
+ * of the frame period (0x08016020: 40000 ticks at 20 ms frames, 33280 at
+ * 16.7); the next frame sync takes L[8] and snapshots the lot, and the status
+ * writer (FUN_080160a4) sends pl[32+k] = L[k+1] - L[k+2], k = 0..6 -- OLDER
+ * minus newer, one eighth of a frame each.
+ *
+ * Here the samples are taken from the caller's loop, which reads the encoder
+ * anyway, at the first call past each eighth: within one loop iteration of
+ * the instant Yongnuo samples at. */
+#define SUB_N 8
+static uint16_t g_sub[SUB_N + 1];
+static uint8_t  g_sub_idx;        /* next slot to fill, 1..SUB_N-1 */
+static uint8_t  g_sub_valid;      /* g_sub[0] holds a real latch */
+static uint32_t g_sub_vd;         /* em_vd_edges at that latch */
 
-	if (delta > 127) {
-		delta = 127;
-	} else if (delta < -128) {
-		delta = -128;
+static uint8_t sat8(int32_t v)
+{
+	if (v > 127) {
+		v = 127;
+	} else if (v < -128) {
+		v = -128;
 	}
-	for (k = 0; k + 1u < EM06_VEL_HIST_N; k++) {
-		h[k] = h[k + 1];
+	return (uint8_t)(int8_t)v;
+}
+
+void em_sample_position(int32_t pos)
+{
+	uint32_t vd = em_vd_edges;
+	uint16_t p  = clamp_travel(pos);
+
+	if (vd != g_sub_vd) {
+		uint8_t *h = &em_msg_06[EM06_VEL_HIST];
+		uint8_t  k;
+
+		/* A frame whose eighths were not all reached (a blocking step
+		 * in between) has its missing ones read as where it ended. */
+		while (g_sub_idx < SUB_N) {
+			g_sub[g_sub_idx++] = p;
+		}
+		g_sub[SUB_N] = p;
+		for (k = 0; k < EM06_VEL_HIST_N; k++) {
+			h[k] = g_sub_valid
+			       ? sat8((int32_t)g_sub[k + 1] - (int32_t)g_sub[k + 2])
+			       : 0u;
+		}
+		g_sub[0]    = p;
+		g_sub_idx   = 1;
+		g_sub_valid = 1;
+		g_sub_vd    = vd;
+		return;
 	}
-	h[EM06_VEL_HIST_N - 1] = (uint8_t)(int8_t)delta;
+
+	if (g_sub_idx < SUB_N && em_frame_period_ms) {
+		uint32_t due = (uint32_t)g_sub_idx * em_frame_period_ms
+		               * 1000u / SUB_N;
+
+		if ((uint32_t)(micros() - g_t_vd_us) >= due) {
+			g_sub[g_sub_idx++] = p;
+		}
+	}
 }
 
 void em_set_subject_distance(uint16_t code, uint8_t coarse, uint8_t coarse_pos)
 {
-	put16(EA9_OFF_05 + EM05_DISTANCE, code);
-	ea9_data[EA9_OFF_05 + EM05_DIST_COARSE] = coarse;
-	ea9_data[EA9_OFF_05 + EM05_POS_COARSE]  = coarse_pos;
+	put16(em_msg_05, EM05_DISTANCE, code);
+	em_msg_05[EM05_DIST_COARSE] = coarse;
+	em_msg_05[EM05_POS_COARSE]  = coarse_pos;
 }
 
 void em_set_in_motion(uint8_t moving)
 {
-	uint8_t v = ea9_data[EA9_OFF_05 + EM05_FLAGS];
+	uint8_t v = em_msg_05[EM05_FLAGS];
 
 	v |= EM05_FLAG_REPORTS;
 	if (moving) {
@@ -1098,7 +1107,7 @@ void em_set_in_motion(uint8_t moving)
 	} else {
 		v = (uint8_t)(v & ~EM05_FLAG_MOVING);
 	}
-	ea9_data[EA9_OFF_05 + EM05_FLAGS] = v;
+	em_msg_05[EM05_FLAGS] = v;
 }
 
 void em_set_focus_position(int32_t pos, int32_t ahead)
@@ -1110,21 +1119,39 @@ void em_set_focus_position(int32_t pos, int32_t ahead)
 	 * position now.  The stock writes the same value to both -- it has no
 	 * forecast to offer -- and so did this, until the caller was given one.
 	 * Equal values remain correct and are what a stationary lens sends. */
-	ea9_data[EA9_OFF_06 + EM06_POS_A]     = (uint8_t)(ahead_v & 0xFFu);
-	ea9_data[EA9_OFF_06 + EM06_POS_A + 1] = (uint8_t)(ahead_v >> 8);
-	ea9_data[EA9_OFF_06 + EM06_POS_B]     = (uint8_t)(now_v & 0xFFu);
-	ea9_data[EA9_OFF_06 + EM06_POS_B + 1] = (uint8_t)(now_v >> 8);
+	em_msg_06[EM06_POS_A]     = (uint8_t)(ahead_v & 0xFFu);
+	em_msg_06[EM06_POS_A + 1] = (uint8_t)(ahead_v >> 8);
+	em_msg_06[EM06_POS_B]     = (uint8_t)(now_v & 0xFFu);
+	em_msg_06[EM06_POS_B + 1] = (uint8_t)(now_v >> 8);
 }
 
 
-/* Status frames left in the scan tail: 1 = the frame now going out carries
- * 0x30, after which the byte returns to idle. */
-static volatile uint8_t g_scan_tail;
+/* The scan-status queue (see emount.h): taken one value per status frame. */
+#define SCAN_Q_N          4
+#define SCAN_CLEAR        0xFFu   /* back to idle, and arm the event */
+#define SCAN_EVENT_FRAMES 5
+static uint8_t g_scan_q[SCAN_Q_N];
+static uint8_t g_scan_qn;
+static uint8_t g_scan_event_in;   /* frames until 1F 00; 0 = none pending */
+
+static void scan_push(uint8_t v)
+{
+	if (g_scan_qn < SCAN_Q_N) {
+		g_scan_q[g_scan_qn++] = v;
+	}
+}
 
 void em_set_scan_state(uint8_t state)
 {
-	g_scan_tail = 0;
-	ea9_data[EA9_OFF_06 + EM06_SCAN_STATE] = state;
+	g_scan_qn       = 0;
+	g_scan_event_in = 0;
+	em_msg_06[EM06_SCAN_STATE] = state;
+}
+
+void em_scan_launch(void)
+{
+	scan_push(EM_SCAN_ACCEPTED);
+	scan_push(EM_SCAN_SWEEPING);
 }
 
 /* Events waiting to go out, oldest first.  One per frame: a 50-byte frame's
@@ -1164,160 +1191,50 @@ void em_post_query_answer(uint8_t tag, uint16_t value)
 
 void em_scan_finish(void)
 {
-	/* The first step is written now rather than by the pump, so a body that
-	 * samples before the next frame sync still sees the sweep end. */
-	ea9_data[EA9_OFF_06 + EM06_SCAN_STATE] = EM_SCAN_DONE;
-	g_scan_tail = 1;
+	scan_push(EM_SCAN_DONE);
+	scan_push(SCAN_CLEAR);
 }
 
-/* One step of the scan tail, after a status frame has carried the current
- * value.  Spacing the steps by the body's frame rate rather than by wall time
- * is what guarantees each is seen: the body samples once per frame. */
-static void scan_state_step(void)
+/* Once per status frame, before message 0x06 is built: count down a pending
+ * 1F 00, then take the next queued value into payload[25].  An empty queue
+ * leaves the last value standing. */
+static void scan_state_frame(void)
 {
-	if (!g_scan_tail) {
+	uint8_t v, k;
+
+	if (g_scan_event_in && --g_scan_event_in == 0) {
+		em_post_event(EM_REC_SCAN, 0x00u);
+	}
+	if (!g_scan_qn) {
 		return;
 	}
-	g_scan_tail--;
-	ea9_data[EA9_OFF_06 + EM06_SCAN_STATE] = EM_SCAN_IDLE;
-}
-
-/* 0x567c's ladder, on the focal length in whole mm (EA9.md 4.5).  Reproduced
- * rather than hardcoded so the step size cannot drift out of agreement with
- * the focal length the same build reports. */
-static uint8_t focal_step(uint16_t mm)
-{
-	if (mm >= 70u) {
-		return 0x06;
+	v = g_scan_q[0];
+	for (k = 1; k < g_scan_qn; k++) {
+		g_scan_q[k - 1] = g_scan_q[k];
 	}
-	if (mm >= 50u) {
-		return 0x08;
+	g_scan_qn--;
+	if (v == SCAN_CLEAR) {
+		v = EM_SCAN_IDLE;
+		g_scan_event_in = SCAN_EVENT_FRAMES;
 	}
-	if (mm >= 35u) {
-		return 0x0A;
-	}
-	if (mm >= 24u) {
-		return 0x0E;
-	}
-	if (mm >= 16u) {
-		return 0x10;
-	}
-	return 0x14;
-}
-
-void em_set_focal_length(uint16_t mm10)
-{
-	/* Both fields of both pairs.  A prime sends the same number twice; the
-	 * pair is the wide/tele layout a zoom would use. */
-	put16(EA9_OFF_05 + EM05_FOCAL_A, mm10);
-	put16(EA9_OFF_05 + EM05_FOCAL_B, mm10);
-	put16(EA9_OFF_28 + EM28_FOCAL_A, mm10);
-	put16(EA9_OFF_28 + EM28_FOCAL_B, mm10);
-
-	ea9_data[EA9_OFF_06 + EM06_DEFOCUS] = focal_step(mm10 / 10u);
-}
-
-/* The Canon-convention descriptor byte (1/8 stop, 0x08 = f/1.0) converted to
- * the native scale message 0x05 payload[0..1] uses (256 x AV + 4096).
- *
- * This is the stock's own routine at 0x66b8, arithmetic for arithmetic:
- *
- *      F  = 2^((v-8)/16)      so  AV = 2*log2(F) = (v-8)/8
- *      pl = 256*AV + 4096     =   32*(v-8) + 4096
- *
- * No logarithms needed -- both encodings are already logarithmic in F, and the
- * whole conversion is a scale and a bias.  It reproduces every device measured
- * exactly: Viltrox+EF50 0x16 -> 4544, Viltrox+EF-S24 0x20 -> 4864, and the
- * stock LM-EA9's stored 0x20 against its stored 4864. */
-uint16_t em_aperture_from_descriptor(uint8_t v)
-{
-	return (uint16_t)(32u * (uint16_t)(v - 8u) + 4096u);
+	em_msg_06[EM06_SCAN_STATE] = v;
 }
 
 uint16_t em_defocus_scale(void)
 {
-	return (uint16_t)ea9_data[EA9_OFF_06 + EM06_DEFOCUS]
-	       | ((uint16_t)ea9_data[EA9_OFF_06 + EM06_DEFOCUS + 1] << 8);
+	return (uint16_t)em_msg_06[EM06_DEFOCUS]
+	       | ((uint16_t)em_msg_06[EM06_DEFOCUS + 1] << 8);
 }
 
-void em_set_aperture(uint16_t av)
+/* Message 0x28 pl[9..10] carries the current aperture only when the body's
+ * 0x08 request asks for it (emount.h); otherwise zero.  Filling it unasked
+ * made an a9 II re-meter after every exposure. */
+static void set_28_aperture(void)
 {
-	g_aperture = av;
+	uint16_t av = (uint16_t)em_msg_05[EM05_AP_NOW_A]
+	              | ((uint16_t)em_msg_05[EM05_AP_NOW_A + 1] << 8);
 
-	put16(EA9_OFF_05 + EM05_AP_NOW_A, av);
-	put16(EA9_OFF_05 + EM05_AP_NOW_B, av);
-	put16(EA9_OFF_1B + EM1B_POS_A,    av);
-	put16(EA9_OFF_1B + EM1B_POS_B,    av);
-
-	/* MESSAGE 0x28's COPY IS OPTIONAL, and the body says whether it wants
-	 * it (emount.h).  Filling it unasked made an a9 II re-meter after every
-	 * exposure; a stock LM-EA9 leaves it zero and its photographs are still
-	 * tagged correctly, so zero is the safe default and this is the only
-	 * thing that turns it on. */
-	put16(EA9_OFF_28 + EM28_AP_NOW, em_m08_aperture_on ? av : 0u);
-}
-
-/* The inverse: an aperture value back to a descriptor byte.
- *
- *     value = 32*(v - 8) + 4096   =>   v = (value - 4096)/32 + 8
- *
- * Rounded, not truncated: the descriptor is 1/8 stop and the value scale is
- * 1/256, so all but one value in 32 lands between two descriptor bytes, and
- * truncating would always report the lens as slower than it is.  A value below
- * the scale's own floor of 4096 (f/1.0) clamps to 0x08 rather than wrapping.
- */
-uint8_t em_aperture_to_descriptor(uint16_t av)
-{
-	if (av <= 4096u) {
-		return 0x08u;
-	}
-	return (uint8_t)(((uint32_t)av - 4096u + 16u) / 32u + 8u);
-}
-
-void em_set_aperture_range(uint16_t max_av, uint16_t min_av)
-{
-	uint8_t max_desc = em_aperture_to_descriptor(max_av);
-	uint8_t min_desc = em_aperture_to_descriptor(min_av);
-
-	ea9_data[EA9_OFF_05 + EM05_AP_MAX]  = max_desc;
-	ea9_data[EA9_OFF_05 + EM05_AP_MAX2] = max_desc;
-	ea9_data[EA9_OFF_05 + EM05_AP_MIN]  = min_desc;
-
-	/* pl[46] = pl[44].  NOT pl[44] - 8.
-	 *
-	 * The "one stop wider" relation describes the STORED descriptor, which
-	 * on this device is the cloned EF 40mm f/2.8's 0x20 / 0x18 pair.  The
-	 * stock's boot patch at 0x8a8c then writes pl[44] and pl[51] only --
-	 * verified at instruction level, and .data+0x1dc has no other code
-	 * reference at all -- so what an LM-EA9 actually SENDS is
-	 * pl[46] == pl[44] == 0x18, and the relation is broken on the wire.
-	 *
-	 * Implementing the stored relation instead told the body this lens
-	 * opens to f/1.41 when its stated maximum is f/2.0: one stop wider than
-	 * anything it can do, in a field a body metering wide open would use.
-	 * That is a deviation nobody asked for, on a field whose purpose is
-	 * UNKNOWN, which is the worst combination. */
-	ea9_data[EA9_OFF_05 + EM05_AP_WIDE] = max_desc;
-
-	/* The two constants that accompany the block. */
-	ea9_data[EA9_OFF_05 + EM05_AP_CONST_A0] = 0xA0;
-	ea9_data[EA9_OFF_05 + EM05_AP_CONST_01] = 0x01;
-}
-
-void em_set_optical_rows(const uint8_t *slot_a, const uint8_t *slot_b_type0,
-                         const uint8_t *slot_b_type1)
-{
-	uint8_t k;
-
-	for (k = 0; k < EM_ROW_BYTES; k++) {
-		ea9_data[EA9_OFF_05 + EM05_SLOT_A + k] = slot_a[k];
-		ea9_data[EA9_OFF_05 + EM05_SLOT_B + k] = slot_b_type0[k];
-		/* The same grid in both messages, and each message's slot B
-		 * gets the row type that message is supposed to carry
-		 * (emount.h). */
-		ea9_data[EA9_OFF_28 + EM28_SLOT_A + k] = slot_a[k];
-		ea9_data[EA9_OFF_28 + EM28_SLOT_B + k] = slot_b_type1[k];
-	}
+	put16(em_msg_28, EM28_AP_NOW, em_m08_aperture_on ? av : 0u);
 }
 
 uint8_t em_take_focus_cmd(struct em_focus_cmd *out)
@@ -1365,62 +1282,7 @@ uint8_t em_take_query(uint8_t *tag, uint16_t *operand)
 
 void em_init(void)
 {
-	/* Report our own firmware version rather than the stock 1.8.  No
-	 * checksum fixup: em_transmit recomputes it. */
-	ea9_data[EA9_OFF_07 + EM07_VERSION] = EM_FW_VERSION_BCD;
-
-	/* The lens ID, message 0x07 payload[9..10] = frame offset 15..16. */
-	ea9_data[EA9_OFF_07 + 15] = (uint8_t)(EM_LENS_ID & 0xFFu);
-	ea9_data[EA9_OFF_07 + 16] = (uint8_t)(EM_LENS_ID >> 8);
-
-	/* Message 0x08 pl[13] as the full-frame natives send it (Yongnuo 50 DF,
-	 * Voigtlander 15 mm), instead of the stock 0x20.  0x81 -- bit 5 clear --
-	 * confined the a9 II's AF area to APS-C.  With 0xE1 the a9 II's 0x0A
-	 * asks for the 117-byte message 0x05 (ff ff 03), which em_pump_status
-	 * then sends (msg_0x08.md, msg_0x0A.md). */
-	ea9_data[EA9_OFF_08 + EM08_STATUS_FORM] = 0xE1u;
-
-	/* The status frames are never sent as stored.  `main` calls the patcher
-	 * at 0x8a90 once before the loop starts, so every message 0x05 and 0x06
-	 * a real adapter emits carries these values, not the ones in `.data`.
-	 * Its three message 0x05 bytes are the aperture descriptor, written
-	 * below from our own declaration instead; the message 0x06 four are
-	 * reproduced verbatim, and one of them is the subject distance the body
-	 * reads. */
-	ea9_data[EA9_OFF_06 + 0x20] = 0x6C;     /* subject distance = 620, */
-	ea9_data[EA9_OFF_06 + 0x21] = 0x02;     /* hardcoded, EA9.md §4.2     */
-	ea9_data[EA9_OFF_06 + 0x22] = 0x06;
-	ea9_data[EA9_OFF_06 + 0x23] = 0x20;
-
-	/* ONE focal length, into every field that carries it -- message 0x05's
-	 * pair, message 0x28's pair, and message 0x06's focal-derived step.
-	 * The stock ships 400 in one message and 500 in the other; a body that
-	 * asks for both is told two different lenses are mounted. */
-	em_set_focal_length(EM_FOCAL_MM10);
-
-	/* ONE aperture, into every field that carries one: the declared range in
-	 * message 0x05's descriptor, and the current value in message 0x05's
-	 * live pair, message 0x28's copy and message 0x1B's reply.
-	 *
-	 * The stock does the same thing and is CONSISTENT about it, contrary to
-	 * what this file used to claim: 0x8a8c loads 0x18, calls the descriptor
-	 * conversion at 0x66b8, and writes the 4608 it returns into pl[0..3] --
-	 * so its live aperture and its declared maximum are the same f/2.0,
-	 * both derived from one literal.  The stored 4864 never goes out. */
-	em_set_aperture_range(EM_APERTURE_MAX, EM_APERTURE_MIN);
-	em_set_aperture(EM_APERTURE_NOW);
-
-	/* The optical rows.  The stock says nothing about where the field is
-	 * sampled and claims a pupil at 1.5 x focal length; these two rows are
-	 * the first thing this adapter has ever told a body about its pupil
-	 * geometry that was measured rather than inherited from a Canon. */
-	{
-		static const uint8_t SLOT_A[EM_ROW_BYTES]  = EM_SLOT_A;
-		static const uint8_t SLOT_B0[EM_ROW_BYTES] = EM_SLOT_B_TYPE0;
-		static const uint8_t SLOT_B1[EM_ROW_BYTES] = EM_SLOT_B_TYPE1;
-
-		em_set_optical_rows(SLOT_A, SLOT_B0, SLOT_B1);
-	}
+	/* Fixed content is in the templates (emount_packets.c). */
 
 	/* protocol_init, 0x551c, replicated including the one non-obvious bit:
 	 * our chip select goes high FIRST and stays high across the whole
@@ -1547,24 +1409,25 @@ void em_pump_status(void)
 	}
 	g_status_due = 0;
 
-	ea9_data[EA9_OFF_05 + 4] = g_reply_seq;
-	ea9_data[EA9_OFF_06 + 4] = g_reply_seq;
+	em_msg_05[4] = g_reply_seq;
+	em_msg_06[4] = g_reply_seq;
 
 	delay_us(EM_LEAD_US);
 	if (em_status05_len == EM05_LEN_LONG) {
-		/* Built aside: in ea9_data the next packet follows 0x05. */
+		/* Built aside, so the 105-byte form's checksum never lands in
+		 * the long form's payload. */
 		static uint8_t long05[EM05_LEN_LONG];
 		uint8_t i;
 
 		for (i = 0; i < EA9_LEN_05 - 3u; i++) {
-			long05[i] = ea9_data[EA9_OFF_05 + i];
+			long05[i] = em_msg_05[i];
 		}
 		for (; i < EM05_LEN_LONG - 3u; i++) {
 			long05[i] = 0;
 		}
 		em_transmit(long05, EM05_LEN_LONG);
 	} else {
-		em_transmit(&ea9_data[EA9_OFF_05], EA9_LEN_05);
+		em_transmit(em_msg_05, EA9_LEN_05);
 	}
 	delay_us(EM_STATUS_GAP_US);
 
@@ -1576,32 +1439,34 @@ void em_pump_status(void)
 	 * In the 48-byte form pl[39..40] ARE the checksum, so there is no way
 	 * to carry a block without growing the frame and no way to grow it
 	 * without carrying one. */
+	scan_state_frame();
+
 	{
 		uint16_t len = EM06_LEN_IDLE;
 		uint8_t  k, sent_ans;
 
 		if (g_event_n) {
-			ea9_data[EA9_OFF_06 + len - 3] = g_event_code[0];
-			ea9_data[EA9_OFF_06 + len - 2] = g_event_param[0];
+			em_msg_06[len - 3] = g_event_code[0];
+			em_msg_06[len - 2] = g_event_param[0];
 			len += 2;
 			/* Drive's event is four bytes, not two. */
 			if (g_event_code[0] == EM_REC_DRIVE) {
-				ea9_data[EA9_OFF_06 + len - 3] = 0;
-				ea9_data[EA9_OFF_06 + len - 2] = 0;
+				em_msg_06[len - 3] = 0;
+				em_msg_06[len - 2] = 0;
 				len += 2;
 			}
 		}
 		for (k = 0; k < g_ans_n && len + 3u <= EM06_LEN_MAX; k++) {
-			ea9_data[EA9_OFF_06 + len - 3] = g_ans_tag[k];
-			ea9_data[EA9_OFF_06 + len - 2] =
+			em_msg_06[len - 3] = g_ans_tag[k];
+			em_msg_06[len - 2] =
 			        (uint8_t)(g_ans_val[k] & 0xFFu);
-			ea9_data[EA9_OFF_06 + len - 1] =
+			em_msg_06[len - 1] =
 			        (uint8_t)(g_ans_val[k] >> 8);
 			len += 3;
 		}
 		sent_ans = k;
 
-		em_transmit(&ea9_data[EA9_OFF_06], len);
+		em_transmit(em_msg_06, len);
 
 		/* Shift the event queue AFTER the frame has gone: whatever is
 		 * behind it waits for the next one. */
@@ -1624,8 +1489,6 @@ void em_pump_status(void)
 			em_events_sent++;
 		}
 	}
-
-	scan_state_step();
 
 	if (!em_t_first_status) {
 		em_t_first_status = millis();

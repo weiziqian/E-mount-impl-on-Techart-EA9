@@ -27,6 +27,25 @@ uint32_t millis(void)
 	return g_millis;
 }
 
+/* Microseconds, from the millisecond tick plus how far SysTick has counted
+ * down into the current millisecond.  A wrap whose interrupt has not run yet
+ * (called from a higher-priority handler, or with interrupts off) shows as
+ * PENDSTSET with VAL just reloaded, and counts as the next millisecond. */
+uint32_t micros(void)
+{
+	uint32_t ms, val, pend;
+
+	do {
+		ms   = g_millis;
+		val  = SysTick->VAL;
+		pend = SCB->ICSR & SCB_ICSR_PENDSTSET_Msk;
+	} while (ms != g_millis);
+	if (pend && val > SysTick->LOAD / 2u) {
+		ms++;
+	}
+	return ms * 1000u + (SysTick->LOAD - val) / (F_CPU / 1000000u);
+}
+
 void delay_ms(uint32_t ms)
 {
 	uint32_t start = g_millis;

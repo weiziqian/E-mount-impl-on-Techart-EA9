@@ -43,10 +43,6 @@ SIZE    := $(TOOLCHAIN)size
 
 PART    := __SAMD21E17A__
 OUT     := build
-# Only gen_packets.py reads this -- it is where the 20 stored reply frames were
-# lifted from.  src/emount_packets.{c,h} are checked in, so a tree without the
-# stock image still builds; it is needed only to regenerate them.
-STOCK   := ../fw/EA9-VER-1-8-0.bin
 
 # The configuration.  `make release` re-enters with BUILD=release; everything
 # below is written once and parameterised, so the two images cannot drift.
@@ -168,25 +164,10 @@ $(TARGET).bin: $(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
 
-# The packet table is lifted from the stock image, so regenerate it whenever
-# that image or the generator changes rather than checking in a stale copy.
-#
-# Guarded on the stock image existing.  src/emount_packets.{c,h} are checked
-# in, so a tree without a stock image still builds -- the rule simply does not
-# apply there.  Without the guard make refuses to do anything at all: "No rule
-# to make target '../fw/EA9-VER-1-8-0.bin'".
-ifneq ($(wildcard $(STOCK)),)
-src/emount_packets.c src/emount_packets.h: tools/gen_packets.py $(STOCK)
-	python3 tools/gen_packets.py $(STOCK) \
-	        src/emount_packets.c src/emount_packets.h
-endif
-
-$(OBJS): | src/emount_packets.c
-
 # The responder, compiled for the host and driven through scripted body
 # traffic.  It compiles src/emount.c unmodified, so what passes here is the
 # code that ships -- see tools/hosttest/.
-hosttest: src/emount_packets.c
+hosttest:
 	@mkdir -p $(HOSTTEST)
 	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
 	  tools/hosttest/test_emount.c tools/hosttest/shim.c \

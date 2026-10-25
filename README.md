@@ -390,7 +390,8 @@ python3 tools/decode_proto_diag.py dump.bin
 ### 4.4 What to change for your lens
 
 Everything the adapter tells the camera about the lens in front of it is a
-constant in **[`src/emount.h`](src/emount.h)**. The adapter has no electrical
+constant in **[`src/emount.h`](src/emount.h)**, spliced into the message
+templates in [`src/emount_packets.c`](src/emount_packets.c) at compile time. The adapter has no electrical
 contact with an M lens and cannot measure any of this, so these are what you
 declare on its behalf. Edit, `make`, flash.
 
@@ -403,7 +404,7 @@ you know what to look for.
 | **Aperture, maximum** | `EM_APERTURE_MAX` | `0x11C0` = f/1.8 |
 | **Aperture, minimum** | `EM_APERTURE_MIN` | `0x11C0` = f/1.8 |
 | **Aperture, current** | `EM_APERTURE_NOW` | `0x11C0` = f/1.8 |
-| **Optical data, slot A** | `EM_SLOT_A` | `b1 30 7e 4b 32 29` |
+| **Optical data, slot A** | `EM_SLOT_A` | `00 00 00 00 00 00` (none) |
 | **Optical data, slot B type 0** | `EM_SLOT_B_TYPE0` | `24 e1 f6 f6 f6 f5` |
 | **Optical data, slot B type 1** | `EM_SLOT_B_TYPE1` | `d1 d0 d5 e8 e9 ef` |
 
@@ -419,7 +420,8 @@ maximum aperture — and see the note below, because the optical row has to move
 with them. If you would rather report a range, the maximum and minimum
 are the two ends of it and the current value is what the body meters with.
 
-**The three optical rows** describe the lens's pupil geometry — slot A is where
+**The three optical rows** are written as six comma-separated bytes, without
+braces. They describe the lens's pupil geometry — slot A is where
 across the frame the correction curves are sampled, slot B type 0 is the pupil
 magnification (exit-pupil distance ÷ focal length) and slot B type 1 is the
 pupil size. Six bytes each, in the protocol's own block-float encoding, which

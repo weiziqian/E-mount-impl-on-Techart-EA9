@@ -304,6 +304,15 @@ struct servo_cfg {
 	 * demonstrably stopped being able to do better. */
 	int16_t  settle_counts;
 
+	/* THE TRAVEL ENDS, absolute counts, when ends_settle is set.  A leg
+	 * whose target is at or beyond an end is done as soon as the mechanism
+	 * is at or beyond it: a move that overshoots into the end stop is not
+	 * pulled back off it.  Pulling back a hundred counts from a helicoid
+	 * wedged against its stop took more force than the small error asked
+	 * for, and the servo sat there whining until its timeout. */
+	uint8_t  ends_settle;
+	int32_t  end_lo, end_hi;
+
 	/* AIM THIS MUCH BEYOND THE TARGET, in the direction of travel.
 	 *
 	 * A move approaches from one side and stops at the first sample
@@ -358,17 +367,15 @@ struct servo_cfg {
 	uint8_t  retarget_max;
 	int32_t  retarget_min;
 
-	/* A reversal goes through the brake for this long before driving the
-	 * other way -- but ONLY when it is a genuine slam, i.e. the mechanism
-	 * is still moving faster than reverse_brake_above (counts/s) the old
-	 * way.  Measured cost of doing it unconditionally: 362 counts of extra
-	 * overrun, twice the turnaround distance, in two measured runs.
-	 *
-	 * The old servo applied it to every retarget that changed sign.  It
-	 * could afford to, because its direction was latched per leg and it
-	 * could not correct an overshoot at all; this one's profile reverses
-	 * by itself whenever it goes past the target, and putting a 20 ms
-	 * brake in the middle of every small correction would be absurd. */
+	/* A REVERSAL AT SPEED goes through the brake first, so the gears are
+	 * never driven against a mechanism still running the other way.  It
+	 * applies when the mechanism is moving faster than reverse_brake_above
+	 * (counts/s) opposite to the new direction -- after a reversing
+	 * retarget, or at the start of a leg when the previous one was cut
+	 * short at speed -- and holds the brake until the speed is back under
+	 * reverse_brake_above, or for at most reverse_brake_ms.  Slower sign
+	 * changes, the small corrections at walking pace, drive straight
+	 * through. */
 	uint16_t reverse_brake_ms;
 	int32_t  reverse_brake_above;
 

@@ -84,8 +84,9 @@
  *
  * Not to be confused with the bootloader's own version triplet, which is what
  * ea9flash.py --check reports and lives nowhere in the app image (CLAUDE.md,
- * "There are TWO independent version records"). */
-#define EM_FW_VERSION_BCD   0x59u
+ * "There are TWO independent version records").
+ *
+ * The byte itself is in the message 0x07 template (emount_packets.c). */
 
 /* Blocks until the body brings its chip select up and back down, then arms the
  * receiver.  Never returns on a bench supply with no body attached -- the same
@@ -121,7 +122,6 @@ void em_poll(void);
  * 1.5 Mbaud", 00 "staying at 750 kbaud"; the body follows the reply, so the
  * lens must actually switch after answering 01 (protocol docs/msg_0x0C.md). */
 #define EM_ID_BAUD       0x0Cu
-#define EM_0C_FAST       0x01u
 
 /* The chip-select handshake that follows the 0x0C reply (emount.c,
  * em_baud_switch).  Each wait on the body's CS gives up after
@@ -130,7 +130,8 @@ void em_poll(void);
 #define EM_0C_WAIT_US    2000u
 #define EM_0C_READY_US   200u
 
-/* The lens ID we report in message 0x07 payload[9..10], u16 LE.
+/* The lens ID we report in message 0x07 payload[9..10], u16 LE -- 50496,
+ * in the template (emount_packets.c).
  *
  * Stock is 234 (0x00EA), in the legacy/A-mount range that every measured
  * ADAPTER sits in -- the two Viltrox EF adapters report 78.  Native E-mount
@@ -147,7 +148,6 @@ void em_poll(void);
  * Note pl[0] is a SECOND discriminator on the same theme: 0x01 on all three
  * natives measured, 0x02 on all three adapters.  Left alone so this run has one
  * variable; it is the obvious follow-up if the ID alone changes nothing. */
-#define EM_LENS_ID       50496u
 
 extern volatile uint8_t  em_shutdown_acked;  /* 0x16 answered, status loop off */
 extern volatile uint32_t em_t_shutdown;      /* ms when it was answered */
@@ -197,9 +197,11 @@ void em_set_focus_position(int32_t pos, int32_t ahead);
  * has just reported rather than a flag it has to keep in step. */
 void em_set_motion(uint8_t moving, uint8_t dir, int32_t pos);
 
-/* Message 0x06 payload[32..38]: push one frame-to-frame position difference
- * into the seven-deep velocity history, newest last. */
-void em_push_velocity(int32_t delta);
+/* Message 0x06 payload[32..38]: the position trace within the last frame.
+ * Call with the position just read (protocol units), as often as the loop
+ * runs: the first call after a frame sync latches it and publishes the last
+ * frame's trace, and later calls sample it at each eighth of the frame. */
+void em_sample_position(int32_t pos);
 
 /* Message 0x05's focus reports: the subject distance as a distance code, the
  * same distance as a coarse signed byte, the coarse position, and whether the
@@ -230,20 +232,31 @@ void em_set_in_motion(uint8_t moving);
  * every move; that was read off one device's command state machine and is not
  * what the field means.
  *
- * Each value is held for at least one status frame, so a body sampling once
- * per frame cannot miss a step.
+ * SEQUENCED AS YONGNUO DOES (50 DF FUN_080167ac / FUN_080171a0 / FUN_08016624):
+ * values are queued and taken ONE PER STATUS FRAME, the last one held.
+ *
+ *   approach leg        0x00       -- not 0x10: the sweep has not launched
+ *   sweep launched      0x10       one frame
+ *   sweep under way     0x20       held until it ends
+ *   sweep finished      0x30       one frame, then 0x00
+ *   five frames later   event 1F 00
+ *
+ * The stock LM-EA9 (and an earlier build) showed 0x10 for the whole approach.
  */
 #define EM_SCAN_IDLE      0x00u
 #define EM_SCAN_ACCEPTED  0x10u
 #define EM_SCAN_SWEEPING  0x20u
 #define EM_SCAN_DONE      0x30u
 
-/* Latch a value, cancelling any sequence still running. */
+/* Latch a value, cancelling the queued sequence and any pending 1F 00 -- as
+ * Yongnuo does whenever a new instruction other than the sweep leg starts. */
 void em_set_scan_state(uint8_t state);
 
-/* Walk the tail of the sequence: 0x30 on the next status frame, then 0x00.
- * Driven by the status pump, so the steps are spaced by the body's own frame
- * rate rather than by however long the caller takes. */
+/* The sweep leg has started: 0x10 for one frame, then 0x20. */
+void em_scan_launch(void);
+
+/* The sweep leg has ended: 0x30 for one frame, then 0x00, then -- five frames
+ * on -- the 1F 00 event.  The caller posts no event of its own. */
 void em_scan_finish(void);
 
 /* ------------------------------------------------------------------------
@@ -331,18 +344,20 @@ extern volatile uint16_t em_stop_n;  /* how many Stop records have arrived */
  *
  * The 52.0 mm telltale did its job (NOTES.md §70): a photo came out of the a9
  * II tagged 52 mm, so the body reads its focal length from a field we write and
- * both messages now agree.  Back to 50.0 mm. */
+ * both messages now agree.  Back to 50.0 mm.
+ *
+ * Goes into the 0x05 and 0x28 templates, and the distance conversions. */
 #define EM_FOCAL_MM10 500u
 
-/* Write the focal length into every field that carries it: message 0x05's pair,
- * message 0x28's pair, and message 0x06's focal-derived step size.  Called from
- * em_init; call it again to change focal length at runtime. */
-void em_set_focal_length(uint16_t mm10);
+/* THE DEFOCUS SCALE: how many protocol position units one defocus unit is
+ * worth.  Reported in message 0x06 payload[13..14], and used by everything
+ * that moves in defocus units -- Move mode 6, and a Scan whose speed code has
+ * bit 7 set -- so what the body is told and what the lens does are one
+ * number.  A placeholder constant: the old focal-length ladder had no basis,
+ * and the real scale depends on the aperture of the M lens in front. */
+#define EM_DEFOCUS_SCALE 10u
 
-/* The defocus scale this lens is currently advertising in message 0x06
- * payload[13..14] -- position counts per defocus unit.  Read back rather than
- * recomputed, so a Move in defocus units uses exactly the number the body was
- * given. */
+/* The defocus scale as currently advertised, read back from the frame. */
 uint16_t em_defocus_scale(void);
 
 /* THE APERTURE this adapter declares -- maximum, minimum, and the one it is at
@@ -367,8 +382,8 @@ uint16_t em_defocus_scale(void);
  * to 4544 with no rounding -- so the two encodings agree to the bit.
  *
  * The OTHER encoding, the Canon-convention descriptor of message 0x05
- * pl[44..59], is derived from these by em_aperture_to_descriptor() rather than
- * written out separately -- one number per fact, so the two encodings cannot
+ * pl[44..59], is derived from these by EM_AV_DESC (emount_packets.c) rather
+ * than written out separately -- one number per fact, so the two encodings cannot
  * disagree.  It is the coarser of the two at 1/8 stop, so a value that is not
  * a multiple of 32 above 4096 rounds when it goes there.
  *
@@ -395,15 +410,7 @@ uint16_t em_defocus_scale(void);
  * four and checks every other byte against a stock literal. */
 #define EM_APERTURE_MAX  0x11C0u        /* f/1.8 -- message 0x05 pl[44], pl[51] */
 #define EM_APERTURE_MIN  0x11C0u        /* f/1.8 -- message 0x05 pl[52]         */
-#define EM_APERTURE_NOW  0x11C0u        /* f/1.8 -- 0x05 pl[0..3], 0x28 pl[9..10] */
-
-/* The current aperture, as 256 x AV + 4096, into message 0x05 payload[0..1],
- * its second copy at [2..3], and message 0x1B's reply.
- *
- * NOT into message 0x28 payload[9..10]: a stock adapter leaves that zero and
- * its photographs are still tagged with the right aperture, so the field is
- * not what carries it. */
-void em_set_aperture(uint16_t av);
+#define EM_APERTURE_NOW  0x11C0u        /* f/1.8 -- 0x05 pl[0..3], 0x1B, 0x28 pl[9..10] */
 
 /* The aperture the body last commanded on message 0x1B, and how many of those
  * frames have arrived (em_focus_n).  Recorded rather than obeyed: this device
@@ -452,17 +459,6 @@ extern volatile uint8_t  em_status05_len;      /* 105 or 117, as now chosen  */
 extern volatile uint16_t em_m03_aperture;
 extern volatile uint16_t em_m03_n;
 
-/* The declared range into message 0x05 payload[44..59], both arguments on the
- * aperture-value scale and converted to descriptor bytes here.  The body reads
- * this block: an adapter that sends zeros here is shown as F1.0 and refused
- * autofocus (EA9.md §8). */
-void em_set_aperture_range(uint16_t max_av, uint16_t min_av);
-
-/* The two encodings, both ways.  A descriptor byte is 1/8 stop with 0x08 =
- * f/1.0; an aperture value is 256*AV + 4096. */
-uint16_t em_aperture_from_descriptor(uint8_t v);
-uint8_t  em_aperture_to_descriptor(uint16_t av);
-
 /* THE OPTICAL ROWS -- what this adapter tells the body about its pupil.
  *
  * Two 6-byte rows in the block-float format the protocol uses for optical data
@@ -500,33 +496,17 @@ uint8_t  em_aperture_to_descriptor(uint16_t av);
  */
 #define EM_ROW_BYTES 6u
 
-/* b1 30 7e 4b 32 29 -- the grid. */
-#define EM_SLOT_A        { 0xB1, 0x30, 0x7E, 0x4B, 0x32, 0x29 }
+/* Each row is a bare list of six bytes: it is spliced into the templates
+ * (emount_packets.c) where the row goes. */
 
-/* 24 e1 f6 f6 f6 f5 -- p from 1.2197 on axis falling to 1.1797 at the corner,
- * mean exactly 1.2000.  Taken verbatim from build/EA9-slotB0-1_2.bin, the
- * hand-patched image this value was arrived at on; exponent nibble 2 = E 10,
- * so the mantissas 1249..1208 divide by 1024.  For the 50 mm this adapter
- * declares that is an exit pupil at 61.0 mm on axis. */
-#define EM_SLOT_B_TYPE0  { 0x24, 0xE1, 0xF6, 0xF6, 0xF6, 0xF5 }
+/* Vignetting compensation param */
+#define EM_SLOT_A        0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 
-/* d1 d0 d5 e8 e9 ef -- the pupil size, 0.05664 on axis falling to 0.04358,
- * exponent nibble d = E 13.  This is the Sony SEL5518Z's own wide-open row
- * (optical_data.md 6.2), and `value[0] x F` for it is 0.1020, right on the
- * protocol constant -- which means it describes a lens working at **F 1.8**.
- *
- * NOTE, if you change the aperture: this row and EM_APERTURE_* have to agree,
- * because `value[0] x F` is the same number for every lens measured.  They do
- * agree as shipped -- EM_APERTURE_* is 0x11C0, f/1.834, and 0.05664 x 1.834 =
- * 0.1039.  Move the aperture and this row has to be rescaled by the ratio of
- * the f-numbers, or the adapter describes two different lenses at once. */
-#define EM_SLOT_B_TYPE1  { 0xD1, 0xD0, 0xD5, 0xE8, 0xE9, 0xEF }
+/* Unknown optical params, could be the exit pupil? Might relate to PDAF */
+#define EM_SLOT_B_TYPE0  0x22, 0x00, 0x00, 0x00, 0x00, 0x00
 
-/* Installs all three rows.  Called from em_init with the constants above; the
- * arguments exist so the host suite can prove the fields follow them rather
- * than merely happening to match once. */
-void em_set_optical_rows(const uint8_t *slot_a, const uint8_t *slot_b_type0,
-                         const uint8_t *slot_b_type1);
+/* Unknown optical params, could be the pupil size. Not used in the code */
+#define EM_SLOT_B_TYPE1  0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 
 /* The body's "no target" sentinel, on both channels.  Driving to it would
  * command a position far outside any travel a lens advertises. */

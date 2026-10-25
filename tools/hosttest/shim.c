@@ -39,6 +39,7 @@ uint32_t host_millis;
 
 void board_init_pins(void) {}
 uint32_t millis(void) { return host_millis; }
+uint32_t micros(void) { return host_millis * 1000u; }
 void delay_ms(uint32_t ms) { host_millis += ms; }
 void delay_us(uint32_t us) { (void)us; }
 void clock_enable_peripheral(uint8_t id, uint32_t m) { (void)id; (void)m; }
