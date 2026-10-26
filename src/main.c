@@ -897,18 +897,17 @@ static void focus_report_at(int32_t counts)
 	 * reporting from a different floor would put our position and its
 	 * targets 48 units apart. */
 	int32_t ahead = focus_pred_ahead(&g_pred, counts, em_frame_period_ms);
-	uint8_t moving;
 
 	em_set_focus_position(focus_counts_to_em06(counts),
 	                      focus_counts_to_em06(ahead));
 
-	/* Moving, or at rest?  The forecast differing from the position is the
-	 * same fact the body reads out of pl[2..3] against pl[20..21], so it is
-	 * the honest source for the status byte -- a flag kept separately could
-	 * contradict the very frame carrying it. */
-	moving = (ahead != counts);
-	em_set_motion(moving, moving ? (ahead > counts ? 0x02u : 0x04u) : 0x00u,
-	              focus_counts_to_em06(counts));
+	/* The motor for message 0x06 pl[0..1]: running for the whole servo
+	 * leg, as Yongnuo's motor state is for the whole move, toward the
+	 * target. */
+	em_set_motor(!g_pred.active ? 0
+	             : g_pred.target > counts ? 1
+	             : g_pred.target < counts ? -1
+	             : g_pred.vel_q8 < 0 ? -1 : 1);
 
 	/* The position trace within the frame, pl[32..38]: sampled here,
 	 * where the encoder has just been read, at each eighth of the body's
@@ -916,11 +915,13 @@ static void focus_report_at(int32_t counts)
 	em_sample_position(focus_counts_to_em06(counts));
 
 	/* And the same state in message 0x05, in units the body can use without
-	 * knowing this lens: the subject distance, and the in-motion flag. */
+	 * knowing this lens: the subject distance, and the in-motion flag --
+	 * the same motor state as 0x06 pl[0..1], taken now, as Yongnuo 50 DF's
+	 * 0x05 builder reads it (FUN_08012d08 in FUN_080180e0). */
 	em_set_subject_distance(focus_distance_code(counts, EM_FOCAL_MM10),
 	                        focus_distance_coarse(counts, EM_FOCAL_MM10),
-	                        (uint8_t)(counts / 256));
-	em_set_in_motion(moving);
+	                        (uint8_t)(counts / FOCUS_COUNTS_PER_UNIT / 256));
+	em_set_in_motion(g_pred.active);
 }
 
 /* Answer any 0x22 / 0x2E queries the body asked on the last message 0x04.
@@ -1522,6 +1523,9 @@ int main(void)
 	em_set_powerdown_handler(powerdown_signal);
 
 	em_init();
+	/* The nearest distance the full extension reaches, at the declared
+	 * focal length -- the same model as the subject distance. */
+	em_set_min_focus(focus_distance_code(FOCUS_TRAVEL_COUNTS, EM_FOCAL_MM10));
 	diag_tally_mark(DIAG_MARK_BUSUP, 0);
 
 	abs_encoder_set_reference();

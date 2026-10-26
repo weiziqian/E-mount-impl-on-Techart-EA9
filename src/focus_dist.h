@@ -10,13 +10,15 @@
  * 0x0700 means infinity or "further than I can resolve".
  *
  * The lens owns the conversion in both directions, because it depends on the
- * optics.  Three things use it:
+ * optics.  These use it:
  *
  *   - message 0x05 pl[20..21], the subject distance, reported every frame
  *   - message 0x05 pl[23], the same distance as a coarse signed byte
  *   - the two query records 0x22 and 0x2E, whose answers ride in the tail of
  *     message 0x06
  *   - Move mode 3, which commands a position by naming a distance
+ *   - message 0x05 pl[28..29], the minimum focus distance: the code at full
+ *     extension, computed once at start-up (main.c, em_set_min_focus)
  *
  * THE MODEL.  This adapter has no electrical contact with the M lens it
  * carries, so it cannot know that lens's focus ring.  What it does know is its

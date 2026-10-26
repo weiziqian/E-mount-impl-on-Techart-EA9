@@ -405,8 +405,8 @@ int main(void)
 		const uint8_t MAXD = 0x16, MIND = 0x16;   /* EM_APERTURE_MAX/MIN, f/1.8 */
 		const struct { const uint8_t *f; uint16_t off; uint8_t want; } PATCH[] = {
 			{ em_msg_06, 0x20, 0x6C },
-			{ em_msg_06, 0x21, 0x02 }, { em_msg_06, 0x22, 0x06 },
-			{ em_msg_06, 0x23, 0x20 },
+			{ em_msg_06, 0x21, 0x02 }, { em_msg_06, 0x22, 0x00 },
+			{ em_msg_06, 0x23, 0x00 },
 			/* The three message 0x05 bytes the stock patches here
 			 * are the aperture descriptor, and this build writes
 			 * them from its own declaration instead -- asserted
@@ -426,42 +426,6 @@ int main(void)
 				     PATCH[k].f[PATCH[k].off], PATCH[k].want);
 			}
 		}
-	}
-
-	/* --- the focus position pair -------------------------------------- */
-	em_set_focus_position(5000, 5000);
-	if (em_msg_06[0x08] != (5000 & 0xFF)
-	    || em_msg_06[0x09] != (5000 >> 8)
-	    || em_msg_06[0x1A] != (5000 & 0xFF)
-	    || em_msg_06[0x1B] != (5000 >> 8)) {
-		fail("em_set_focus_position did not write both fields");
-	}
-
-	/* The two fields are now/one-frame-ahead, NOT duplicates.  Written to
-	 * the wrong way round they would still both be "populated", which is
-	 * exactly the check the old test made and the reason it could not have
-	 * caught a swap. */
-	em_set_focus_position(5000, 5100);
-	if (em_msg_06[0x1A] != (5000 & 0xFF)
-	    || em_msg_06[0x1B] != (5000 >> 8)) {
-		fail("pl[20:22] must carry the position NOW");
-	}
-	if (em_msg_06[0x08] != (5100 & 0xFF)
-	    || em_msg_06[0x09] != (5100 >> 8)) {
-		fail("pl[2:4] must carry the position one frame AHEAD");
-	}
-
-	em_set_focus_position(99999, 99999);
-	if (em_msg_06[0x08] != (ENC_TRAVEL_HI & 0xFF)
-	    || em_msg_06[0x1A] != (ENC_TRAVEL_HI & 0xFF)) {
-		fail("em_set_focus_position did not clamp to the advertised travel");
-	}
-	/* The forecast is clamped on its own account: it is the one that runs
-	 * ahead of the mechanism and so the one that can leave the travel. */
-	em_set_focus_position(5000, 99999);
-	if (em_msg_06[0x08] != (ENC_TRAVEL_HI & 0xFF)
-	    || em_msg_06[0x09] != (ENC_TRAVEL_HI >> 8)) {
-		fail("the forecast field was not clamped");
 	}
 
 	/* --- the focal length, from ONE variable --------------------------
@@ -585,6 +549,50 @@ int main(void)
 			if (em_truncated != 1) {
 				fail("a frame declaring 40 bytes but delivering 12 "
 				     "was not flagged as truncated");
+			}
+		}
+	}
+
+	/* --- 0x06 pl[23] bit 6 flips once per body cycle ------------------ */
+	{
+		/* { N, pl[11] } per frame, and whether bit 6 must flip there. */
+		static const struct { uint8_t n, ph, flip; } SEQ[] = {
+			{ 6, 0, 1 }, { 6, 1, 0 }, { 6, 2, 0 }, { 6, 3, 0 },
+			{ 6, 4, 0 }, { 6, 5, 0 }, { 6, 0, 1 }, { 6, 1, 0 },
+			{ 2, 0, 1 }, { 2, 1, 0 }, { 2, 0, 1 }, { 2, 1, 0 },
+			{ 1, 0, 0 }, { 1, 0, 1 }, { 1, 0, 0 }, { 1, 0, 1 },
+		};
+		uint8_t m03[29];
+		unsigned k;
+
+		/* N = 1 flips every second frame, at a phase left over from
+		 * earlier frames: before the N = 1 rows, feed N = 1 frames
+		 * until one flips, so the next one must not. */
+		memset(m03, 0, sizeof(m03));
+		m03[0] = 0xF0; m03[1] = 29; m03[3] = 0x01; m03[5] = 0x03;
+		m03[28] = 0x55;
+		for (k = 0; k < sizeof(SEQ) / sizeof(SEQ[0]); k++) {
+			uint8_t before, flipped;
+
+			if (SEQ[k].n == 1 && SEQ[k - 1].n != 1) {
+				m03[16] = 1; m03[17] = 0;
+				before = em_msg_06[0x1D];
+				host_body_frame(m03, sizeof(m03));
+				em_poll();
+				if (em_msg_06[0x1D] == before) {
+					host_body_frame(m03, sizeof(m03));
+					em_poll();
+				}
+			}
+			m03[16] = SEQ[k].n;
+			m03[17] = SEQ[k].ph;
+			before = em_msg_06[0x1D];
+			host_body_frame(m03, sizeof(m03));
+			em_poll();
+			flipped = (uint8_t)((before ^ em_msg_06[0x1D]) == 0x40);
+			if (flipped != SEQ[k].flip || ((before ^ em_msg_06[0x1D]) & ~0x40)) {
+				fail("0x06 pl[23] at N=%u pl[11]=%u: %02x -> %02x",
+				     SEQ[k].n, SEQ[k].ph, before, em_msg_06[0x1D]);
 			}
 		}
 	}
@@ -1500,40 +1508,91 @@ int main(void)
 		}
 	}
 
-	/* --- message 0x06 payload[0..1]: motion and direction ------------- */
+	/* --- message 0x06 payload[0..3], [20..21], as Yongnuo builds them -- */
 	{
-		const uint16_t MOT = 0x06;
-		const uint16_t DIR = 0x07;
+		int before;
+		const uint8_t *f;
 
-		/* At rest, mid-travel: 0x82 and no direction. */
-		em_set_motion(0, 0x00, 4800);
-		if (em_msg_06[MOT] != 0x82 || em_msg_06[DIR] != 0x00) {
-			fail("at rest reported %#04x %#04x",
-			     em_msg_06[MOT], em_msg_06[DIR]);
+#define SEND06(pos_after) do { \
+		em_set_focus_position((pos_after), (pos_after)); \
+		before = sent_n; em_poll(); f = sent[before + 1]; } while (0)
+#define POS(off) ((uint16_t)(f[off] | (f[(off) + 1] << 8)))
+
+		/* pl[20..21] is the position at the frame sync, pl[2..3] that plus
+		 * the forecast -- not whatever was read last before sending. */
+		em_set_motor(0);
+		em_set_focus_position(5000, 5060);
+		host_frame_sync();
+		em_sample_position(5000);
+		em_set_focus_position(5040, 5100);
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x1A) != 5000 || POS(0x08) != 5060) {
+			fail("pl[20..21] %u pl[2..3] %u, want 5000 5060 (latched + forecast)",
+			     POS(0x1A), POS(0x08));
 		}
-		em_set_motion(1, 0x02, 4800);
-		if (em_msg_06[MOT] != 0x02 || em_msg_06[DIR] != 0x02) {
-			fail("moving reported %#04x %#04x",
-			     em_msg_06[MOT], em_msg_06[DIR]);
+		/* A frame sync after the last report latches that report. */
+		em_set_focus_position(5200, 5200);
+		host_frame_sync();
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x1A) != 5200 || POS(0x08) != 5200) {
+			fail("unlatched frame sync sent %u %u, want 5200 5200",
+			     POS(0x1A), POS(0x08));
+		}
+		/* The forecast is clamped into the advertised travel. */
+		em_set_focus_position(5000, 99999);
+		host_frame_sync();
+		em_sample_position(5000);
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x08) != ENC_TRAVEL_HI) {
+			fail("the forecast field was not clamped (%u)", POS(0x08));
 		}
 
-		/* The near-limit bits are derived from the position against the
-		 * limits IN THE FRAME, so they cannot contradict it. */
-		em_set_motion(0, 0x00, 4144);
-		if (!(em_msg_06[MOT] & 0x10)) {
-			fail("at the lower limit, bit 4 is clear (%#04x)",
-			     em_msg_06[MOT]);
+		/* pl[0..1]: idle, running each way. */
+		em_set_motor(0);  host_frame_sync(); SEND06(4800);
+		if (f[6] != 0x82 || f[7] != 0x00) {
+			fail("at rest reported %02x %02x", f[6], f[7]);
 		}
-		em_set_motion(0, 0x00, 5632);
-		if (!(em_msg_06[MOT] & 0x08)) {
-			fail("at the upper limit, bit 3 is clear (%#04x)",
-			     em_msg_06[MOT]);
+		em_set_motor(1);  host_frame_sync(); SEND06(4800);
+		if (f[6] != 0x02 || f[7] != 0x02) {
+			fail("running up reported %02x %02x", f[6], f[7]);
 		}
-		em_set_motion(0, 0x00, 4800);
-		if (em_msg_06[MOT] & 0x18) {
-			fail("mid-travel set a near-limit bit (%#04x)",
-			     em_msg_06[MOT]);
+		em_set_motor(-1); host_frame_sync(); SEND06(4800);
+		if (f[6] != 0x02 || f[7] != 0x04) {
+			fail("running down reported %02x %02x", f[6], f[7]);
 		}
+		/* Running at the frame sync counts even if stopped by the send... */
+		em_set_motor(1);  host_frame_sync(); em_set_motor(0); SEND06(4800);
+		if (f[6] != 0x02 || f[7] != 0x02) {
+			fail("stopped after the sync reported %02x %02x", f[6], f[7]);
+		}
+		/* ...and is gone one frame later. */
+		host_frame_sync(); SEND06(4800);
+		if (f[6] != 0x82 || f[7] != 0x00) {
+			fail("a frame later reported %02x %02x", f[6], f[7]);
+		}
+		/* Started after the sync: running now. */
+		host_frame_sync(); em_set_motor(-1); SEND06(4800);
+		if (f[6] != 0x02 || f[7] != 0x04) {
+			fail("started after the sync reported %02x %02x", f[6], f[7]);
+		}
+		em_set_motor(0); host_frame_sync();
+
+		/* Near-limit bits from the current position against the limits
+		 * in the frame. */
+		host_frame_sync(); SEND06(4144);
+		if (!(f[6] & 0x10)) {
+			fail("at the lower limit, bit 4 is clear (%02x)", f[6]);
+		}
+		host_frame_sync(); SEND06(5632);
+		if (!(f[6] & 0x08)) {
+			fail("at the upper limit, bit 3 is clear (%02x)", f[6]);
+		}
+		host_frame_sync(); SEND06(4800);
+		if (f[6] & 0x18) {
+			fail("mid-travel set a near-limit bit (%02x)", f[6]);
+		}
+#undef SEND06
+#undef POS
 	}
 
 	/* --- message 0x06 payload[32..38]: the trace within the frame ------ */

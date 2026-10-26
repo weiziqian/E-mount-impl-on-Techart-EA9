@@ -60,9 +60,8 @@
 #define EM_STATUS_GAP_US  300u
 #define EM_LEAD_US        10u
 
-/* Frame offsets into the message 0x06 packet that carry the focus position,
- * from the frame-sync callback at 0x5120.  Both get the same value; the stock
- * firmware sends no forecast in the first field (EA9.md §4.3). */
+/* Frame offsets into the message 0x06 packet that carry the focus position:
+ * payload[2..3] one frame ahead, payload[20..21] at the frame sync. */
 #define EM06_POS_A        0x08
 #define EM06_POS_B        0x1A
 
@@ -82,6 +81,11 @@
 /* Message 0x06 payload[25] = frame offset 0x1F: the SCAN progress byte,
  * 0x10 -> 0x20 -> 0x30 -> 0x00.  Zero for every other instruction. */
 #define EM06_SCAN_STATE   0x1F
+
+/* Message 0x06 payload[23] = frame offset 0x1D: bit 6 flips once per body
+ * cycle (message 0x03 pl[10..11]).  Meaning unknown. */
+#define EM06_CYCLE        0x1D
+#define EM06_CYCLE_BIT    0x40u
 
 /* The current aperture, 256 x AV + 4096: message 0x05 payload[0..1] (fixed,
  * in the template -- there is no iris) and message 0x28 payload[9..10], which
@@ -133,7 +137,8 @@
 #define EM05_DISTANCE     0x1A          /* pl[20..21] distance code        */
 #define EM05_FLAGS        0x1C          /* pl[22] bit 7 set, bit 6 = moving */
 #define EM05_DIST_COARSE  0x1D          /* pl[23] ~ -32 x dioptres          */
-#define EM05_POS_COARSE   0x3C          /* pl[54] counts from infinity / 256 */
+#define EM05_POS_COARSE   0x3C          /* pl[54] 0x06 units from infinity / 256 */
+#define EM05_MIN_FOCUS    0x22          /* pl[28..29] minimum focus distance */
 #define EM05_RING_DIR     0x42          /* pl[60] focus ring direction      */
 #define EM05_FLAG_REPORTS 0x80u
 #define EM05_FLAG_MOVING  0x40u
@@ -234,6 +239,12 @@ volatile uint8_t  em_pre_used;
 static volatile uint8_t  g_reply_pending;
 static volatile uint8_t  g_reply_id;
 static volatile uint8_t  g_status_due;
+
+/* The focus motor's state for message 0x06 payload[0..1] (em_set_motor):
+ * 0 idle, +1 running toward higher positions, -1 toward lower.  g_motor_vd
+ * is its value at the last frame sync. */
+static volatile int8_t g_motor;
+static volatile int8_t g_motor_vd;
 static volatile uint8_t  g_reply_seq;
 
 /* Three replies are built from the request: 0x0A and 0x16 echo it whole,
@@ -896,6 +907,22 @@ static void on_cs_edge(int level)
 		}
 	}
 
+	/* MESSAGE 0x06 pl[23] bit 6 FOLLOWS THE BODY'S CYCLE.
+	 *
+	 * 0x03 pl[10] is the body's cycle length N and pl[11] the frame within
+	 * it, 0..N-1.  Sony lenses flip pl[23] bit 6 on every frame where
+	 * pl[11] returns to 0; with N = 1, where pl[11] is always 0, they flip
+	 * every second frame instead.
+	 *
+	 * 6 header + 12 payload bytes needs 6 + 12 + 3 = 21. */
+	if (rx[3] != EM_CLASS_INIT && rx[5] == 0x03u && n >= 21 && rx[17] == 0) {
+		static uint8_t skip;
+
+		if (rx[16] >= 2u || (skip ^= 1u) == 0u) {
+			em_msg_06[EM06_CYCLE] ^= EM06_CYCLE_BIT;
+		}
+	}
+
 	/* THE RECORD STREAM.
 	 *
 	 * 6 header bytes + a 13-byte message header take us to pl[13] = frame
@@ -962,6 +989,7 @@ static void on_vd_edge(void)
 
 	g_t_vd_us = micros();
 	em_vd_edges++;
+	g_motor_vd = g_motor;
 	if (!em_t_first_vd) {
 		em_t_first_vd = now;
 	}
@@ -1005,25 +1033,9 @@ static void put16(uint8_t *frame, uint16_t off, uint16_t v)
 	frame[off + 1] = (uint8_t)(v >> 8);
 }
 
-void em_set_motion(uint8_t moving, uint8_t dir, int32_t pos)
+void em_set_motor(int8_t dir)
 {
-	uint8_t v = moving ? EM06_MOVING : EM06_AT_REST;
-	uint16_t lo = (uint16_t)em_msg_06[EM06_LIMIT_LO]
-	              | ((uint16_t)em_msg_06[EM06_LIMIT_LO + 1] << 8);
-	uint16_t hi = (uint16_t)em_msg_06[EM06_LIMIT_HI]
-	              | ((uint16_t)em_msg_06[EM06_LIMIT_HI + 1] << 8);
-
-	/* Read the limits back out of the frame rather than from a constant:
-	 * they are what the body clamps against, and a status byte derived from
-	 * a different number would contradict the frame carrying it. */
-	if (pos <= (int32_t)lo + EM06_NEAR_LIMIT) {
-		v |= EM06_NEAR_LO;
-	}
-	if (pos >= (int32_t)hi - EM06_NEAR_LIMIT) {
-		v |= EM06_NEAR_HI;
-	}
-	em_msg_06[EM06_MOTION]    = v;
-	em_msg_06[EM06_DIRECTION] = dir;
+	g_motor = dir;
 }
 
 /* Message 0x06 payload[32..38]: the position trace WITHIN the last frame, as
@@ -1097,6 +1109,11 @@ void em_set_subject_distance(uint16_t code, uint8_t coarse, uint8_t coarse_pos)
 	em_msg_05[EM05_POS_COARSE]  = coarse_pos;
 }
 
+void em_set_min_focus(uint16_t code)
+{
+	put16(em_msg_05, EM05_MIN_FOCUS, code);
+}
+
 void em_set_in_motion(uint8_t moving)
 {
 	uint8_t v = em_msg_05[EM05_FLAGS];
@@ -1110,19 +1127,56 @@ void em_set_in_motion(uint8_t moving)
 	em_msg_05[EM05_FLAGS] = v;
 }
 
+static uint16_t g_pos_now;        /* last reported position */
+static int32_t  g_pos_ahead;      /* forecast displacement, units */
+static uint8_t  g_pos_set;        /* a position has been reported */
+
 void em_set_focus_position(int32_t pos, int32_t ahead)
 {
-	uint16_t now_v   = clamp_travel(pos);
-	uint16_t ahead_v = clamp_travel(ahead);
+	g_pos_now   = clamp_travel(pos);
+	g_pos_ahead = (int32_t)clamp_travel(ahead) - (int32_t)g_pos_now;
+	g_pos_set   = 1;
+}
 
-	/* payload[2..3] is the position ONE FRAME AHEAD, payload[20..21] the
-	 * position now.  The stock writes the same value to both -- it has no
-	 * forecast to offer -- and so did this, until the caller was given one.
-	 * Equal values remain correct and are what a stationary lens sends. */
-	em_msg_06[EM06_POS_A]     = (uint8_t)(ahead_v & 0xFFu);
-	em_msg_06[EM06_POS_A + 1] = (uint8_t)(ahead_v >> 8);
-	em_msg_06[EM06_POS_B]     = (uint8_t)(now_v & 0xFFu);
-	em_msg_06[EM06_POS_B + 1] = (uint8_t)(now_v >> 8);
+/* Message 0x06 payload[0..3] and [20..21], written just before each send, as
+ * Yongnuo 50 DF builds them (FUN_08016150, FUN_080160a4):
+ *
+ *   pl[20..21]  the position latched at the last frame sync
+ *   pl[2..3]    that position plus the forecast
+ *   pl[0..1]    02 02 / 02 04 if the motor was running at the frame sync
+ *               or is running now (02 = toward higher positions), else
+ *               82 00; then OR 0x10 / 0x08 when the CURRENT position is
+ *               within NEAR_LIMIT of the lower / upper limit */
+static void status06_focus(void)
+{
+	uint16_t lo = (uint16_t)em_msg_06[EM06_LIMIT_LO]
+	              | ((uint16_t)em_msg_06[EM06_LIMIT_LO + 1] << 8);
+	uint16_t hi = (uint16_t)em_msg_06[EM06_LIMIT_HI]
+	              | ((uint16_t)em_msg_06[EM06_LIMIT_HI + 1] << 8);
+	int8_t   m  = g_motor_vd ? g_motor_vd : g_motor;
+	uint8_t  v;
+
+	if (!g_pos_set) {
+		return;
+	}
+	/* A frame sync that came after the loop's last position report: latch
+	 * that report, read moments before the edge. */
+	if (g_sub_vd != em_vd_edges) {
+		em_sample_position(g_pos_now);
+	}
+	put16(em_msg_06, EM06_POS_B, g_sub[0]);
+	put16(em_msg_06, EM06_POS_A,
+	      clamp_travel((int32_t)g_sub[0] + g_pos_ahead));
+
+	v = m ? EM06_MOVING : EM06_AT_REST;
+	if (g_pos_now <= lo + EM06_NEAR_LIMIT) {
+		v |= EM06_NEAR_LO;
+	}
+	if ((int32_t)g_pos_now >= (int32_t)hi - EM06_NEAR_LIMIT) {
+		v |= EM06_NEAR_HI;
+	}
+	em_msg_06[EM06_MOTION]    = v;
+	em_msg_06[EM06_DIRECTION] = m > 0 ? 0x02u : m < 0 ? 0x04u : 0x00u;
 }
 
 
@@ -1440,6 +1494,7 @@ void em_pump_status(void)
 	 * to carry a block without growing the frame and no way to grow it
 	 * without carrying one. */
 	scan_state_frame();
+	status06_focus();
 
 	{
 		uint16_t len = EM06_LEN_IDLE;

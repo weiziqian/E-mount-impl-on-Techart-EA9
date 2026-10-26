@@ -184,18 +184,15 @@ void em_set_shutdown_enabled(uint8_t on);
  * again, which would otherwise re-enter the reply path and park recursively. */
 void em_pump_status(void);
 
-/* Focus position reported in message 0x06, in protocol units.  The two fields
- * are NOT duplicates: payload[20:22] is where focus is now, payload[2:4] is
- * where it will be one body frame from now.  Pass `ahead == pos` when nothing
- * is moving -- that is what a stationary native lens sends. */
+/* Focus position in protocol units: where focus is, and where it will be one
+ * body frame from now (`ahead == pos` when nothing is moving).  Stored, not
+ * sent: message 0x06 carries the position latched at the frame sync plus the
+ * forecast displacement (emount.c, status06_focus). */
 void em_set_focus_position(int32_t pos, int32_t ahead);
 
-/* Message 0x06 payload[0..1]: is focus moving, and which way.
- *
- * `moving` is 0 at rest.  `dir` is 0 stopped, 2 one way, 4 the other.  The
- * near-limit bits are derived from `pos`, so the caller passes the position it
- * has just reported rather than a flag it has to keep in step. */
-void em_set_motion(uint8_t moving, uint8_t dir, int32_t pos);
+/* The focus motor, for message 0x06 payload[0..1]: 0 idle, +1 running toward
+ * higher positions, -1 toward lower. */
+void em_set_motor(int8_t dir);
 
 /* Message 0x06 payload[32..38]: the position trace within the last frame.
  * Call with the position just read (protocol units), as often as the loop
@@ -208,6 +205,10 @@ void em_sample_position(int32_t pos);
  * lens is in motion (payload[22] bit 6). */
 void em_set_subject_distance(uint16_t code, uint8_t coarse, uint8_t coarse_pos);
 void em_set_in_motion(uint8_t moving);
+
+/* Message 0x05 payload[28..29]: the minimum focus distance as a distance
+ * code.  Fixed for a given declared focal length, so set once at start-up. */
+void em_set_min_focus(uint16_t code);
 
 /* Message 0x05 payload[4] is the APERTURE settle countdown -- how many more
  * status frames the iris needs to reach the aperture the body commanded
