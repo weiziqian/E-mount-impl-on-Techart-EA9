@@ -630,12 +630,15 @@ static void em_parse_records(const uint8_t *rx, uint16_t end)
 				c.op     = EM_OP_MOVE_DIST;
 				c.target = v;
 				break;
+			/* Modes 4 and 6: a zero delta is ignored, as
+			 * Yongnuo does -- taken as a move to here, it
+			 * would stop a leg that is still running. */
 			case 4:
-				c.op    = EM_OP_MOVE_REL;
+				c.op    = v ? EM_OP_MOVE_REL : EM_OP_NONE;
 				c.delta = (int16_t)v;
 				break;
 			case 6:
-				c.op    = EM_OP_MOVE_DEFOCUS;
+				c.op    = v ? EM_OP_MOVE_DEFOCUS : EM_OP_NONE;
 				c.delta = (int16_t)v;
 				break;
 			default:

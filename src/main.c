@@ -952,6 +952,21 @@ static void focus_report(void)
 	focus_report_at(abs_encoder_track());
 }
 
+/* Where a relative move (modes 4 and 6) counts from.  As Yongnuo does: while
+ * a leg is running, a delta in the SAME direction adds to that leg's target;
+ * otherwise -- idle, or a reversal -- it counts from where the mechanism is. */
+static int32_t focus_rel_base(int16_t delta)
+{
+	int32_t here = abs_encoder_track();
+
+	if (g_pred.active
+	    && ((delta > 0 && g_pred.target > here)
+	        || (delta < 0 && g_pred.target < here))) {
+		return g_pred.target;
+	}
+	return here;
+}
+
 /* Resolve an instruction into an ABSOLUTE encoder count, if it names one.
  *
  * Four of the seven instructions are a move to a position, and they differ
@@ -968,7 +983,7 @@ static void focus_report(void)
  * the protocol leaves the reading open. */
 static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out)
 {
-	int32_t here;
+	int32_t from;
 
 	switch (c->op) {
 	case EM_OP_MOVE:
@@ -986,8 +1001,8 @@ static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out)
 	case EM_OP_MOVE_REL:
 		/* Mode 4: a signed delta in position units.  One protocol unit
 		 * is FOCUS_COUNTS_PER_UNIT encoder counts. */
-		here = abs_encoder_track();
-		*out = here + (int32_t)c->delta * FOCUS_COUNTS_PER_UNIT;
+		from = focus_rel_base(c->delta);
+		*out = from + (int32_t)c->delta * FOCUS_COUNTS_PER_UNIT;
 		break;
 
 	case EM_OP_MOVE_DEFOCUS:
@@ -995,8 +1010,8 @@ static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out)
 		 * multiplies by the scale it reports every frame in 0x06
 		 * pl[13..14].  Same scale, read from the same place the body
 		 * reads it, so the two cannot drift apart. */
-		here = abs_encoder_track();
-		*out = here + (int32_t)c->delta * (int32_t)em_defocus_scale()
+		from = focus_rel_base(c->delta);
+		*out = from + (int32_t)c->delta * (int32_t)em_defocus_scale()
 		              * FOCUS_COUNTS_PER_UNIT;
 		break;
 
