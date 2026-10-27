@@ -184,11 +184,10 @@ void em_set_shutdown_enabled(uint8_t on);
  * again, which would otherwise re-enter the reply path and park recursively. */
 void em_pump_status(void);
 
-/* Focus position in protocol units: where focus is, and where it will be one
- * body frame from now (`ahead == pos` when nothing is moving).  Stored, not
- * sent: message 0x06 carries the position latched at the frame sync plus the
- * forecast displacement (emount.c, status06_focus). */
-void em_set_focus_position(int32_t pos, int32_t ahead);
+/* Focus position in protocol units: where focus is, and where it is going
+ * (`target == pos` when nothing is moving).  Stored, not sent: message 0x06
+ * carries them at the next status frame (emount.c, status06_focus). */
+void em_set_focus_position(int32_t pos, int32_t target);
 
 /* The focus motor, for message 0x06 payload[0..1]: 0 idle, +1 running toward
  * higher positions, -1 toward lower. */

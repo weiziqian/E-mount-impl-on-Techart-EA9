@@ -61,7 +61,7 @@
 #define EM_LEAD_US        10u
 
 /* Frame offsets into the message 0x06 packet that carry the focus position:
- * payload[2..3] one frame ahead, payload[20..21] at the frame sync. */
+ * payload[2..3] the target, payload[20..21] at the frame sync. */
 #define EM06_POS_A        0x08
 #define EM06_POS_B        0x1A
 
@@ -1000,8 +1000,8 @@ static void on_vd_edge(void)
 	/* Time the body's polling.  A native lens measures this rather than
 	 * assuming it, and only accepts a delta inside the band that reads as a
 	 * real frame rate -- so a missed edge, a burst of two, or the long gap
-	 * across a shutdown cannot poison the period (msg_0x06.md).  Everything
-	 * one frame ahead is scaled by this number. */
+	 * across a shutdown cannot poison the period (msg_0x06.md).  The
+	 * position trace's eighths are timed by this number. */
 	if (g_t_prev_vd) {
 		uint32_t d = now - g_t_prev_vd;
 
@@ -1131,21 +1131,22 @@ void em_set_in_motion(uint8_t moving)
 }
 
 static uint16_t g_pos_now;        /* last reported position */
-static int32_t  g_pos_ahead;      /* forecast displacement, units */
+static uint16_t g_pos_target;     /* where the running move is going */
 static uint8_t  g_pos_set;        /* a position has been reported */
 
-void em_set_focus_position(int32_t pos, int32_t ahead)
+void em_set_focus_position(int32_t pos, int32_t target)
 {
-	g_pos_now   = clamp_travel(pos);
-	g_pos_ahead = (int32_t)clamp_travel(ahead) - (int32_t)g_pos_now;
-	g_pos_set   = 1;
+	g_pos_now    = clamp_travel(pos);
+	g_pos_target = clamp_travel(target);
+	g_pos_set    = 1;
 }
 
-/* Message 0x06 payload[0..3] and [20..21], written just before each send, as
- * Yongnuo 50 DF builds them (FUN_08016150, FUN_080160a4):
+/* Message 0x06 payload[0..3] and [20..21], written just before each send.
+ * pl[20..21] and pl[0..1] as Yongnuo 50 DF builds them (FUN_08016150,
+ * FUN_080160a4); pl[2..3] as Sony natives send it:
  *
  *   pl[20..21]  the position latched at the last frame sync
- *   pl[2..3]    that position plus the forecast
+ *   pl[2..3]    the target of the running move, the current position at rest
  *   pl[0..1]    02 02 / 02 04 if the motor was running at the frame sync
  *               or is running now (02 = toward higher positions), else
  *               82 00; then OR 0x10 / 0x08 when the CURRENT position is
@@ -1168,8 +1169,7 @@ static void status06_focus(void)
 		em_sample_position(g_pos_now);
 	}
 	put16(em_msg_06, EM06_POS_B, g_sub[0]);
-	put16(em_msg_06, EM06_POS_A,
-	      clamp_travel((int32_t)g_sub[0] + g_pos_ahead));
+	put16(em_msg_06, EM06_POS_A, g_pos_target);
 
 	v = m ? EM06_MOVING : EM06_AT_REST;
 	if (g_pos_now <= lo + EM06_NEAR_LIMIT) {

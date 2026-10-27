@@ -45,7 +45,6 @@
 #include "servo.h"
 #include "focus_map.h"
 #include "focus_dist.h"
-#include "focus_pred.h"
 #include "trail.h"
 #include "vdd.h"
 
@@ -233,10 +232,12 @@ static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out);
 static void    focus_exec(const struct em_focus_cmd *c);
 static void    focus_answer_queries(void);
 static void focus_hist_page(uint32_t page);
-/* Where focus is heading, and how fast.  Feeds the two forward-looking fields
- * the stock leaves empty: message 0x06's one-frame-ahead position and message
- * 0x05's frames-remaining countdown. */
-static struct focus_pred g_pred;
+/* The leg in progress, if any: where it is going and which way it was asked
+ * to go.  Reported in message 0x06 pl[0..3] and 0x05's in-motion flag, and the
+ * base a same-direction relative move adds to. */
+static uint8_t g_moving;
+static int32_t g_move_target;
+static int8_t  g_move_dir;
 static void focus_report(void);
 static void build_marker_page(uint32_t page);
 static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
@@ -506,10 +507,6 @@ static void pump(int32_t pos)
 	 * Guarded on g_homed: before homing, zero is not infinity, so the
 	 * mapping has no anchor and the value would be meaningless. */
 	if (g_homed) {
-		/* Sample BEFORE reporting, so the forecast published this frame
-		 * is built on the position published this frame and not on the
-		 * previous one. */
-		focus_pred_sample(&g_pred, pos, millis());
 		focus_report_at(pos);
 	}
 	em_poll();
@@ -896,18 +893,20 @@ static void focus_report_at(int32_t counts)
 	 * issues its message 0x04 targets inside the travel we advertise, so
 	 * reporting from a different floor would put our position and its
 	 * targets 48 units apart. */
-	int32_t ahead = focus_pred_ahead(&g_pred, counts, em_frame_period_ms);
-
+	/* pl[2..3]: the target of the running move, else here.  Not the target
+	 * at rest -- a leg that was stopped or stalled never got there, and the
+	 * field would claim it had. */
 	em_set_focus_position(focus_counts_to_em06(counts),
-	                      focus_counts_to_em06(ahead));
+	                      focus_counts_to_em06(g_moving ? g_move_target
+	                                                    : counts));
 
 	/* The motor for message 0x06 pl[0..1]: running for the whole servo
 	 * leg, as Yongnuo's motor state is for the whole move, toward the
 	 * target. */
-	em_set_motor(!g_pred.active ? 0
-	             : g_pred.target > counts ? 1
-	             : g_pred.target < counts ? -1
-	             : g_pred.vel_q8 < 0 ? -1 : 1);
+	em_set_motor(!g_moving ? 0
+	             : g_move_target > counts ? 1
+	             : g_move_target < counts ? -1
+	             : g_move_dir);
 
 	/* The position trace within the frame, pl[32..38]: sampled here,
 	 * where the encoder has just been read, at each eighth of the body's
@@ -921,7 +920,7 @@ static void focus_report_at(int32_t counts)
 	em_set_subject_distance(focus_distance_code(counts, EM_FOCAL_MM10),
 	                        focus_distance_coarse(counts, EM_FOCAL_MM10),
 	                        (uint8_t)(counts / FOCUS_COUNTS_PER_UNIT / 256));
-	em_set_in_motion(g_pred.active);
+	em_set_in_motion(g_moving);
 }
 
 /* Answer any 0x22 / 0x2E queries the body asked on the last message 0x04.
@@ -959,10 +958,10 @@ static int32_t focus_rel_base(int16_t delta)
 {
 	int32_t here = abs_encoder_track();
 
-	if (g_pred.active
-	    && ((delta > 0 && g_pred.target > here)
-	        || (delta < 0 && g_pred.target < here))) {
-		return g_pred.target;
+	if (g_moving
+	    && ((delta > 0 && g_move_target > here)
+	        || (delta < 0 && g_move_target < here))) {
+		return g_move_target;
 	}
 	return here;
 }
@@ -1101,7 +1100,7 @@ static uint8_t focus_retarget(int32_t *target)
 	}
 
 	g_last_target = c.target;
-	focus_pred_retarget(&g_pred, want);
+	g_move_target = want;
 	*target = want;
 	return 1;
 }
@@ -1131,13 +1130,14 @@ static uint8_t focus_run(int32_t want, uint16_t target_u,
 		return SERVO_OK;
 	}
 
-	/* The predictor's target is the COMMANDED position, not the servo's
+	/* The reported target is the COMMANDED position, not the servo's
 	 * internal start+delta -- they differ by whatever the encoder moved
-	 * between the two reads, and the field the body sees should be bounded
-	 * by what it asked for. */
-	focus_pred_begin(&g_pred, here, want, millis());
+	 * between the two reads. */
+	g_moving      = 1;
+	g_move_target = want;
+	g_move_dir    = delta >= 0 ? 1 : -1;
 	servo_move_rel(delta, cfg, &r);
-	focus_pred_end(&g_pred);
+	g_moving      = 0;
 	focus_report();
 
 	for (i = 0; i < 16; i++) {

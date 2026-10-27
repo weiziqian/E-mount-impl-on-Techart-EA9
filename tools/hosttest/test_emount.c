@@ -1518,16 +1518,16 @@ int main(void)
 		before = sent_n; em_poll(); f = sent[before + 1]; } while (0)
 #define POS(off) ((uint16_t)(f[off] | (f[(off) + 1] << 8)))
 
-		/* pl[20..21] is the position at the frame sync, pl[2..3] that plus
-		 * the forecast -- not whatever was read last before sending. */
+		/* pl[20..21] is the position at the frame sync; pl[2..3] is the
+		 * target last reported, not latched. */
 		em_set_motor(0);
 		em_set_focus_position(5000, 5060);
 		host_frame_sync();
 		em_sample_position(5000);
 		em_set_focus_position(5040, 5100);
 		before = sent_n; em_poll(); f = sent[before + 1];
-		if (POS(0x1A) != 5000 || POS(0x08) != 5060) {
-			fail("pl[20..21] %u pl[2..3] %u, want 5000 5060 (latched + forecast)",
+		if (POS(0x1A) != 5000 || POS(0x08) != 5100) {
+			fail("pl[20..21] %u pl[2..3] %u, want 5000 5100 (latched, target)",
 			     POS(0x1A), POS(0x08));
 		}
 		/* A frame sync after the last report latches that report. */
@@ -1538,13 +1538,13 @@ int main(void)
 			fail("unlatched frame sync sent %u %u, want 5200 5200",
 			     POS(0x1A), POS(0x08));
 		}
-		/* The forecast is clamped into the advertised travel. */
-		em_set_focus_position(5000, 99999);
+		/* The target is clamped into the advertised travel. */
+		em_set_focus_position(99999, 99999);
 		host_frame_sync();
 		em_sample_position(5000);
 		before = sent_n; em_poll(); f = sent[before + 1];
 		if (POS(0x08) != ENC_TRAVEL_HI) {
-			fail("the forecast field was not clamped (%u)", POS(0x08));
+			fail("pl[2..3] was not clamped (%u)", POS(0x08));
 		}
 
 		/* pl[0..1]: idle, running each way. */

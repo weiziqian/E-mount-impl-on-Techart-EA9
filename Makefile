@@ -95,7 +95,7 @@ SRCS := src/startup_samd21.c src/system_samd21.c src/board.c \
         $(LOGSRCS) \
         src/motor.c src/abs_encoder.c src/servo.c src/focus_map.c \
         src/focus_dist.c \
-        src/focus_pred.c src/vdd.c \
+        src/vdd.c \
         src/main.c
 
 OBJS := $(patsubst src/%.c,$(OBJDIR)/%.o,$(SRCS))
@@ -193,10 +193,6 @@ hosttest:
 	  tools/hosttest/test_focus_dist.c src/focus_dist.c -lm \
 	  -o $(HOSTTEST)/test_focus_dist
 	@$(HOSTTEST)/test_focus_dist
-	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
-	  tools/hosttest/test_focus_pred.c src/focus_pred.c \
-	  -o $(HOSTTEST)/test_focus_pred
-	@$(HOSTTEST)/test_focus_pred
 
 clean:
 	rm -rf $(OUT)
