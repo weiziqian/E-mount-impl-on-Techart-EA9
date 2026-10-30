@@ -1146,7 +1146,7 @@ void em_set_focus_position(int32_t pos, int32_t target)
  * FUN_080160a4); pl[2..3] as Sony natives send it:
  *
  *   pl[20..21]  the position latched at the last frame sync
- *   pl[2..3]    the target of the running move, the current position at rest
+ *   pl[2..3]    the latest position reported, read after the sync
  *   pl[0..1]    02 02 / 02 04 if the motor was running at the frame sync
  *               or is running now (02 = toward higher positions), else
  *               82 00; then OR 0x10 / 0x08 when the CURRENT position is

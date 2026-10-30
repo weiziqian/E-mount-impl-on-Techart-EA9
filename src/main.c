@@ -228,6 +228,7 @@ static void pump(int32_t pos);
 static void focus_report_at(int32_t counts);
 static uint8_t focus_retarget(int32_t *target);
 static uint8_t focus_abort(void);
+static void    focus_report_cut(uint8_t running, uint8_t drive_param);
 static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out);
 static void    focus_exec(const struct em_focus_cmd *c);
 static void    focus_answer_queries(void);
@@ -893,12 +894,12 @@ static void focus_report_at(int32_t counts)
 	 * issues its message 0x04 targets inside the travel we advertise, so
 	 * reporting from a different floor would put our position and its
 	 * targets 48 units apart. */
-	/* pl[2..3]: the target of the running move, else here.  Not the target
-	 * at rest -- a leg that was stopped or stalled never got there, and the
-	 * field would claim it had. */
+	/* pl[2..3]: the latest position, read now -- pl[20..21] is the one
+	 * latched at the frame sync.  It was the running move's target, which
+	 * through a Scan's sweep is the far end of the window for the whole
+	 * sweep (dump13). */
 	em_set_focus_position(focus_counts_to_em06(counts),
-	                      focus_counts_to_em06(g_moving ? g_move_target
-	                                                    : counts));
+	                      focus_counts_to_em06(counts));
 
 	/* The motor for message 0x06 pl[0..1]: running for the whole servo
 	 * leg, as Yongnuo's motor state is for the whole move, toward the
@@ -1038,6 +1039,91 @@ static void focus_cut(const struct em_focus_cmd *c)
 	}
 }
 
+/* The config of the running Scan or Drive leg.  It is live: the servo reads
+ * v_cruise on every control step, so a new speed written here takes effect
+ * mid-motion. */
+static struct servo_cfg g_live_cfg;
+static int16_t          g_drive_vel;
+static uint8_t          g_drive_param;
+
+/* A new target for the running leg, set when a Drive is taken over in the
+ * abort hook, which cannot retarget; the retarget hook hands it to the servo
+ * on its next call. */
+static int32_t g_absorb_target;
+static uint8_t g_absorb_pending;
+
+/* A Drive's speed, by Yongnuo 35 DA's law (FUN_08010c80): |v| x 24000 / 768
+ * steps/s capped at 20000, plus 4000 -- and a Yongnuo step is one protocol
+ * position unit, so it is units/s here, x FOCUS_COUNTS_PER_UNIT for counts.
+ * Its aperture factor is left out (about 1 wide open).
+ *
+ * The body hands a Scan over to a Drive part-way through the sweep, and on
+ * that law the two run at about the same speed (v 192 -> 10 units/ms, scan
+ * code 0x8C -> 9.8): the Drive carries the sweep on.  The old mapping, 4000
+ * counts/s plus |v| over the whole s16 range, gave v 192 about 1 unit/ms, and
+ * the body never found a peak in a sweep that slowed tenfold (dump13). */
+static int32_t drive_v_cruise(int16_t vel)
+{
+	uint32_t mag = (vel < 0) ? (uint32_t)(-(int32_t)vel) : (uint32_t)vel;
+	uint32_t ups = mag * 24000u / 768u;     /* units/s */
+	int32_t  v;
+
+	if (ups > 20000u) {
+		ups = 20000u;
+	}
+	v = (int32_t)((ups + 4000u) * FOCUS_COUNTS_PER_UNIT);
+	return (v > SCAN_V_MAX) ? SCAN_V_MAX : v;
+}
+
+/* A Drive in the SAME direction as the running Drive or Scan leg: take its
+ * speed and its target -- the limit on that side -- and leave the motor
+ * running.  The body sends one every frame, and restarting from rest on each
+ * never got the mechanism past breakaway (dump11: +36, +7, -1, -4 counts per
+ * 16 ms leg); and it hands a Scan over to a Drive part-way through the sweep.
+ *
+ * The replaced instruction is answered now, as a replaced one is: 3C p for a
+ * Drive, 1F 00 for a Scan.  From here on the leg IS the Drive, which
+ * focus_scan sees in g_last_op when the leg returns.  Returns 0 for anything
+ * else, which goes on to end the leg as before. */
+static uint8_t focus_drive_absorb(const struct em_focus_cmd *c)
+{
+	int16_t dir = (c->drive_vel > 0) ? 1 : -1;
+
+	if (c->op != EM_OP_DRIVE || !g_moving || dir != g_move_dir
+	    || (g_last_op != EM_OP_DRIVE && g_last_op != EM_OP_SCAN)) {
+		return 0;
+	}
+	if (g_last_op == EM_OP_SCAN) {
+		em_set_scan_state(EM_SCAN_IDLE);
+		em_post_event(EM_REC_SCAN, 0x00u);
+	} else {
+		em_post_event(EM_REC_DRIVE, (uint8_t)(g_drive_param >> 2));
+	}
+	g_last_op           = EM_OP_DRIVE;
+	g_drive_vel         = c->drive_vel;
+	g_drive_param       = c->drive_param;
+	g_live_cfg.v_cruise = drive_v_cruise(c->drive_vel);
+	g_live_cfg.stop_ms  = SCAN_STOP_MS;
+
+	g_absorb_target  = (dir > 0) ? FOCUS_TRAVEL_COUNTS : 0;
+	g_absorb_pending = (g_absorb_target != g_move_target);
+	g_move_target    = g_absorb_target;
+	return 1;
+}
+
+/* How a Drive ends: at the limit, or cut short by what came next. */
+static void focus_drive_end(uint8_t outcome)
+{
+	if (outcome == SERVO_ABORTED) {
+		focus_report_cut(EM_OP_DRIVE, g_drive_param);
+		return;
+	}
+	/* Drive has no end of its own short of the limit, so its event carries
+	 * the top six bits of the record's rec[1] and a 4-byte tail rather than
+	 * the usual 2. */
+	em_post_event(EM_REC_DRIVE, (uint8_t)(g_drive_param >> 2));
+}
+
 /* The servo's other hook: has the body called the move off?  A Stop is not a
  * retarget -- the body wants the mechanism still, so the servo returns
  * SERVO_ABORTED and the caller acknowledges.
@@ -1057,7 +1143,7 @@ static uint8_t focus_abort(void)
 	        || g_last_op == EM_OP_SCAN || g_last_op == EM_OP_DRIVE)) {
 		struct em_focus_cmd c;
 
-		if (em_take_focus_cmd(&c)) {
+		if (em_take_focus_cmd(&c) && !focus_drive_absorb(&c)) {
 			focus_cut(&c);
 		}
 	}
@@ -1073,7 +1159,20 @@ static uint8_t focus_retarget(int32_t *target)
 	struct em_focus_cmd c;
 	int32_t             want;
 
+	if (g_absorb_pending) {
+		g_absorb_pending = 0;
+		*target = g_absorb_target;
+		return 1;
+	}
 	if (!em_take_focus_cmd(&c)) {
+		return 0;
+	}
+	if (focus_drive_absorb(&c)) {
+		if (g_absorb_pending) {
+			g_absorb_pending = 0;
+			*target = g_absorb_target;
+			return 1;
+		}
 		return 0;
 	}
 
@@ -1136,6 +1235,7 @@ static uint8_t focus_run(int32_t want, uint16_t target_u,
 	g_moving      = 1;
 	g_move_target = want;
 	g_move_dir    = delta >= 0 ? 1 : -1;
+	g_absorb_pending = 0;   /* a takeover belongs to the leg it arrived in */
 	servo_move_rel(delta, cfg, &r);
 	g_moving      = 0;
 	focus_report();
@@ -1227,6 +1327,13 @@ static void focus_report_cut(uint8_t running, uint8_t drive_param)
 #define SCAN_RUNUP_COUNTS   300
 #define SCAN_RUNOUT_COUNTS  240
 
+/* Leg 1, the approach (focus_scan): braking over the last ~15 ms of travel,
+ * an arrival band of +-100 counts, and arrived once under 3 counts/ms --
+ * below the reversal brake's 5, so the sweep turns round without a hold. */
+#define SCAN_APPROACH_STOP_MS   15
+#define SCAN_APPROACH_TOL       100
+#define SCAN_APPROACH_V_ARRIVE  3000
+
 static void focus_scan(const struct em_focus_cmd *c)
 {
 	int32_t first, second, dir, start, finish, v, runup, runout;
@@ -1317,10 +1424,34 @@ static void focus_scan(const struct em_focus_cmd *c)
 	/* 0x00 through the approach: the sweep has not launched yet. */
 	em_set_scan_state(EM_SCAN_IDLE);
 
-	/* Leg 1: get to the run-up point, at whatever speed suits.  Wait until
-	 * it is at rest before the sweep -- focus_run is blocking, so this is
-	 * the ordering by construction. */
-	outcome = focus_run(start, focus_counts_to_em06(start), &STOCK);
+	/* Leg 1: get to the run-up point, fast.  focus_run is blocking, so the
+	 * sweep cannot start before it ends.
+	 *
+	 * It does not need the precision of a Move -- anywhere outside the
+	 * run-up point will do -- and with the Move profile it took 374-538 ms
+	 * for 1000-1900 counts against 144-200 ms for the sweep (dump12): the
+	 * slow run the wrong way that the body then waits out on every rescan.
+	 * Yongnuo runs this leg at a fixed top speed.  So: full speed, braking
+	 * only near the end, and an arrival band SCAN_APPROACH_TOL either side
+	 * of a point SCAN_APPROACH_TOL beyond the run-up point, away from the
+	 * window -- so the band never reaches into the run-up, whichever way
+	 * this leg travels. */
+	start -= dir * SCAN_APPROACH_TOL;
+	if (start < 0) {
+		start = 0;
+	} else if (start > FOCUS_TRAVEL_COUNTS) {
+		start = FOCUS_TRAVEL_COUNTS;
+	}
+	g_live_cfg           = STOCK;
+	g_live_cfg.v_cruise  = SCAN_V_MAX;
+	g_live_cfg.stop_ms   = SCAN_APPROACH_STOP_MS;
+	g_live_cfg.tolerance = SCAN_APPROACH_TOL;
+	g_live_cfg.v_arrive  = SCAN_APPROACH_V_ARRIVE;
+	outcome = focus_run(start, focus_counts_to_em06(start), &g_live_cfg);
+	if (g_last_op == EM_OP_DRIVE) {
+		focus_drive_end(outcome);       /* a Drive took the leg over */
+		return;
+	}
 	if (outcome == SERVO_ABORTED || g_next_pending) {
 		em_set_scan_state(EM_SCAN_IDLE);
 		focus_report_cut(EM_OP_SCAN, 0);
@@ -1331,11 +1462,12 @@ static void focus_scan(const struct em_focus_cmd *c)
 	 * early, inside the run-out -- so it stops at the target instead of
 	 * overrunning it into the close-focus stop. */
 	em_scan_launch();
-	{
-		struct servo_cfg sweep = STOCK;
-
-		sweep.v_cruise = v;
-		outcome = focus_run(finish, focus_counts_to_em06(finish), &sweep);
+	g_live_cfg          = STOCK;
+	g_live_cfg.v_cruise = v;
+	outcome = focus_run(finish, focus_counts_to_em06(finish), &g_live_cfg);
+	if (g_last_op == EM_OP_DRIVE) {
+		focus_drive_end(outcome);       /* a Drive took the sweep over */
+		return;
 	}
 
 	if (outcome == SERVO_ABORTED) {
@@ -1349,36 +1481,25 @@ static void focus_scan(const struct em_focus_cmd *c)
 /* ------------------------------------------------------------------------
  * DRIVE -- run toward one end at a given speed (autofocus.md 3.4).
  *
- * NOT YET OBSERVED ON AN a9 II either, and not observed on any wire at all.
+ * Seen on an a9 II once 0x01 advertised it (dump11): one every frame, and
+ * taking over a Scan part-way through.  A same-direction Drive updates the
+ * running leg (focus_drive_absorb) rather than replacing it.
  */
 static void focus_drive(const struct em_focus_cmd *c)
 {
-	struct servo_cfg drv = STOCK;
-	int32_t          want;
-	uint16_t         mag = (c->drive_vel < 0)
-	                       ? (uint16_t)(-c->drive_vel) : (uint16_t)c->drive_vel;
+	int32_t want;
 
 	/* Zero or negative runs to the lower limit, positive to the upper. */
 	want = (c->drive_vel > 0) ? FOCUS_TRAVEL_COUNTS : 0;
 
-	/* "The speed has a floor, so any non-zero request moves at a useful
-	 * rate, and a ceiling at the lens's maximum." */
-	if (mag > 0x7FFFu) {
-		mag = 0x7FFFu;
-	}
-	drv.v_cruise = SCAN_V_MIN
-	               + (int32_t)((uint32_t)mag
-	                           * (SCAN_V_MAX - SCAN_V_MIN) / 0x7FFFu);
-	drv.stop_ms  = SCAN_STOP_MS;
+	g_live_cfg          = STOCK;
+	g_live_cfg.v_cruise = drive_v_cruise(c->drive_vel);
+	g_live_cfg.stop_ms  = SCAN_STOP_MS;
+	g_drive_vel         = c->drive_vel;
+	g_drive_param       = c->drive_param;
 
-	if (focus_run(want, focus_counts_to_em06(want), &drv) == SERVO_ABORTED) {
-		focus_report_cut(EM_OP_DRIVE, c->drive_param);
-		return;
-	}
-	/* Drive has no end of its own short of the limit, so its event carries
-	 * the top six bits of the record's rec[1] and a 4-byte tail rather than
-	 * the usual 2. */
-	em_post_event(EM_REC_DRIVE, (uint8_t)(c->drive_param >> 2));
+	focus_drive_end(focus_run(want, focus_counts_to_em06(want),
+	                          &g_live_cfg));
 }
 
 /* Act on one instruction from the body. */
