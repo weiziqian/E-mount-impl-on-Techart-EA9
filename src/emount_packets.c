@@ -15,7 +15,8 @@
  *   EM_DEFOCUS_SCALE  0x06 pl[13..14]
  *   EM_FOCAL_MM10     0x08 pl[16..17]  (whole mm, BCD; pl[18..19] = 0, a prime)
  *   EM_APERTURE_MAX   0x08 pl[20]      (f-number, BCD; pl[21] = 0, a prime)
- *   FOCUS_EM06_LO/HI  0x08 pl[0..1] infinity, pl[2..3] closest focus
+ *   EM_APERTURE_MAX   0x08 pl[0..1]    (aperture value, the largest opening)
+ *   EM_APERTURE_MIN   0x08 pl[2..3]    (aperture value, the smallest opening)
  *
  * Only what changes at run time (positions, status, events, 0x28 pl[9..10],
  * the 0x34 echo) is written by emount.c.  Message 0x0A has no template: the
@@ -43,7 +44,6 @@
  *                     circle (msg_0x08.md) */
 #include "emount_packets.h"
 #include "emount.h"
-#include "focus_map.h"
 
 /* A u16 as the two little-endian bytes of a template. */
 #define EM_LO(v) ((uint8_t)((v) & 0xFFu))
@@ -123,8 +123,8 @@ uint8_t em_msg_07[EA9_LEN_07] = {
 
 uint8_t em_msg_08[EA9_LEN_08] = {
 	/* +0x00 */ 0xf0, 0xd2, 0x00, 0x02, 0x00, 0x08,
-	            EM_LO(FOCUS_EM06_LO), EM_HI(FOCUS_EM06_LO),
-	/* +0x08 */ EM_LO(FOCUS_EM06_HI), EM_HI(FOCUS_EM06_HI), 0x00, 0x00, 0x00, 0x80, 0x00, 0x14,
+	            EM_LO(EM_APERTURE_MAX), EM_HI(EM_APERTURE_MAX),
+	/* +0x08 */ EM_LO(EM_APERTURE_MIN), EM_HI(EM_APERTURE_MIN), 0x00, 0x00, 0x00, 0x80, 0x00, 0x14,
 	/* +0x10 */ 0x01, 0x00, 0x12, 0xe1, 0x01, 0x03,
 	            EM_BCD(EM_FOCAL_MM / 100u), EM_BCD(EM_FOCAL_MM),
 	/* +0x18 */ 0x00, 0x00, EM_F_BCD(EM_APERTURE_MAX), 0x00, 0x00, 0x00, 0x18, 0x00,

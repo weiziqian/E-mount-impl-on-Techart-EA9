@@ -408,8 +408,8 @@ uint16_t em_defocus_scale(void);
  * pl[44], pl[46], pl[51] take descriptor 0x16 instead of 0x18, and pl[52] is
  * the maximum instead of the stock's f/90.  The test enumerates exactly those
  * four and checks every other byte against a stock literal. */
-#define EM_APERTURE_MAX  0x11C0u        /* f/1.8 -- message 0x05 pl[44], pl[51] */
-#define EM_APERTURE_MIN  0x11C0u        /* f/1.8 -- message 0x05 pl[52]         */
+#define EM_APERTURE_MAX  0x11C0u        /* f/1.8 -- 0x05 pl[44], pl[51]; 0x08 pl[0..1] */
+#define EM_APERTURE_MIN  0x11C0u        /* f/1.8 -- 0x05 pl[52]; 0x08 pl[2..3]          */
 #define EM_APERTURE_NOW  0x11C0u        /* f/1.8 -- 0x05 pl[0..3], 0x1B, 0x28 pl[9..10] */
 
 /* The aperture the body last commanded on message 0x1B, and how many of those
