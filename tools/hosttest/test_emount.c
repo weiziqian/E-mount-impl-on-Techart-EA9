@@ -12,9 +12,10 @@
 #include <string.h>
 #include "board.h"
 #include "emount.h"
+#include "optical_file.h"
 #include "emount_packets.h"
 
-extern uint8_t  sent[][256];
+extern uint8_t  sent[][512];
 extern uint16_t sent_len[];
 extern int      sent_cs_asserted[];
 extern int      sent_n;
@@ -1795,6 +1796,126 @@ int main(void)
 		if (em_body_offer[0] != 0xFF || em_body_offer[7] != 0x1F) {
 			fail("the body's capability offer was not captured (%02x..%02x)",
 			     em_body_offer[0], em_body_offer[7]);
+		}
+	}
+
+	/* --- messages 0x3A/0x3B: the paged optical file ------------------- */
+	{
+		uint8_t  req[16];
+		uint8_t  file[6 * 488];
+		uint16_t n, k;
+		int      before, i;
+		unsigned page;
+
+		/* Select the LF file. */
+		n = make_request(req, 0x03, 0x21, 0x3A, 0x00, 0x00);
+		before = sent_n;
+		host_body_frame(req, n);
+		em_poll();
+		if (sent_n != before + 1 || sent_len[before] != 32) {
+			fail("0x3A pl[0]=00: %d frame(s), %u bytes, want one of 32",
+			     sent_n - before, sent_n > before ? sent_len[before] : 0);
+		} else {
+			const uint8_t *f = sent[before];
+
+			check_frame(before, 0x3A, "0x3A file size");
+			if (f[3] != 0x03 || f[4] != 0x00) {
+				fail("0x3A: class/seq %02x %02x, want 03 00", f[3], f[4]);
+			}
+			if ((f[7] | (f[8] << 8)) != 2600 || f[11] != 6 || f[12] != 0) {
+				fail("0x3A: size %u pages %u, want 2600 and 6",
+				     f[7] | (f[8] << 8), f[11] | (f[12] << 8));
+			}
+		}
+
+		/* Read it back, page by page, and join the pages. */
+		memset(file, 0xAA, sizeof(file));
+		for (page = 1; page <= 6; page++) {
+			n = make_request(req, 0x03, (uint8_t)(0x30 + page), 0x3B,
+			                 (uint8_t)page, 0x00);
+			before = sent_n;
+			host_body_frame(req, n);
+			em_poll();
+			if (sent_n != before + 1 || sent_len[before] != 500) {
+				fail("0x3B page %u: no 500-byte reply", page);
+				continue;
+			}
+			check_frame(before, 0x3B, "0x3B page");
+			if (sent[before][2] != 0x01 || sent[before][3] != 0x03
+			    || sent[before][6] != 0x00 || sent[before][7] != page) {
+				fail("0x3B page %u: header %02x %02x .. %02x %02x", page,
+				     sent[before][2], sent[before][3],
+				     sent[before][6], sent[before][7]);
+			}
+			memcpy(&file[(page - 1) * 488], &sent[before][9], 488);
+		}
+		if (memcmp(file, optical_file, OPTICAL_FILE_LEN) != 0) {
+			fail("the six 0x3B pages do not join into the LF file");
+		}
+		for (k = OPTICAL_FILE_LEN; k < sizeof(file); k++) {
+			if (file[k] != 0) {
+				fail("0x3B: byte %u past the file's end is %02x", k, file[k]);
+				break;
+			}
+		}
+
+		/* A page past the end is clamped to the last. */
+		n = make_request(req, 0x03, 0x40, 0x3B, 9, 0x00);
+		before = sent_n;
+		host_body_frame(req, n);
+		em_poll();
+		if (sent_n == before + 1
+		    && (sent[before][7] != 9
+		        || memcmp(&sent[before][9], &file[5 * 488], 488) != 0)) {
+			fail("0x3B page 9 was not answered with the last page");
+		}
+
+		/* The one-page object: announced as one page, sent whole. */
+		n = make_request(req, 0x03, 0x41, 0x3A, 0x08, 0x00);
+		before = sent_n;
+		host_body_frame(req, n);
+		em_poll();
+		if (sent_n != before + 1 || sent[before][7] != 0x3A
+		    || sent[before][11] != 1) {
+			fail("0x3A pl[0]=08: wrong or missing reply");
+		}
+		n = make_request(req, 0x03, 0x42, 0x3B, 1, 0x00);
+		before = sent_n;
+		host_body_frame(req, n);
+		em_poll();
+		if (sent_n != before + 1) {
+			fail("0x3B of the one-page object: no reply");
+		} else {
+			check_frame(before, 0x3B, "0x3B one-page object");
+			for (i = 9; i < 497; i++) {
+				if (sent[before][i] != optical_page08[i]) {
+					fail("0x3B one-page object differs at %d", i);
+					break;
+				}
+			}
+		}
+
+		/* Any other selector clears it: no reply, and pages are empty. */
+		n = make_request(req, 0x03, 0x43, 0x3A, 0x05, 0x00);
+		before = sent_n;
+		host_body_frame(req, n);
+		em_poll();
+		if (sent_n != before) {
+			fail("0x3A pl[0]=05 was answered");
+		}
+		n = make_request(req, 0x03, 0x44, 0x3B, 1, 0x00);
+		before = sent_n;
+		host_body_frame(req, n);
+		em_poll();
+		if (sent_n == before + 1) {
+			for (i = 9; i < 497; i++) {
+				if (sent[before][i] != 0) {
+					fail("0x3B with nothing selected carries data");
+					break;
+				}
+			}
+		} else {
+			fail("0x3B with nothing selected: no reply");
 		}
 	}
 

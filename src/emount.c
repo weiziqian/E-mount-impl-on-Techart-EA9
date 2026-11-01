@@ -44,9 +44,11 @@
 #include "emount_packets.h"
 #include "em_uart.h"
 #include "em_eic.h"
+#include "optical_file.h"
 
 #define EM_CLASS_INIT     0x02u
 #define EM_CLASS_NORMAL   0x01u
+#define EM_CLASS_FILE     0x03u     /* 0x3A/0x3B, the paged file (msg_0x3B.md) */
 
 #define EM_FRAME_START    0xF0u
 #define EM_FRAME_END      0x55u
@@ -277,6 +279,7 @@ static void em_transmit(uint8_t *frame, uint16_t len)
 	uint16_t sum = 0;
 
 	frame[1]       = (uint8_t)len;
+	frame[2]       = (uint8_t)(len >> 8);      /* 0x3B is 500 bytes */
 	frame[len - 1] = EM_FRAME_END;
 
 	/* sum over frame[1] .. frame[len-4], i.e. everything but the start
@@ -483,6 +486,119 @@ static void em_send_id(uint8_t id)
 	}
 
 	em_transmit(frame, p->len);
+}
+
+/* MESSAGES 0x3A AND 0x3B: the paged optical file, as Yongnuo 50 DF serves it
+ * (FUN_080175e8, reached from its receive dispatcher on class 0x03 only).
+ * The body selects a file with 0x3A pl[0] and reads it with 0x3B, one page
+ * per request; the content is the DF's own, verbatim (optical_file.c).
+ *
+ *   0x3A pl[0] = 00   select the LF file: reply 32 bytes, seq 0, pl[1..2] =
+ *                     size + 16, pl[5..6] = pages = (size + 16) / 488 + 1
+ *   0x3A pl[0] = 08   select the one-page object: reply pl[1] = 3a, pl[5] = 1
+ *   0x3A otherwise    clear the selection, no reply
+ *   0x3B pl[0] = n    page n (1-based, clamped to the page count): reply 500
+ *                     bytes, pl[0..2] = 00 n <request pl[1]>, pl[3..] = the
+ *                     next 488 bytes, zero past the end; nothing selected,
+ *                     all zero.  The one-page object is a whole frame and is
+ *                     sent whole, with its header rewritten.
+ *
+ * The request's two bytes are taken when it arrives (on_cs_edge): this class
+ * can interleave with the 60 Hz frames, which overwrite g_req. */
+#define EM_ID_FILE_SIZE   0x3Au
+#define EM_ID_FILE_PAGE   0x3Bu
+#define EM_3A_LEN         32u
+#define EM_3B_LEN         500u
+#define EM_3B_DATA        9u        /* frame offset of pl[3] */
+#define EM_3B_CHUNK       488u
+
+static volatile uint8_t g_file_pending;
+static volatile uint8_t g_file_id, g_file_p0, g_file_p1;
+
+static const uint8_t *g_file_ptr;   /* the selected object, or none */
+static uint16_t g_file_size;
+static uint16_t g_file_pages;
+static uint16_t g_file_chunk;       /* 488, or 500 for a whole frame */
+
+static uint8_t g_file_frame[EM_3B_LEN];
+
+static void em_send_file(uint8_t id, uint8_t p0, uint8_t p1)
+{
+	uint8_t *f = g_file_frame;
+	uint16_t k;
+
+	for (k = 0; k < EM_3B_LEN; k++) {
+		f[k] = 0;
+	}
+
+	if (id == EM_ID_FILE_SIZE) {
+		if (p0 == 0x00u) {
+			uint16_t total;
+
+			g_file_ptr   = optical_file;
+			g_file_size  = (uint16_t)(optical_file[4]
+			                          | (optical_file[5] << 8)) + 16u;
+			g_file_chunk = EM_3B_CHUNK;
+			total        = (uint16_t)(g_file_size + 16u);
+			g_file_pages = (uint16_t)(total / EM_3B_CHUNK + 1u);
+			f[0] = EM_FRAME_START; f[3] = EM_CLASS_FILE;
+			f[4] = 0x00u;            /* Yongnuo writes seq 0 here */
+			f[5] = EM_ID_FILE_SIZE;
+			f[7] = (uint8_t)total;  f[8]  = (uint8_t)(total >> 8);
+			f[11] = (uint8_t)g_file_pages;
+			f[12] = (uint8_t)(g_file_pages >> 8);
+			em_transmit(f, EM_3A_LEN);
+		} else if (p0 == 0x08u) {
+			f[0] = EM_FRAME_START; f[3] = EM_CLASS_FILE;
+			f[4] = g_reply_seq;
+			f[5] = EM_ID_FILE_SIZE;
+			f[7] = EM_ID_FILE_SIZE; f[11] = 0x01u;
+			em_transmit(f, EM_3A_LEN);
+			g_file_ptr   = optical_page08;
+			g_file_size  = OPTICAL_PAGE08_LEN;
+			g_file_pages = 1u;
+			g_file_chunk = OPTICAL_PAGE08_LEN;
+		} else {
+			g_file_ptr   = 0;
+			g_file_size  = 0;
+			g_file_pages = 0;
+			g_file_chunk = 0;
+		}
+		return;
+	}
+
+	if (g_file_ptr) {
+		uint16_t idx = p0 ? (uint16_t)(p0 - 1u) : 0u;
+		const uint8_t *src;
+
+		if (idx >= g_file_pages) {
+			idx = (uint16_t)(g_file_pages - 1u);
+		}
+		src = g_file_ptr + (uint32_t)g_file_chunk * idx;
+		if (g_file_chunk == EM_3B_LEN) {
+			for (k = 0; k < EM_3B_LEN; k++) {
+				f[k] = src[k];
+			}
+		} else {
+			int32_t  left = (int32_t)g_file_size
+			                - (int32_t)g_file_chunk * idx;
+			uint16_t n    = g_file_chunk;
+
+			if (left < (int32_t)n) {
+				n = left > 0 ? (uint16_t)left : 0u;
+			}
+			for (k = 0; k < n; k++) {
+				f[EM_3B_DATA + k] = src[k];
+			}
+		}
+	}
+	f[0] = EM_FRAME_START; f[3] = EM_CLASS_FILE;
+	f[4] = g_reply_seq;
+	f[5] = EM_ID_FILE_PAGE;
+	f[6] = 0x00u;
+	f[7] = p0;
+	f[8] = p1;
+	em_transmit(f, EM_3B_LEN);
 }
 
 /* THE FOCUS INSTRUCTIONS, raw, into the capture slots: the first message
@@ -967,6 +1083,14 @@ static void on_cs_edge(int level)
 		for (k = 0; k < 8; k++) {
 			em_body_offer[k] = rx[6 + k];
 		}
+	}
+
+	if (rx[3] == EM_CLASS_FILE
+	    && (rx[5] == EM_ID_FILE_SIZE || rx[5] == EM_ID_FILE_PAGE)) {
+		g_file_id      = rx[5];
+		g_file_p0      = (n >= 10u) ? rx[6] : 0u;
+		g_file_p1      = (n >= 11u) ? rx[7] : 0u;
+		g_file_pending = 1;
 	}
 
 	if (rx[3] == EM_CLASS_INIT) {
@@ -1577,6 +1701,18 @@ void em_poll(void)
 		if (id == 0x0A) {
 			em_handshake_done = 1;
 			em_t_handshake    = millis();
+		}
+	}
+
+	if (g_file_pending) {
+		uint8_t id, p0, p1;
+
+		__disable_irq();
+		id = g_file_id; p0 = g_file_p0; p1 = g_file_p1;
+		g_file_pending = 0;
+		__enable_irq();
+		if (!em_shutdown_acked) {
+			em_send_file(id, p0, p1);
 		}
 	}
 

@@ -91,7 +91,8 @@ LDFLAGS  = -mthumb -mcpu=cortex-m0plus -Tsrc/ea9.ld -Wl,--gc-sections \
 
 SRCS := src/startup_samd21.c src/system_samd21.c src/board.c \
         src/clock.c src/delay.c \
-        src/emount.c src/emount_packets.c src/em_uart.c src/em_eic.c \
+        src/emount.c src/emount_packets.c src/optical_file.c \
+        src/em_uart.c src/em_eic.c \
         $(LOGSRCS) \
         src/motor.c src/abs_encoder.c src/servo.c src/focus_map.c \
         src/focus_dist.c \
@@ -171,7 +172,7 @@ hosttest:
 	@mkdir -p $(HOSTTEST)
 	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
 	  tools/hosttest/test_emount.c tools/hosttest/shim.c \
-	  src/emount.c src/emount_packets.c -o $(HOSTTEST)/test_emount
+	  src/emount.c src/emount_packets.c src/optical_file.c -o $(HOSTTEST)/test_emount
 	@$(HOSTTEST)/test_emount
 	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
 	  tools/hosttest/test_servo.c tools/hosttest/sim_motor.c \
@@ -179,12 +180,12 @@ hosttest:
 	@$(HOSTTEST)/test_servo
 	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
 	  tools/hosttest/test_nobody.c tools/hosttest/shim.c \
-	  src/emount.c src/emount_packets.c -o $(HOSTTEST)/test_nobody
+	  src/emount.c src/emount_packets.c src/optical_file.c -o $(HOSTTEST)/test_nobody
 	@$(HOSTTEST)/test_nobody nobody
 	@$(HOSTTEST)/test_nobody slowbody
 	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
 	  tools/hosttest/test_init.c tools/hosttest/shim.c \
-	  src/emount.c src/emount_packets.c -o $(HOSTTEST)/test_init
+	  src/emount.c src/emount_packets.c src/optical_file.c -o $(HOSTTEST)/test_init
 	@$(HOSTTEST)/test_init
 	$(HOSTCC) -std=gnu99 -Wall -Wextra -O1 -Itools/hosttest -Isrc \
 	  tools/hosttest/test_focus.c src/focus_map.c -o $(HOSTTEST)/test_focus

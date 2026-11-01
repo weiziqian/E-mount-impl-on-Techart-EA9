@@ -11,7 +11,7 @@
 #include "emount.h"
 #include "emount_packets.h"
 
-extern uint8_t  sent[][256];
+extern uint8_t  sent[][512];
 extern uint16_t sent_len[];
 extern int      sent_n;
 void host_window_payload(const uint8_t *buf, uint16_t len);
