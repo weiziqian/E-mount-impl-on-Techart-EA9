@@ -184,6 +184,26 @@ void trail_cap(uint32_t page, unsigned slot)
 /* The focus history: the last targets the body sent and the mode bytes it sent
  * them with.  Written at shutdown, which is where the questions have been --
  * the per-move pages only cover the first few moves of a session. */
+/* Which Move modes and which Scan speed units the body used -- the ones that
+ * the defocus scale multiplies (Move mode 6, a Scan with speed bit 7) against
+ * the rest.  w[3..6]: Move modes 0..7, two per word, low half first; w[7]:
+ * Scan in position units (low half) and in defocus units (high half). */
+void trail_modes(uint32_t page)
+{
+	uint32_t w[16];
+	unsigned i;
+
+	zero(w);
+	w[0] = EM_DIAG_MAGIC;
+	w[1] = EM_DIAG_FORMAT;
+	w[2] = TAG_MODE;
+	for (i = 0; i < 8; i++) {
+		w[3 + i / 2] |= (uint32_t)em_move_mode_n[i] << (16 * (i % 2));
+	}
+	w[7] = ((uint32_t)em_scan_unit_n[1] << 16) | em_scan_unit_n[0];
+	diag_page(page, w, 16);
+}
+
 void trail_fhist(uint32_t page)
 {
 	uint32_t w[16];

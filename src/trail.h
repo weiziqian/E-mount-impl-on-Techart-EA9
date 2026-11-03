@@ -36,6 +36,7 @@
 #define TAG_FLST 0x464C5354u   /* the last few focus moves */
 #define TAG_FHIS        0x46484953u    /* focus history: targets + mode bytes */
 #define TAG_FAIL        0x4C494146u   /* "FAIL": the handshake did not complete */
+#define TAG_MODE        0x4D4F4445u   /* Move records by mode, Scan by speed unit */
 
 /* Boot identity, carried in every page that has room for it. */
 /* EA9_NO_LOG: the release build writes no flash at all, so these become
@@ -50,6 +51,7 @@ static inline void trail_idlog(uint32_t page) { (void)page; }
 static inline void trail_norm(uint32_t page)  { (void)page; }
 static inline void trail_m08(uint32_t page)   { (void)page; }
 static inline void trail_fhist(uint32_t page) { (void)page; }
+static inline void trail_modes(uint32_t page) { (void)page; }
 static inline void trail_chk(uint32_t page)   { (void)page; }
 static inline void trail_cap(uint32_t page, unsigned slot)
 {
@@ -66,6 +68,7 @@ void trail_idlog(uint32_t page);
 void trail_norm(uint32_t page);
 void trail_m08(uint32_t page);
 void trail_fhist(uint32_t page);
+void trail_modes(uint32_t page);
 void trail_chk(uint32_t page);
 void trail_cap(uint32_t page, unsigned slot);
 void trail_cap_pre(uint32_t page, unsigned slot);

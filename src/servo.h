@@ -361,10 +361,11 @@ struct servo_cfg {
 
 	/* Mid-move retargeting and abort, unchanged.  Both are polled before
 	 * the arrival test, so the servo cannot declare success against a
-	 * target the body has already replaced or cancelled. */
+	 * target the body has already replaced or cancelled.  There is no cap
+	 * on the number of retargets: total_ms bounds the move however often
+	 * the body redirects it. */
 	uint8_t (*retarget)(int32_t *target);
 	uint8_t (*abort)(void);
-	uint8_t  retarget_max;
 	int32_t  retarget_min;
 
 	/* A REVERSAL AT SPEED goes through the brake first, so the gears are

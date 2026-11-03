@@ -208,7 +208,7 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 		}
 
 		/* --- the body may move the goalposts ---------------------- */
-		if (cfg->retarget && !holding && n_retarget < cfg->retarget_max) {
+		if (cfg->retarget && !holding) {
 			int32_t nt = target;
 
 			if (cfg->retarget(&nt)) {
@@ -217,7 +217,19 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 				if (change < 0) {
 					change = -change;
 				}
-				if (change > cfg->retarget_min) {
+				/* A small change the same way is taken as it
+				 * is, and nothing else: the leg carries on,
+				 * its deadline and guards untouched.  One
+				 * under retarget_min that turns the move round
+				 * is still ignored. */
+				if (change <= cfg->retarget_min
+				    && change != 0
+				    && ((nt >= pos) ? 1 : -1) == leg_sign) {
+					target      = nt;
+					out->target = target;
+					aim         = target
+					              + (int32_t)leg_sign * cfg->aim_ahead;
+				} else if (change > cfg->retarget_min) {
 					int16_t ns = (nt >= pos) ? 1 : -1;
 					/* Captured BEFORE leg_sign is updated.
 					 * Testing it afterwards compares the
@@ -229,7 +241,9 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 					int     reversed = (ns != leg_sign);
 
 					target = nt;
-					n_retarget++;
+					if (n_retarget < 255u) {
+						n_retarget++;   /* a count for the trail */
+					}
 					out->retargets = n_retarget;
 					out->target    = target;
 

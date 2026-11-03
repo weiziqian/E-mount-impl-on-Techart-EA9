@@ -471,7 +471,7 @@ static struct servo_cfg rt_cfg(void)
 		.duty_floor = 200, .duty_max = 800, .stall_ms = 300,
 		.timeout_ms = 3000, .tolerance = 12, .settle_counts = 40, .aim_ahead = 0, .noise = 8,
 		.pump = count_pump,
-		.retarget = rt_hook, .retarget_max = 16, .retarget_min = 12,
+		.retarget = rt_hook, .retarget_min = 12,
 		.reverse_brake_ms = 20, .total_ms = 5000,
 	};
 	return c;
@@ -859,6 +859,33 @@ static void check_shortened_at_speed(void)
 	}
 }
 
+/* A small same-way change is followed, though it is under retarget_min --
+ * and is not a redirection: the leg carries on. */
+static void check_retarget_small_same_way(void)
+{
+	struct servo_cfg cfg = rt_cfg();
+	struct servo_result r;
+
+	sim_reset();
+	rt_arm(1000, 2005);
+	servo_move_rel(2000, &cfg, &r);
+
+	if (!rt_count) {
+		fail("small retarget: the hook never fired");
+	}
+	if (r.target != 2005) {
+		fail("small retarget: pursued %ld, expected 2005",
+		     (long)r.target);
+	}
+	if (r.retargets != 0) {
+		fail("small retarget: counted as %u redirection(s)",
+		     r.retargets);
+	}
+	if (r.outcome != SERVO_OK) {
+		fail("small retarget: ended %s", NAME[r.outcome]);
+	}
+}
+
 static void check_retarget_forward(void)
 {
 	struct servo_cfg cfg = rt_cfg();
@@ -952,10 +979,6 @@ static void check_retarget_cap(void)
 	rt_repeat = 0;
 	rt_alt    = 0;
 
-	if (r.retargets > cfg.retarget_max) {
-		fail("retargeted %u times against a cap of %u",
-		     r.retargets, cfg.retarget_max);
-	}
 	if (r.ms > cfg.total_ms + 200) {
 		fail("ran %u ms against a %u ms ceiling", r.ms, cfg.total_ms);
 	}
@@ -1054,7 +1077,6 @@ static void check_total_ceiling(void)
 	struct servo_cfg cfg = rt_cfg();
 	struct servo_result r;
 
-	cfg.retarget_max = 255;
 	cfg.total_ms     = 500;
 
 	sim_reset();
@@ -1220,6 +1242,7 @@ static void check_no_retarget_unchanged(void)
 int main(void)
 {
 	check_abort_stops_the_move();
+	check_retarget_small_same_way();
 	check_abort_silent_is_a_normal_move();
 	check_no_abort_hook();
 	check_shortened_at_speed();

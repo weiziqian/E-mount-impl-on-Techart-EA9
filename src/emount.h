@@ -595,6 +595,11 @@ void    em_post_query_answer(uint8_t tag, uint16_t value);
 /* Counters, so a dump can say which instructions a body actually uses. */
 extern volatile uint16_t em_rec_n[7];    /* indexed by EM_REC_SLOT_* below */
 extern volatile uint16_t em_rec_unknown; /* records whose tag ended the walk */
+/* Which of them use the defocus scale: Move records by mode (rec[4] & 7;
+ * mode 6 is in defocus units), and Scan records by the unit of their speed
+ * code -- [0] position units, [1] defocus units (bit 7 set). */
+extern volatile uint16_t em_move_mode_n[8];
+extern volatile uint16_t em_scan_unit_n[2];
 #define EM_REC_SLOT_STOP    0u
 #define EM_REC_SLOT_MOVE    1u
 #define EM_REC_SLOT_SCAN    2u

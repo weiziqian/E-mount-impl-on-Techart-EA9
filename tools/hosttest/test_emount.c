@@ -964,6 +964,22 @@ int main(void)
 			fail("Move mode 6 (defocus units) not decoded");
 		}
 
+		/* Each Move is counted under its mode, bit 3 ignored. */
+		{
+			uint16_t m0 = em_move_mode_n[0], m6 = em_move_mode_n[6];
+
+			REC_FRAME(0x1D, 0x05, 0x00, 0x00, 0x06);
+			(void)em_take_focus_cmd(&cmd);
+			REC_FRAME(0x1D, 0xEC, 0x12, 0x00, 0x08);
+			(void)em_take_focus_cmd(&cmd);
+			if (em_move_mode_n[6] != m6 + 1
+			    || em_move_mode_n[0] != m0 + 1) {
+				fail("Move mode counts went %u->%u (mode 0), "
+				     "%u->%u (mode 6)", m0, em_move_mode_n[0],
+				     m6, em_move_mode_n[6]);
+			}
+		}
+
 		/* BIT 3 OF THE MODE BYTE IS IGNORED.  A build that masked with
 		 * 0x0F instead of 0x07 would read mode 8 as a mode of its own
 		 * and silently drop every Move carrying it. */
@@ -1011,6 +1027,25 @@ int main(void)
 		           || cmd.scan_flags != 0x02) {
 			fail("Scan decoded as op %u a=%u b=%u speed=%#04x",
 			     cmd.op, cmd.scan_a, cmd.scan_b, cmd.scan_speed);
+		}
+
+		/* Each Scan is counted by its speed unit: bit 7 set is defocus
+		 * units, clear is position units. */
+		{
+			uint16_t sp = em_scan_unit_n[0], sd = em_scan_unit_n[1];
+
+			REC_FRAME(0x1F, 0x02, 0x02, 0x83, 0x88, 0x3D, 0x49, 0xED,
+			          0x47, 0x3F, 0x46, 0x03, 0x00, 0x00);
+			(void)em_take_focus_cmd(&cmd);
+			REC_FRAME(0x1F, 0x02, 0x02, 0x83, 0x08, 0x3D, 0x49, 0xED,
+			          0x47, 0x3F, 0x46, 0x03, 0x00, 0x00);
+			(void)em_take_focus_cmd(&cmd);
+			if (em_scan_unit_n[1] != sd + 1
+			    || em_scan_unit_n[0] != sp + 1) {
+				fail("Scan unit counts went %u->%u (position), "
+				     "%u->%u (defocus)", sp, em_scan_unit_n[0],
+				     sd, em_scan_unit_n[1]);
+			}
 		}
 
 		/* A ROW INDEX THEN A SCAN -- the 39-byte form the protocol
@@ -1519,18 +1554,46 @@ int main(void)
 		before = sent_n; em_poll(); f = sent[before + 1]; } while (0)
 #define POS(off) ((uint16_t)(f[off] | (f[(off) + 1] << 8)))
 
-		/* pl[20..21] is the position at the frame sync; pl[2..3] is the
-		 * target last reported, not latched. */
+		/* pl[20..21] is the position at the frame sync; at rest pl[2..3]
+		 * is the same position, whatever target was reported. */
 		em_set_motor(0);
 		em_set_focus_position(5000, 5060);
 		host_frame_sync();
 		em_sample_position(5000);
 		em_set_focus_position(5040, 5100);
 		before = sent_n; em_poll(); f = sent[before + 1];
-		if (POS(0x1A) != 5000 || POS(0x08) != 5100) {
-			fail("pl[20..21] %u pl[2..3] %u, want 5000 5100 (latched, target)",
+		if (POS(0x1A) != 5000 || POS(0x08) != 5000) {
+			fail("at rest pl[20..21] %u pl[2..3] %u, want 5000 5000",
 			     POS(0x1A), POS(0x08));
 		}
+		/* Running: the latch plus the last frame's displacement (+40),
+		 * bounded by the target. */
+		em_set_motor(1);
+		host_frame_sync();
+		em_sample_position(5040);
+		em_set_focus_position(5050, 5300);
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x1A) != 5040 || POS(0x08) != 5080) {
+			fail("running pl[20..21] %u pl[2..3] %u, want 5040 5080",
+			     POS(0x1A), POS(0x08));
+		}
+		host_frame_sync();
+		em_sample_position(5080);
+		em_set_focus_position(5090, 5100);
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x08) != 5100) {
+			fail("forecast %u passed the target 5100", POS(0x08));
+		}
+		/* Moving away from the target: no forecast past where it is. */
+		em_set_motor(-1);
+		host_frame_sync();
+		em_sample_position(5060);
+		em_set_focus_position(5060, 5300);
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x08) != 5060) {
+			fail("forecast %u turned back from 5060", POS(0x08));
+		}
+		em_set_motor(0);
 		/* A frame sync after the last report latches that report. */
 		em_set_focus_position(5200, 5200);
 		host_frame_sync();
@@ -1539,14 +1602,18 @@ int main(void)
 			fail("unlatched frame sync sent %u %u, want 5200 5200",
 			     POS(0x1A), POS(0x08));
 		}
-		/* The target is clamped into the advertised travel. */
-		em_set_focus_position(99999, 99999);
+		/* A forecast is clamped into the advertised travel. */
+		em_set_motor(1);
 		host_frame_sync();
 		em_sample_position(5000);
+		host_frame_sync();
+		em_sample_position(5500);
+		em_set_focus_position(5500, 99999);
 		before = sent_n; em_poll(); f = sent[before + 1];
 		if (POS(0x08) != ENC_TRAVEL_HI) {
 			fail("pl[2..3] was not clamped (%u)", POS(0x08));
 		}
+		em_set_motor(0);
 
 		/* pl[0..1]: idle, running each way. */
 		em_set_motor(0);  host_frame_sync(); SEND06(4800);
@@ -1575,6 +1642,23 @@ int main(void)
 		host_frame_sync(); em_set_motor(-1); SEND06(4800);
 		if (f[6] != 0x02 || f[7] != 0x04) {
 			fail("started after the sync reported %02x %02x", f[6], f[7]);
+		}
+		/* Reversed but still coasting up: the direction it moved. */
+		em_set_motor(-1);
+		host_frame_sync(); em_sample_position(5000);
+		host_frame_sync(); em_sample_position(5040);
+		em_set_focus_position(5040, 4800);
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (f[6] != 0x02 || f[7] != 0x02) {
+			fail("coasting up after a reversal reported %02x %02x",
+			     f[6], f[7]);
+		}
+		/* Barely moving: the commanded direction. */
+		host_frame_sync(); em_sample_position(5041);
+		em_set_focus_position(5041, 4800);
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (f[7] != 0x04) {
+			fail("turning point reported direction %02x", f[7]);
 		}
 		em_set_motor(0); host_frame_sync();
 

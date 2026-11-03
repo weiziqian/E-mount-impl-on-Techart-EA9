@@ -122,6 +122,7 @@
  */
 #define EM06_MOTION       0x06
 #define EM06_DIRECTION    0x07
+#define EM06_DIR_MIN      2      /* counts/frame that count as real motion */
 #define EM06_AT_REST      0x82u
 #define EM06_MOVING       0x02u
 #define EM06_NEAR_LO      0x10u
@@ -175,6 +176,8 @@ volatile uint16_t em_events_sent;
 volatile uint16_t em_stop_n;
 volatile uint16_t em_rec_n[EM_REC_SLOT_N];
 volatile uint16_t em_rec_unknown;
+volatile uint16_t em_move_mode_n[8];
+volatile uint16_t em_scan_unit_n[2];
 volatile uint16_t em_aperture_req;
 volatile uint16_t em_m03_aperture;
 volatile uint16_t em_m03_n;
@@ -664,6 +667,13 @@ static void rec_count(uint8_t slot)
 	}
 }
 
+static void count16(volatile uint16_t *n)
+{
+	if (*n != 0xFFFFu) {
+		(*n)++;
+	}
+}
+
 /* Publish one instruction.  A newer instruction REPLACES an unread one: the
  * protocol says a new one replaces a running one, so it certainly replaces one
  * that has not started (autofocus.md 3.1 rule 4). */
@@ -722,6 +732,7 @@ static void em_parse_records(const uint8_t *rx, uint16_t end)
 				em_t04_n++;
 			}
 
+			count16(&em_move_mode_n[r[4] & 0x07u]);
 			switch (r[4] & 0x07u) {
 			case 0:
 				/* 0x7FFF is the body's NO-TARGET sentinel.
@@ -771,6 +782,7 @@ static void em_parse_records(const uint8_t *rx, uint16_t end)
 			/* rec[1] flags, rec[4] speed, rec[5..6] endpoint A,
 			 * rec[7..8] endpoint B, rec[12..13] centre. */
 			rec_count(EM_REC_SLOT_SCAN);
+			count16(&em_scan_unit_n[(r[4] & 0x80u) ? 1 : 0]);
 			c.op          = EM_OP_SCAN;
 			c.scan_flags  = r[1];
 			c.scan_speed  = r[4];
@@ -1181,6 +1193,7 @@ static uint16_t g_sub[SUB_N + 1];
 static uint8_t  g_sub_idx;        /* next slot to fill, 1..SUB_N-1 */
 static uint8_t  g_sub_valid;      /* g_sub[0] holds a real latch */
 static uint32_t g_sub_vd;         /* em_vd_edges at that latch */
+static int16_t  g_frame_disp;     /* L[0] minus the previous L[0], per frame */
 
 static uint8_t sat8(int32_t v)
 {
@@ -1212,6 +1225,12 @@ void em_sample_position(int32_t pos)
 			       ? sat8((int32_t)g_sub[k + 1] - (int32_t)g_sub[k + 2])
 			       : 0u;
 		}
+		/* The last frame's displacement, for pl[2..3]'s forecast -- per
+		 * frame, if syncs went by unlatched. */
+		g_frame_disp = g_sub_valid
+		               ? (int16_t)(((int32_t)p - (int32_t)g_sub[0])
+		                           / (int32_t)(vd - g_sub_vd))
+		               : 0;
 		g_sub[0]    = p;
 		g_sub_idx   = 1;
 		g_sub_valid = 1;
@@ -1266,14 +1285,21 @@ void em_set_focus_position(int32_t pos, int32_t target)
 }
 
 /* Message 0x06 payload[0..3] and [20..21], written just before each send.
- * pl[20..21] and pl[0..1] as Yongnuo 50 DF builds them (FUN_08016150,
- * FUN_080160a4); pl[2..3] as Sony natives send it:
+ * As Yongnuo 50 DF builds them (FUN_08016150, FUN_080160a4):
  *
  *   pl[20..21]  the position latched at the last frame sync
- *   pl[2..3]    the latest position reported, read after the sync
+ *   pl[2..3]    that position plus a one-frame forecast: while the motor
+ *               runs, the last frame's displacement, bounded so that it
+ *               neither turns back nor passes the move's target (Yongnuo's
+ *               forecast cannot overshoot either, msg_0x06.md); at rest,
+ *               the position itself.  Yongnuo computes the displacement
+ *               from its motion profile; this one is measured.
  *   pl[0..1]    02 02 / 02 04 if the motor was running at the frame sync
  *               or is running now (02 = toward higher positions), else
- *               82 00; then OR 0x10 / 0x08 when the CURRENT position is
+ *               82 00.  The direction is the one it actually moved in the
+ *               last frame, so a reversal coasting the old way is reported
+ *               as that until it turns; under EM06_DIR_MIN counts it is the
+ *               commanded one; then OR 0x10 / 0x08 when the CURRENT position is
  *               within NEAR_LIMIT of the lower / upper limit */
 static void status06_focus(void)
 {
@@ -1293,7 +1319,18 @@ static void status06_focus(void)
 		em_sample_position(g_pos_now);
 	}
 	put16(em_msg_06, EM06_POS_B, g_sub[0]);
-	put16(em_msg_06, EM06_POS_A, g_pos_target);
+	{
+		int32_t at   = g_sub[0];
+		int32_t left = (int32_t)g_pos_target - at;
+		int32_t d    = m ? g_frame_disp : 0;
+
+		if (left >= 0) {
+			d = d < 0 ? 0 : d > left ? left : d;
+		} else {
+			d = d > 0 ? 0 : d < left ? left : d;
+		}
+		put16(em_msg_06, EM06_POS_A, clamp_travel(at + d));
+	}
 
 	v = m ? EM06_MOVING : EM06_AT_REST;
 	if (g_pos_now <= lo + EM06_NEAR_LIMIT) {
@@ -1303,6 +1340,9 @@ static void status06_focus(void)
 		v |= EM06_NEAR_HI;
 	}
 	em_msg_06[EM06_MOTION]    = v;
+	if (m && (g_frame_disp >= EM06_DIR_MIN || g_frame_disp <= -EM06_DIR_MIN)) {
+		m = g_frame_disp > 0 ? 1 : -1;
+	}
 	em_msg_06[EM06_DIRECTION] = m > 0 ? 0x02u : m < 0 ? 0x04u : 0x00u;
 }
 

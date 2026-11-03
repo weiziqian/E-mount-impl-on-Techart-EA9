@@ -89,7 +89,11 @@
  * occasionally 23 or 27, but not WHICH frame arrived in which.  These pages
  * are that pairing. */
 #define CAP_PAGE0       8u
-#define CAP_PAGES       EM_CAP_SLOTS
+#define CAP_PAGES       (EM_CAP_SLOTS - 1u)   /* the last one is MODE_PAGE */
+/* Move records by mode and Scan records by speed unit, written with the
+ * normal-class tally.  It takes the eighth capture page: seven raw windows
+ * have always been enough to see each command form. */
+#define MODE_PAGE       (CAP_PAGE0 + CAP_PAGES)
 
 /* The body's message 0x08 request, raw.  One page, taken back from the focus
  * list, because that frame arrives once per session and carries the bit that
@@ -105,7 +109,8 @@
  *   0,1,2,4..7,16     focus moves 6..13   (were BOOT, INIT, IDLG, SNAP, QUIET)
  *   17                the body's message 0x08 request
  *   3                 the id log, at the first quiet
- *   8..15             the transfer-window captures
+ *   8..14             the transfer-window captures
+ *   15                Move records by mode, Scan by speed unit
  *   18,19             build consistency and the build marker
  *   20..23, 29        focus moves 1..5
  *   24,26             encoder traces
@@ -163,6 +168,7 @@ static void norm_page(void)
 	}
 	g_norm_written = 1;
 	trail_norm(NORM_PAGE);
+	trail_modes(MODE_PAGE);
 	{
 		unsigned k;
 
@@ -414,7 +420,6 @@ static const struct servo_cfg STOCK = {
 	 * a redirection. */
 	.abort        = focus_abort,
 	.retarget     = focus_retarget,
-	.retarget_max = 16,
 	.retarget_min = 12,
 
 	/* A reversal faster than 5 counts/ms is braked down to 5 before the
@@ -894,12 +899,13 @@ static void focus_report_at(int32_t counts)
 	 * issues its message 0x04 targets inside the travel we advertise, so
 	 * reporting from a different floor would put our position and its
 	 * targets 48 units apart. */
-	/* pl[2..3]: the latest position, read now -- pl[20..21] is the one
-	 * latched at the frame sync.  It was the running move's target, which
-	 * through a Scan's sweep is the far end of the window for the whole
+	/* The running move's target bounds pl[2..3]'s one-frame forecast
+	 * (emount.c); at rest the forecast is the position.  Sent as the
+	 * target itself, it was the far end of a Scan's window for the whole
 	 * sweep (dump13). */
 	em_set_focus_position(focus_counts_to_em06(counts),
-	                      focus_counts_to_em06(counts));
+	                      focus_counts_to_em06(g_moving ? g_move_target
+	                                                    : counts));
 
 	/* The motor for message 0x06 pl[0..1]: running for the whole servo
 	 * leg, as Yongnuo's motor state is for the whole move, toward the
@@ -1129,10 +1135,9 @@ static void focus_drive_end(uint8_t outcome)
  * SERVO_ABORTED and the caller acknowledges.
  *
  * Called on EVERY servo iteration, unlike the retarget hook, which stops
- * being called after retarget_max retargets and while holding.  So a Stop, a
- * Scan or a Drive -- or anything at all during a Scan or a Drive -- is taken
- * here and ends the leg, rather than waiting in the one-slot mailbox where
- * the next Move would overwrite it.  A Move during a Move is left for the
+ * being called while holding.  So a Stop, a Scan or a Drive -- or anything at
+ * all during a Scan or a Drive -- is taken here and ends the leg, rather than
+ * waiting in the one-slot mailbox where the next Move would overwrite it.  A Move during a Move is left for the
  * retarget hook, or for after the leg. */
 static uint8_t focus_abort(void)
 {

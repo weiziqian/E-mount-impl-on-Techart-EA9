@@ -58,6 +58,7 @@ TAGS = {0x424F4F54: "BOOT  app is executing",
         0x49444C47: "IDLG  the ids the body asked for, in order",
         0x464F4353: "FOCS  a focus move commanded by the body",
         0x46484953: "FHIS  focus history: the body's last targets and mode bytes",
+        0x4D4F4445: "MODE  Move records by mode, Scan records by speed unit",
         0x464C5354: "FLST  the LAST focus moves, written when the bus went quiet",
         0x4E4F524D: "NORM  normal-class traffic, by frame length",
         0x3830304D: "M008  the body's message 0x08 request, raw",
@@ -351,6 +352,21 @@ def decode_trail(blob, label):
                 q = len(pos) // 4
                 print(f"         quarters: {pos[q]:+d} {pos[2*q]:+d} "
                       f"{pos[3*q]:+d} {pos[-1]:+d}")
+            continue
+        if w[2] == 0x4D4F4445:
+            mv = [(w[3 + i // 2] >> (16 * (i % 2))) & 0xFFFF for i in range(8)]
+            name = {0: "absolute", 3: "distance", 4: "relative",
+                    6: "defocus units  <- times the scale"}
+            print(f"page {p:2d}  {tag}")
+            print(f"         Move records: {sum(mv)}")
+            for i, n in enumerate(mv):
+                if n:
+                    print(f"           mode {i}  x{n:<6d} {name.get(i, 'ignored')}")
+            sp, sd = w[7] & 0xFFFF, w[7] >> 16
+            print(f"         Scan records: {sp + sd}")
+            print(f"           speed in position units  x{sp}")
+            print(f"           speed in defocus units   x{sd}  <- times the scale")
+            print(f"         using the defocus scale: {mv[6] + sd} of {sum(mv) + sp + sd}")
             continue
         if w[2] == 0x46484953:
             ring_n, t04n = w[4] >> 16, w[4] & 0xFFFF
