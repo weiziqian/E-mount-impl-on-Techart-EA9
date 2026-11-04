@@ -280,7 +280,8 @@ extern volatile uint16_t em_stop_n;  /* how many Stop records have arrived */
  * II tagged 52 mm, so the body reads its focal length from a field we write and
  * both messages now agree.  Back to 50.0 mm.
  *
- * Goes into the 0x05 and 0x28 templates, and the distance conversions. */
+ * Goes into the 0x05, 0x08, 0x28 and 0x35 templates, and the distance
+ * conversions. */
 #define EM_FOCAL_MM10 500u
 
 /* The same value as a variable, for the code that computes with it.  Defined
@@ -366,9 +367,9 @@ extern volatile uint16_t em_aperture_req;
  * is the whole of the observation.
  *
  * Bit 7 of its payload[1] decides whether the lens populates payload[9..10] of
- * message 0x28 -- and of message 0x35, which this device does not send.  The
- * bit is inverted: CLEAR means the body wants the field.  A lens latches it
- * when it answers 0x08 and applies it for the rest of the session.
+ * messages 0x28 and 0x35.  The bit is inverted: CLEAR means the body wants the
+ * field.  A lens latches it when it answers 0x08 and applies it for the rest
+ * of the session.
  *
  * Default OFF, which is both the stock's behaviour and the one measured to be
  * correct: filling the field unasked made an a9 II re-meter after every

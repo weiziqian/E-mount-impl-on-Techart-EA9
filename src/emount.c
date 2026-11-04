@@ -23,8 +23,9 @@
  *    (EA9.md §2.5, CORRECTION 2026-08-17).  Here init-class requests are always
  *    answered.  That is strictly more responsive than stock, never less.  The
  *    camera that §8.2 broke was broken by adding a handler for a message the
- *    body never asked for (0x35), not by answering one it did; no handler is
- *    added here, so that failure mode is not in reach.
+ *    body never asked for (0x35) with the stock's interlock removed, so it
+ *    transmitted unasked.  Here a reply only ever answers a request, 0x35's
+ *    included, so that failure mode is not in reach.
  *
  * 2. NO DEFERRED-CALL TIMER.  The stock 10 us / 100 us / 300 us gaps come from
  *    TC4 one-shots.  They are busy waits here, which costs at most 410 us of a
@@ -1447,15 +1448,16 @@ uint16_t em_defocus_scale(void)
 	       | ((uint16_t)em_msg_06[EM06_DEFOCUS + 1] << 8);
 }
 
-/* Message 0x28 pl[9..10] carries the current aperture only when the body's
- * 0x08 request asks for it (emount.h); otherwise zero.  Filling it unasked
- * made an a9 II re-meter after every exposure. */
+/* Messages 0x28 and 0x35 pl[9..10] carry the current aperture only when the
+ * body's 0x08 request asks for it (emount.h); otherwise zero.  Filling it
+ * unasked made an a9 II re-meter after every exposure. */
 static void set_28_aperture(void)
 {
 	uint16_t av = (uint16_t)em_msg_05[EM05_AP_NOW_A]
 	              | ((uint16_t)em_msg_05[EM05_AP_NOW_A + 1] << 8);
 
 	put16(em_msg_28, EM28_AP_NOW, em_m08_aperture_on ? av : 0u);
+	put16(em_msg_35, EM28_AP_NOW, em_m08_aperture_on ? av : 0u);
 }
 
 uint8_t em_take_focus_cmd(struct em_focus_cmd *out)

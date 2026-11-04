@@ -390,6 +390,24 @@ int main(void)
 		}
 	}
 
+	/* --- message 0x35 is advertised (bit 52) and answered, 48 bytes --- */
+	{
+		int idx = request(0x35, 0x21, 0x00, 0x00);
+
+		if (!(em_msg_01[6 + 52 / 8] & (1u << (52 % 8)))) {
+			fail("0x01 does not advertise 0x35 (bit 52)");
+		}
+		if (idx < 0) {
+			fail("no 0x35 reply");
+		} else {
+			if (sent_len[idx] != 48) {
+				fail("0x35 reply is %d bytes, expected 48",
+				     sent_len[idx]);
+			}
+			check_frame(idx, 0x35, "0x35");
+		}
+	}
+
 	/* --- the status frames are never sent as stored ------------------- */
 	{
 		const uint8_t MAXD = 0x16, MIND = 0x16;   /* EM_APERTURE_MAX/MIN, f/1.8 */
@@ -426,6 +444,7 @@ int main(void)
 		const uint8_t *FOCAL[] = {
 			&em_msg_05[0x1E], &em_msg_05[0x20],
 			&em_msg_28[0x0A], &em_msg_28[0x0C],
+			&em_msg_35[0x0A], &em_msg_35[0x0C],
 		};
 		unsigned k;
 
@@ -450,12 +469,13 @@ int main(void)
 		} ROW[] = {
 			{ &em_msg_05[0x2C], 0, "message 0x05 slot B" },
 			{ &em_msg_28[0x17], 1, "message 0x28 slot B" },
+			{ &em_msg_35[0x1A], 1, "message 0x35 slot B" },
 		};
 		unsigned r;
 
 		/* Bit 7 of byte 0 is the row type.  Get it wrong and the body
 		 * is handed the right numbers as the wrong physical quantity. */
-		for (r = 0; r < 2; r++) {
+		for (r = 0; r < sizeof(ROW) / sizeof(ROW[0]); r++) {
 			unsigned k;
 
 			/* An all-zero row is the null row, which has no type. */
@@ -1782,8 +1802,9 @@ int main(void)
 		if (em_m08_aperture_on) {
 			fail("pl[1] bit 7 SET was read as \"the body wants it\"");
 		}
-		if (em_msg_28[0x0F] || em_msg_28[0x10]) {
-			fail("0x28 pl[9..10] was filled although bit 7 was set");
+		if (em_msg_28[0x0F] || em_msg_28[0x10]
+		    || em_msg_35[0x0F] || em_msg_35[0x10]) {
+			fail("0x28/0x35 pl[9..10] was filled although bit 7 was set");
 		}
 
 		/* Bit 7 CLEAR -> it does.  And the field must take effect at
@@ -1804,6 +1825,15 @@ int main(void)
 
 			if (got != AP_NOW) {
 				fail("0x28 pl[9..10] is %u, expected the current "
+				     "aperture %u", got, AP_NOW);
+			}
+		}
+		{
+			uint16_t got = em_msg_35[0x0F]
+			               | ((uint16_t)em_msg_35[0x10] << 8);
+
+			if (got != AP_NOW) {
+				fail("0x35 pl[9..10] is %u, expected the current "
 				     "aperture %u", got, AP_NOW);
 			}
 		}

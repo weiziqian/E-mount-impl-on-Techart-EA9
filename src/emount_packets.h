@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define EA9_PACKET_COUNT 16
+#define EA9_PACKET_COUNT 17
 
 struct ea9_packet {
 	uint8_t  id;
@@ -42,6 +42,8 @@ extern uint8_t em_msg_1B[EA9_LEN_1B];
 extern uint8_t em_msg_28[EA9_LEN_28];
 #define EA9_LEN_34 32u
 extern uint8_t em_msg_34[EA9_LEN_34];
+#define EA9_LEN_35 48u
+extern uint8_t em_msg_35[EA9_LEN_35];
 #define EA9_LEN_3D 72u
 extern uint8_t em_msg_3D[EA9_LEN_3D];
 #define EA9_LEN_3F 74u
