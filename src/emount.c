@@ -96,6 +96,13 @@
 #define EM05_AP_NOW_A     0x06
 #define EM28_AP_NOW       0x0F
 
+/* The focal length pair, mm x 10, u16 LE twice: message 0x05 payload[24..27]
+ * and messages 0x28 / 0x35 payload[4..7].  Message 0x08 payload[16..17] holds
+ * it in whole mm, BCD.  Written once by put_focal. */
+#define EM05_FOCAL        0x1E
+#define EM28_FOCAL        0x0A
+#define EM08_FOCAL_BCD    0x16
+
 /* Message 0x05 payload[4] = frame offset 10 is the APERTURE settle countdown.
  * Nothing writes it: this adapter has no iris, so its aperture is never in
  * transit and the stored 0x00 is already the right answer (emount.h).
@@ -1503,9 +1510,34 @@ uint8_t em_take_query(uint8_t *tag, uint16_t *operand)
 	return 1;
 }
 
+/* 0..99 as two BCD digits, the encoding of message 0x08's nameplate. */
+static uint8_t bcd2(uint16_t n)
+{
+	return (uint8_t)(((n / 10u % 10u) << 4) | (n % 10u));
+}
+
+/* The focal length, from em_focal_mm10 -- the one word the updater patches --
+ * into every message that carries it.  The templates hold zeros there. */
+static void put_focal(void)
+{
+	uint16_t mm10 = em_focal_mm10;
+	uint16_t mm   = (uint16_t)((mm10 + 5u) / 10u);
+
+	put16(em_msg_05, EM05_FOCAL,     mm10);
+	put16(em_msg_05, EM05_FOCAL + 2, mm10);
+	put16(em_msg_28, EM28_FOCAL,     mm10);
+	put16(em_msg_28, EM28_FOCAL + 2, mm10);
+	put16(em_msg_35, EM28_FOCAL,     mm10);
+	put16(em_msg_35, EM28_FOCAL + 2, mm10);
+	em_msg_08[EM08_FOCAL_BCD]     = bcd2(mm / 100u);
+	em_msg_08[EM08_FOCAL_BCD + 1] = bcd2(mm);
+}
+
 void em_init(void)
 {
-	/* Fixed content is in the templates (emount_packets.c). */
+	/* Fixed content is in the templates (emount_packets.c); the focal
+	 * length is written here. */
+	put_focal();
 
 	/* protocol_init, 0x551c, replicated including the one non-obvious bit:
 	 * our chip select goes high FIRST and stays high across the whole

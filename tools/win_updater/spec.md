@@ -66,8 +66,8 @@ The bootloader version is the triplet the bootloader recorded at the last START,
 
 ### 5.1 Firmware side (the only source change)
 
-- The packet templates (0x05, 0x08, 0x28) keep the `EM_FOCAL_MM10` macro; the lens name stays in the `em_msg_3F` template. These are initialised data, so they are plain bytes in the image.
-- The code that computes with the focal length (6 uses in `src/main.c`) reads `extern const uint16_t em_focal_mm10`, defined in `src/emount_packets.c`. Because the value is in another file, the compiler cannot fold it into instructions; the word in flash is the only copy. This only holds without LTO, and `locate.py` fails if it stops holding.
+- The focal length lives in one word, `extern const uint16_t em_focal_mm10`, defined in `src/emount_packets.c` from the `EM_FOCAL_MM10` macro. Nothing else uses the macro. The packet templates hold zeros where the focal length goes, and `em_init` (`put_focal` in `src/emount.c`) writes it from that word into 0x05 pl[24..27], 0x08 pl[16..17] (BCD), 0x28 pl[4..7] and 0x35 pl[4..7]. The code that computes with it (`src/main.c`) reads the same word. Because the value is in another file, the compiler cannot fold it into instructions; the word in flash is the only copy. This only holds without LTO, and `locate.py` fails if it stops holding.
+- The lens name stays in the `em_msg_3F` template. It is initialised data, so it is plain bytes in the image.
 
 ### 5.2 Release step: `locate.py`
 
@@ -82,7 +82,7 @@ The bootloader version is the triplet the bootloader recorded at the last START,
 B and C are built in a scratch copy of `src/` and the `Makefile`; the repo is never edited.
 
 1. A and B must have the same length. Every byte that differs must be one of: focal u16 LE (mm × 10), focal BCD (whole mm), or the 63-byte name field. Anything else stops the script.
-2. The number of locations must match the current source: 5 × u16, 1 × BCD, 1 × name. A different count means the source changed and must be looked at.
+2. The number of locations must match the current source: 1 × u16, 0 × BCD, 1 × name. A different count means the source changed and must be looked at.
 3. A is patched to B's and C's values with the table, and each result must equal the real build **byte for byte**.
 4. It writes `patchmap.json`: image length, image SHA-256, defaults, and the list of `{offset, kind, len}`.
 
@@ -90,11 +90,8 @@ Currently found (file offsets in `build/ea9-rebuild-release.bin`):
 
 | Offset | Kind | Where |
 |---|---|---|
-| 0x042bc | u16le_mm10 | `em_focal_mm10` |
-| 0x04fbf | name (63 B) | 0x3F pl[1..63] |
-| 0x05076, 0x05078 | u16le_mm10 | 0x05 pl[24..27] |
-| 0x05112 | bcd_mm | 0x08 pl[16..17] |
-| 0x05252, 0x05254 | u16le_mm10 | 0x28 pl[4..7] |
+| 0x04278 | u16le_mm10 | `em_focal_mm10` |
+| 0x04f7b | name (63 B) | 0x3F pl[1..63] |
 
 The offsets move with every rebuild; always use the `patchmap.json` produced for the image being embedded.
 

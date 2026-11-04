@@ -452,10 +452,15 @@ int main(void)
 			uint16_t v = (uint16_t)FOCAL[k][0]
 			             | ((uint16_t)FOCAL[k][1] << 8);
 
-			if (v != EM_FOCAL_MM10) {
+			if (v != em_focal_mm10) {
 				fail("focal field %u reads %u, expected %u",
-				     k, v, EM_FOCAL_MM10);
+				     k, v, em_focal_mm10);
 			}
+		}
+		/* 0x08 pl[16..17]: whole mm, BCD -- 50 mm is 00 50. */
+		if (em_msg_08[0x16] != 0x00 || em_msg_08[0x17] != 0x50) {
+			fail("0x08 focal BCD reads %02x %02x, expected 00 50",
+			     em_msg_08[0x16], em_msg_08[0x17]);
 		}
 
 	}

@@ -42,10 +42,10 @@ DEFAULT = (50, "TECHART LM-EA9")
 PROBE_B = (137, "Z" * NAME_LEN)     # every byte differs from DEFAULT's
 PROBE_C = (85, "Summicron-M 35mm f/2 ASPH")
 
-# What the current source holds: 0x05 x2, 0x28 x2 and em_focal_mm10 as u16,
-# 0x08 as BCD, and the 0x3F name.  A different count means the source changed
-# -- look at why before trusting the table.
-EXPECT = {"u16le_mm10": 5, "bcd_mm": 1, "name": 1}
+# What the current source holds: em_focal_mm10 as u16 (the messages copy it at
+# start-up, so it is the only copy) and the 0x3F name.  A different count
+# means the source changed -- look at why before trusting the table.
+EXPECT = {"u16le_mm10": 1, "bcd_mm": 0, "name": 1}
 
 
 def bcd(n):

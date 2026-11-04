@@ -8,18 +8,19 @@
  *   EM_APERTURE_NOW   0x05 pl[0..3], 0x1B pl[0..3]
  *   EM_APERTURE_MAX   0x05 pl[44], pl[46], pl[51]  (as a descriptor byte)
  *   EM_APERTURE_MIN   0x05 pl[52]                  (as a descriptor byte)
- *   EM_FOCAL_MM10     0x05 pl[24..27], 0x28 pl[4..7]
  *   EM_SLOT_A         0x05 pl[32..37], 0x28 pl[11..16]
  *   EM_SLOT_B_TYPE0   0x05 pl[38..43]
  *   EM_SLOT_B_TYPE1   0x28 pl[17..22]
  *   EM_DEFOCUS_SCALE  0x06 pl[13..14]
- *   EM_FOCAL_MM10     0x08 pl[16..17]  (whole mm, BCD; pl[18..19] = 0, a prime)
  *   EM_APERTURE_MAX   0x08 pl[20]      (f-number, BCD; pl[21] = 0, a prime)
  *   EM_APERTURE_MAX   0x08 pl[0..1]    (aperture value, the largest opening)
  *   EM_APERTURE_MIN   0x08 pl[2..3]    (aperture value, the smallest opening)
  *
  * Only what changes at run time (positions, status, events, 0x28 pl[9..10],
- * the 0x34 echo) is written by emount.c.  Message 0x0A has no template: the
+ * the 0x34 echo) is written by emount.c -- and the focal length, which
+ * em_init writes from em_focal_mm10 into 0x05 pl[24..27], 0x08 pl[16..17]
+ * (whole mm, BCD), 0x28 pl[4..7] and 0x35 pl[4..7], so that the one word in
+ * flash is the only copy (tools/win_updater).  Message 0x0A has no template: the
  * reply is the body's request, echoed (em_send_id).
  *
  * Messages 0x32, 0x4C and 0x5A from the stock table are gone: none is in the
@@ -53,12 +54,6 @@
  * stop, 0x08 = f/1.0, rounded to nearest. */
 #define EM_AV_DESC(av) ((uint8_t)(((av) - 4096u + 16u) / 32u + 8u))
 
-/* 0..99 as two BCD digits, the encoding of message 0x08's nameplate. */
-#define EM_BCD(n) ((uint8_t)((((n) / 10u % 10u) << 4) | ((n) % 10u)))
-
-/* The focal length in whole mm, rounded. */
-#define EM_FOCAL_MM ((EM_FOCAL_MM10 + 5u) / 10u)
-
 /* An aperture value as message 0x08's nameplate f-number: F x 10 in BCD,
  * rounded to the nearest third of a stop on the marked series f/1.0 .. f/9
  * (0x11C0 -> 0x18, f/1.8). */
@@ -90,8 +85,8 @@ uint8_t em_msg_05[EA9_LEN_05] = {
 	/* +0x00 */ 0xf0, 0x69, 0x00, 0x01, 0x64, 0x05, EM_LO(EM_APERTURE_NOW), EM_HI(EM_APERTURE_NOW),
 	/* +0x08 */ EM_LO(EM_APERTURE_NOW), EM_HI(EM_APERTURE_NOW), 0x00, 0x00, 0x10, 0x00, 0x07, 0x2a,
 	/* +0x10 */ 0x00, 0x2a, 0x00, 0x54, 0x01, 0x54, 0x01, 0x00,
-	/* +0x18 */ 0x00, 0x00, 0x00, 0x07, 0x80, 0xff, EM_LO(EM_FOCAL_MM10), EM_HI(EM_FOCAL_MM10),
-	/* +0x20 */ EM_LO(EM_FOCAL_MM10), EM_HI(EM_FOCAL_MM10), 0x00, 0x00, 0x00, 0x00,
+	/* +0x18 */ 0x00, 0x00, 0x00, 0x07, 0x80, 0xff, 0x00, 0x00,
+	/* +0x20 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	/* +0x26 */ EM_SLOT_A,
 	/* +0x2c */ EM_SLOT_B_TYPE0,
 	/* +0x32 */ EM_AV_DESC(EM_APERTURE_MAX), 0x00, EM_AV_DESC(EM_APERTURE_MAX), 0x00, 0xa0, 0x00,
@@ -129,7 +124,7 @@ uint8_t em_msg_08[EA9_LEN_08] = {
 	            EM_LO(EM_APERTURE_MAX), EM_HI(EM_APERTURE_MAX),
 	/* +0x08 */ EM_LO(EM_APERTURE_MIN), EM_HI(EM_APERTURE_MIN), 0x00, 0x00, 0x00, 0x80, 0x00, 0x14,
 	/* +0x10 */ 0x01, 0x00, 0x12, 0xe1, 0x01, 0x03,
-	            EM_BCD(EM_FOCAL_MM / 100u), EM_BCD(EM_FOCAL_MM),
+	            0x00, 0x00,
 	/* +0x18 */ 0x00, 0x00, EM_F_BCD(EM_APERTURE_MAX), 0x00, 0x00, 0x00, 0x18, 0x00,
 	/* +0x20 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00,
 	/* +0x28 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x43,
@@ -227,7 +222,7 @@ uint8_t em_msg_1B[EA9_LEN_1B] = {
 
 uint8_t em_msg_28[EA9_LEN_28] = {
 	/* +0x00 */ 0xf0, 0x00, 0x00, 0x02, 0x00, 0x28, 0x00, 0x07,
-	/* +0x08 */ 0x00, 0xff, EM_LO(EM_FOCAL_MM10), EM_HI(EM_FOCAL_MM10), EM_LO(EM_FOCAL_MM10), EM_HI(EM_FOCAL_MM10), 0x01, 0x00,
+	/* +0x08 */ 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
 	/* +0x10 */ 0x00,
 	/* +0x11 */ EM_SLOT_A,
 	/* +0x17 */ EM_SLOT_B_TYPE1,
@@ -243,7 +238,7 @@ uint8_t em_msg_28[EA9_LEN_28] = {
  * its own rows.  pl[9..10] is written by emount.c, as message 0x28's. */
 uint8_t em_msg_35[EA9_LEN_35] = {
 	/* +0x00 */ 0xf0, 0x30, 0x00, 0x02, 0x00, 0x35, 0x42, 0x01,
-	/* +0x08 */ 0x00, 0x7f, EM_LO(EM_FOCAL_MM10), EM_HI(EM_FOCAL_MM10), EM_LO(EM_FOCAL_MM10), EM_HI(EM_FOCAL_MM10), 0x01, 0x00,
+	/* +0x08 */ 0x00, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
 	/* +0x10 */ 0x00,
 	/* +0x11 */ EM_SLOT_A,
 	/* +0x17 */ 0x00, 0x00, 0x00,

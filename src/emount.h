@@ -280,8 +280,9 @@ extern volatile uint16_t em_stop_n;  /* how many Stop records have arrived */
  * II tagged 52 mm, so the body reads its focal length from a field we write and
  * both messages now agree.  Back to 50.0 mm.
  *
- * Goes into the 0x05, 0x08, 0x28 and 0x35 templates, and the distance
- * conversions. */
+ * Only initialises em_focal_mm10 below; nothing else may use it.  The
+ * messages get the focal length from that word at start-up (em_init), and
+ * the distance conversions read it too. */
 #define EM_FOCAL_MM10 500u
 
 /* The same value as a variable, for the code that computes with it.  Defined
