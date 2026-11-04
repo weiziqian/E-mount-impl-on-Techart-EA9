@@ -119,13 +119,13 @@ No checksum needs fixing: the firmware recomputes frame checksums on every send 
 ## 6. Building
 
 ```
-tools/win_updater/build.sh        # -> tools/win_updater/out/EA9Updater.exe
+tools/win_updater/build.sh        # -> tools/win_updater/out/Community EA9 Firmware Updater v<ver>.exe
 ```
 
 1. `locate.py` runs `make release`, finds the patch fields, and writes `firmware/ea9.bin` + `firmware/patchmap.json` from the same run.
 2. `dotnet build -c Release` compiles the exe with both files and `changelog.txt` embedded. The build fails if `firmware/` is missing.
 
-Needs the ARM toolchain and ASF4 (README section 4) and the .NET SDK (8.x; `DOTNET=` overrides the path). The output is one file, `EA9Updater.exe`; there is no `.exe.config`.
+Needs the ARM toolchain and ASF4 (README section 4) and the .NET SDK (8.x; `DOTNET=` overrides the path). The output is one file, `Community EA9 Firmware Updater v<ver>.exe` (`<ver>` = `Firmware.DeclaredVersion`); there is no `.exe.config`.
 
 Source layout:
 

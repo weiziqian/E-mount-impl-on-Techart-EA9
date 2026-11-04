@@ -2,7 +2,7 @@
 
 Requirements and design: **[spec.md](spec.md)**. Read it before changing anything here.
 
-A single-file Windows GUI (`EA9Updater.exe`, .NET Framework 4.8) that writes the EA9 firmware over USB HID. The release image, its patch table and `changelog.txt` are embedded in the exe. Before writing, the exe patches the user's focal length and lens name into the image.
+A single-file Windows GUI (`Community EA9 Firmware Updater v<ver>.exe`, .NET Framework 4.8) that writes the EA9 firmware over USB HID. The release image, its patch table and `changelog.txt` are embedded in the exe. Before writing, the exe patches the user's focal length and lens name into the image.
 
 ## Prerequisites (Linux)
 
@@ -16,7 +16,7 @@ A single-file Windows GUI (`EA9Updater.exe`, .NET Framework 4.8) that writes the
 tools/win_updater/build.sh
 ```
 
-Output: `tools/win_updater/out/EA9Updater.exe`. Ship that one file.
+Output: `tools/win_updater/out/Community EA9 Firmware Updater v<ver>.exe`. Ship that one file.
 
 What it does:
 1. `locate.py -o firmware/patchmap.json --bin firmware/ea9.bin`
@@ -73,7 +73,7 @@ wine msiexec /i wine-mono-9.4.0-x86.msi /qn        # 9.4.0 is the version Wine 1
 Run:
 
 ```sh
-WINEPREFIX=~/.wine-ea9 wine tools/win_updater/out/EA9Updater.exe
+WINEPREFIX=~/.wine-ea9 wine "tools/win_updater/out/Community EA9 Firmware Updater v2.0.0.exe"
 ```
 
 Screenshot without a desktop (e.g. for an agent): start a virtual display, run the exe there, and grab it:
@@ -81,7 +81,7 @@ Screenshot without a desktop (e.g. for an agent): start a virtual display, run t
 ```sh
 sudo apt install xvfb
 Xvfb :99 -screen 0 1280x900x24 &
-DISPLAY=:99 WINEPREFIX=~/.wine-ea9 wine tools/win_updater/out/EA9Updater.exe &
+DISPLAY=:99 WINEPREFIX=~/.wine-ea9 wine "tools/win_updater/out/Community EA9 Firmware Updater v2.0.0.exe" &
 python3 -c "from PIL import ImageGrab; im=ImageGrab.grab(xdisplay=':99'); im.crop(im.getbbox()).save('ui.png')"
 ```
 

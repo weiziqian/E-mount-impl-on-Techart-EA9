@@ -10,7 +10,7 @@
     <RootNamespace>EA9Updater</RootNamespace>
     <AssemblyName>EA9Updater</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Product>LM-EA9 Firmware Updater</Product>
+    <Product>Community EA9 Firmware Updater</Product>
     <Version>2.0.0</Version>
     <DebugType>none</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>

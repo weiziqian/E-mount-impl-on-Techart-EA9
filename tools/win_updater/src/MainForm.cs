@@ -30,12 +30,17 @@ namespace EA9Updater
 
         public MainForm()
         {
-            Text = "LM-EA9 Firmware Updater";
+            Text = string.Format("Community EA9 Firmware Updater: v{0}.{1}.{2}",
+                                 Firmware.DeclaredVersion[0], Firmware.DeclaredVersion[1],
+                                 Firmware.DeclaredVersion[2]);
             Font = SystemFonts.MessageBoxFont;
             AutoScaleMode = AutoScaleMode.Font;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(560, 520);
-            MinimumSize = new Size(420, 400);
+            // 840 x 780, but never taller or wider than the screen's work
+            // area (a 1366 x 768 laptop has about 730 px of it).
+            var work = Screen.PrimaryScreen.WorkingArea.Size;
+            ClientSize = new Size(Math.Min(840, work.Width - 40), Math.Min(780, work.Height - 60));
+            MinimumSize = new Size(630, 600);
 
             var t = new TableLayoutPanel {
                 Dock = DockStyle.Fill,

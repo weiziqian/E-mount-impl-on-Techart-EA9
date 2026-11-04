@@ -1,5 +1,12 @@
-LM-EA9 firmware 2.0
+Firmware 2.0 (4 November 2026)
 
-- Set the focal length and the lens name of your M lens when you install
-  the firmware. The camera uses the focal length for EXIF and for focus
-  distance, and shows the lens name.
+- The adapter now identifies itself as a native E-mount lens.
+- Autofocus now works in video mode.
+- Improved AF-C range and tracking.
+
+Known issues:
+- AF-S is unusable: it misses focus.
+- The PDAF parameters are tuned for 50 mm lenses only.
+
+I hope you enjoy this community firmware.
+Author: Ziqian Wei
