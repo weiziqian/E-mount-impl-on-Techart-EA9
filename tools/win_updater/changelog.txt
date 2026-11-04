@@ -1,0 +1,5 @@
+LM-EA9 firmware 2.0
+
+- Set the focal length and the lens name of your M lens when you install
+  the firmware. The camera uses the focal length for EXIF and for focus
+  distance, and shows the lens name.

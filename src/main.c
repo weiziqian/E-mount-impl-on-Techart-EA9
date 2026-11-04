@@ -924,8 +924,8 @@ static void focus_report_at(int32_t counts)
 	 * knowing this lens: the subject distance, and the in-motion flag --
 	 * the same motor state as 0x06 pl[0..1], taken now, as Yongnuo 50 DF's
 	 * 0x05 builder reads it (FUN_08012d08 in FUN_080180e0). */
-	em_set_subject_distance(focus_distance_code(counts, EM_FOCAL_MM10),
-	                        focus_distance_coarse(counts, EM_FOCAL_MM10),
+	em_set_subject_distance(focus_distance_code(counts, em_focal_mm10),
+	                        focus_distance_coarse(counts, em_focal_mm10),
 	                        (uint8_t)(counts / FOCUS_COUNTS_PER_UNIT / 256));
 	em_set_in_motion(g_moving);
 }
@@ -942,12 +942,12 @@ static void focus_answer_queries(void)
 		if (tag == EM_REC_Q_POS2D) {
 			em_post_query_answer(tag,
 			        focus_distance_code(focus_em06_to_counts(operand),
-			                            EM_FOCAL_MM10));
+			                            em_focal_mm10));
 		} else {
 			em_post_query_answer(tag,
 			        focus_counts_to_em06(
 			                focus_counts_for_code(operand,
-			                                      EM_FOCAL_MM10)));
+			                                      em_focal_mm10)));
 		}
 	}
 }
@@ -1001,7 +1001,7 @@ static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out)
 		 * can turn it into a position.  Codes at or above 0x0700 are
 		 * not accepted as targets; focus_counts_for_code maps them to
 		 * the infinity stop, which is the clamped answer. */
-		*out = focus_counts_for_code(c->target, EM_FOCAL_MM10);
+		*out = focus_counts_for_code(c->target, em_focal_mm10);
 		return 1;
 
 	case EM_OP_MOVE_REL:
@@ -1666,7 +1666,7 @@ int main(void)
 	em_init();
 	/* The nearest distance the full extension reaches, at the declared
 	 * focal length -- the same model as the subject distance. */
-	em_set_min_focus(focus_distance_code(FOCUS_TRAVEL_COUNTS, EM_FOCAL_MM10));
+	em_set_min_focus(focus_distance_code(FOCUS_TRAVEL_COUNTS, em_focal_mm10));
 	diag_tally_mark(DIAG_MARK_BUSUP, 0);
 
 	abs_encoder_set_reference();

@@ -198,10 +198,7 @@ int main(void)
 
 	em_init();
 
-	/* --- the version telltale ---------------------------------------- */
-	if (em_msg_07[12] != 0x59) {
-		fail("the 0x07 template does not carry version 0x59");
-	}
+	/* --- message 0x07's identity ------------------------------------- */
 	{
 		uint16_t lid = em_msg_07[15]
 		               | ((uint16_t)em_msg_07[16] << 8);
@@ -291,14 +288,6 @@ int main(void)
 	if (em_frames_rx != sizeof(HANDSHAKE)) {
 		fail("counted %u frames, expected %u",
 		     (unsigned)em_frames_rx, (unsigned)sizeof(HANDSHAKE));
-	}
-
-	/* The reply to 0x07 must carry the version we report, and its checksum
-	 * must cover it -- this is the whole point of the build. */
-	for (i = 0; i < sent_n; i++) {
-		if (sent[i][5] == 0x07 && sent[i][12] != 0x59) {
-			fail("the 0x07 reply carries version %#04x", sent[i][12]);
-		}
 	}
 
 	/* --- the status pair --------------------------------------------- */

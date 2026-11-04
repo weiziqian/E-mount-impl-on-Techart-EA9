@@ -16,72 +16,6 @@
  * shows the number, so this responder answered message 0x07 and the body
  * believed it.
  *
- * It also identifies WHICH build is on the adapter, which matters while the
- * protocol gaps are being closed one at a time:
- *
- *     0x20 = 2.00   the responder before any command-progress reporting
- *     0x21 = 2.01   message 0x06 payload[25], the command-progress ladder
- *     0x22 = 2.02   message 0x06's event appendix, 0x1D on arrival
- *     0x23 = 2.03   same, plus the normal-class histogram in the trail
- *     0x24 = 2.04   same; the histogram now covers the whole session
- *     0x25 = 2.05   the 23-byte STOP command is obeyed and acknowledged
- *     0x26 = 2.06   message 0x04 read as a RECORD STREAM: every instruction
- *                   the protocol defines, and the status fields that go with
- *                   them
- *     0x27 = 2.07   the record walk bounded by the FRAME, not the window
- *     0x28 = 2.08   same protocol; the trail can now tell a flashing session
- *                   apart from a boot the camera cut short
- *     0x29 = 2.09   the start-up and shut-down pages are gone; their sixteen
- *                   pages carry the transfer-window captures and nine more
- *                   focus moves
- *     0x30 = 3.00   the aperture declared as an aperture VALUE, f/2.0
- *     0x31 = 3.01   message 0x1B answered with our own aperture, and what it
- *                   asked for recorded
- *     0x32 = 3.02   pl[46] back to what the stock sends: equal to pl[44]
- *     0x33 = 3.03   the minimum back to f/90 -- TRIED, changed nothing, and
- *                   start-up hung; reverted
- *     0x34 = 3.04   the minimum back to f/2.0, i.e. 3.02's behaviour
- *     0x35 = 3.05   the aperture message 0x03 asks for, recorded
- *     0x36 = 3.06   message 0x28 payload[9..10] back to the stock's zero --
- *                   FIXED the a9 II re-metering after every exposure
- *     0x37 = 3.07   that field now follows the capability bit in the body's
- *                   message 0x08 request, and the request is captured
- *     0x38..0x44   the motor characterisation work: a scripted suite that
- *                   measured the mechanism -- encoder noise, breakaway
- *                   spread, speed gain, time constant, stopping distance --
- *                   and the controller built from those numbers.  The suite
- *                   itself is gone; what it produced is in servo.h.
- *     0x50 = 5.00   autofocus on the new controller
- *     0x51..0x54   tuning the approach profile against camera runs, and one
- *                   round (5.03: a faster breakaway search, a 40% first-step
- *                   kick, a 65% duty ceiling) tried and reverted -- more
- *                   force overshoots, and correcting an overshoot costs more
- *                   than the breakaway saved
- *     0x55 = 5.05   profile e/26 -> e/30, on the user's judgement across
- *                   four sessions.  The logs cannot separate e/22, e/26 and
- *                   e/30 -- all three land within 12 counts, worst case --
- *                   so the choice is made on how it feels to shoot.
- *     0x56 = 5.06   boot-time waiting removed.  Homing used to start on
- *                   `millis() >= 4000` and run a flat 300 + 500 ms, so the
- *                   mechanism stood still for the first 4.8 s of every boot.
- *                   It now starts when the handshake is answered and stops
- *                   as soon as the encoder says it is against the stop.
- *                   The homing page also records when the handshake was
- *                   answered, which no dump has ever shown (NOTES.md 112).
- *     0x57 = 5.07   the optical rows.  Slot A (the field-sampling grid) and
- *                   slot B type 0 (the pupil magnification) are now sent in
- *                   message 0x05, and slot A again in message 0x28, from two
- *                   constants in this file.  Before this the adapter sent no
- *                   grid at all and a flat pupil row inherited from the Canon
- *                   clone it impersonates.
- *     0x58 = 5.08   slot B type 1 as well, into message 0x28's slot B -- the
- *                   field the stock fills with a type 0 row, which is the
- *                   wrong quantity for it.  All four row fields in the two
- *                   messages now carry a row of the right type.
- *     0x59 = 5.09   the declared aperture follows the optical row: f/2.0 ->
- *                   f/1.8 (0x1200 -> 0x11C0), all three constants, so the
- *                   descriptor block and slot B type 1 describe one lens.
- *
  * Not to be confused with the bootloader's own version triplet, which is what
  * ea9flash.py --check reports and lives nowhere in the app image (CLAUDE.md,
  * "There are TWO independent version records").
@@ -348,6 +282,12 @@ extern volatile uint16_t em_stop_n;  /* how many Stop records have arrived */
  *
  * Goes into the 0x05 and 0x28 templates, and the distance conversions. */
 #define EM_FOCAL_MM10 500u
+
+/* The same value as a variable, for the code that computes with it.  Defined
+ * in emount_packets.c, so no other file can fold it into an instruction: the
+ * word in flash is the only copy, and the updater can patch it
+ * (tools/win_updater). */
+extern const uint16_t em_focal_mm10;
 
 /* THE DEFOCUS SCALE: how many protocol position units one defocus unit is
  * worth.  Reported in message 0x06 payload[13..14], and used by everything

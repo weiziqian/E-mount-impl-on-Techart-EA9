@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- .NET Framework 4.8 ships with Windows 10/11, so the exe runs with
+       nothing installed.  Builds on Linux with the .NET SDK: the reference
+       assemblies come from NuGet.  See spec.md. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <RootNamespace>EA9Updater</RootNamespace>
+    <AssemblyName>EA9Updater</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Product>LM-EA9 Firmware Updater</Product>
+    <Version>2.0.0</Version>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- No EA9Updater.exe.config: the exe is the only file shipped. -->
+    <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Runtime.Serialization" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- The firmware, its patch table and the change log go INTO the exe.
+       firmware/ is written by build.sh (locate.py); both files must come
+       from the same run, which Firmware.cs checks by SHA-256. -->
+  <ItemGroup>
+    <EmbeddedResource Include="firmware\ea9.bin" LogicalName="firmware.bin" />
+    <EmbeddedResource Include="firmware\patchmap.json" LogicalName="patchmap.json" />
+    <EmbeddedResource Include="changelog.txt" LogicalName="changelog.txt" />
+  </ItemGroup>
+
+  <Target Name="CheckFirmware" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('firmware\ea9.bin') Or !Exists('firmware\patchmap.json')"
+           Text="firmware/ea9.bin or firmware/patchmap.json is missing -- run build.sh, which builds the release image and locates the patch fields first." />
+  </Target>
+
+</Project>
