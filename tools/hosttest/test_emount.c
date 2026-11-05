@@ -390,6 +390,48 @@ int main(void)
 		}
 	}
 
+	/* --- message 0x2B echoes the body's mode byte, 10 bytes ---------- */
+	{
+		static const uint8_t mode[] = { 0x00, 0x01, 0x02 };
+		unsigned k;
+
+		if (!(em_msg_01[6 + (0x2B - 1) / 8] & (1u << ((0x2B - 1) % 8)))) {
+			fail("0x01 does not advertise 0x2B");
+		}
+		for (k = 0; k < sizeof(mode); k++) {
+			int idx = request(0x2B, (uint8_t)(0x30 + k), mode[k], 0x00);
+
+			if (idx < 0) {
+				fail("no 0x2B reply to mode %u", mode[k]);
+				continue;
+			}
+			if (sent_len[idx] != 10 || sent[idx][6] != mode[k]) {
+				fail("0x2B reply: %u bytes, pl[0] %02x, want 10 "
+				     "bytes echoing %02x", sent_len[idx],
+				     sent[idx][6], mode[k]);
+			}
+			check_frame(idx, 0x2B, "0x2B echo");
+		}
+	}
+
+	/* --- every advertised init id has a handler ----------------------
+	 * An A7 IV requests a declared id and waits for the answer, so an id
+	 * declared without one stalls the handshake there.  These four had
+	 * none and were withdrawn; they must not come back by accident. */
+	{
+		static const uint8_t gone[] = { 0x17, 0x1E, 0x29, 0x2A };
+		unsigned k;
+
+		for (k = 0; k < sizeof(gone); k++) {
+			uint8_t b = (uint8_t)(gone[k] - 1);
+
+			if (em_msg_01[6 + b / 8] & (1u << (b % 8))) {
+				fail("0x01 advertises 0x%02X, which has no handler",
+				     gone[k]);
+			}
+		}
+	}
+
 	/* --- message 0x35 is advertised (bit 52) and answered, 48 bytes --- */
 	{
 		int idx = request(0x35, 0x21, 0x00, 0x00);

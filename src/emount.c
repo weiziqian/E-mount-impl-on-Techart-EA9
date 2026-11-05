@@ -493,7 +493,11 @@ static void em_send_id(uint8_t id)
 	/* Message 0x0A: echo the request exactly, as every lens measured does
 	 * (msg_0x0A.md).  What it asked for -- the message 0x05 length -- was
 	 * read when it arrived. */
-	if (id == 0x0Au) {
+	/* Message 0x2B: also an echo.  The body sends a mode in pl[0] & 3 and
+	 * wants the same value back; a mismatch makes it adopt ours and ask
+	 * again.  Request and reply are both 1 byte of payload (A7 IV firmware,
+	 * outer state 0xd: it sends 0x0A, then 0x2B, and waits for this). */
+	if (id == 0x0Au || id == 0x2Bu) {
 		uint8_t  echo[EM_REQ_SNAP];
 		uint16_t n = g_req[1];
 		uint16_t i;
