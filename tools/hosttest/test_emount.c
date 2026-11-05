@@ -390,36 +390,20 @@ int main(void)
 		}
 	}
 
-	/* --- message 0x2B echoes the body's mode byte, 10 bytes ---------- */
-	{
-		static const uint8_t mode[] = { 0x00, 0x01, 0x02 };
-		unsigned k;
-
-		if (!(em_msg_01[6 + (0x2B - 1) / 8] & (1u << ((0x2B - 1) % 8)))) {
-			fail("0x01 does not advertise 0x2B");
-		}
-		for (k = 0; k < sizeof(mode); k++) {
-			int idx = request(0x2B, (uint8_t)(0x30 + k), mode[k], 0x00);
-
-			if (idx < 0) {
-				fail("no 0x2B reply to mode %u", mode[k]);
-				continue;
-			}
-			if (sent_len[idx] != 10 || sent[idx][6] != mode[k]) {
-				fail("0x2B reply: %u bytes, pl[0] %02x, want 10 "
-				     "bytes echoing %02x", sent_len[idx],
-				     sent[idx][6], mode[k]);
-			}
-			check_frame(idx, 0x2B, "0x2B echo");
-		}
+	/* --- message 0x2B: neither declared nor answered -----------------
+	 * It is the adapter re-identification message (msg_0x2B.md); Sony
+	 * natives and Yongnuo do not declare it, and this device presents as a
+	 * native.  A stray request must get no reply. */
+	if (request(0x2B, 0x30, 0x01, 0x00) >= 0) {
+		fail("0x2B was answered");
 	}
 
 	/* --- every advertised init id has a handler ----------------------
 	 * An A7 IV requests a declared id and waits for the answer, so an id
-	 * declared without one stalls the handshake there.  These four had
-	 * none and were withdrawn; they must not come back by accident. */
+	 * declared without one stalls the handshake there.  These had none
+	 * and were withdrawn; they must not come back by accident. */
 	{
-		static const uint8_t gone[] = { 0x17, 0x1E, 0x29, 0x2A };
+		static const uint8_t gone[] = { 0x17, 0x1E, 0x29, 0x2A, 0x2B };
 		unsigned k;
 
 		for (k = 0; k < sizeof(gone); k++) {
