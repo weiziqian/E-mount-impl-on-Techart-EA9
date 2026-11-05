@@ -154,6 +154,29 @@
 #define EM05_FLAG_REPORTS 0x80u
 #define EM05_FLAG_MOVING  0x40u
 
+/* Message 0x05 payload[77..80] = frame offsets 0x53..0x56: the optical table's
+ * ROW INDEX, a byte pair, then the second index pair (msg_0x05.md).
+ *
+ * The body chooses the row.  Its message 0x03 carries a 0x2F record, `2F lo
+ * hi`, and a Sony lens puts that pair into the 0x05 it sends two cycles later
+ * -- 421 of 421 frames over three sessions (msg_0x03.md).  pl[79] is 0x00 on
+ * every device measured.  pl[80] is not echoed: the lens computes it from
+ * pl[78] through Yongnuo's 14-entry table, which is what fixed their 50 mm DF
+ * on an A7M5, and the values it gives match a Sony SEL5518Z on the wire.
+ *
+ * Only the index is sent.  Slots C and D keep what the template holds:
+ * this adapter has no per-row data to put there. */
+#define EM05_ROW_INDEX    0x53
+#define EM05_ROW_TBL_LO   0x07u
+static const uint8_t g_row_tbl[14] = {
+	0x06, 0x06, 0x0C, 0x0C, 0x12, 0x12, 0x0A, 0x0A,
+	0x14, 0x14, 0x1E, 0x1E, 0x32, 0x32,
+};
+
+/* Where message 0x03's records begin: 6 frame-header bytes + the 20-byte
+ * message header = pl[20], where the 0x2F record sits (msg_0x03.md). */
+#define EM03_REC_START    26u
+
 /* Message 0x08 payload[13] = frame offset 0x13: (v & 0xFE) == 0x80 declares
  * the 105-byte message 0x05, anything else the 117-byte one (msg_0x08.md). */
 #define EM08_STATUS_FORM  0x13
@@ -248,6 +271,15 @@ volatile struct em_capture em_cap[EM_CAP_SLOTS];
 volatile uint8_t  em_cap_used;
 volatile struct em_capture em_pre[EM_PRE_SLOTS];
 volatile uint8_t  em_pre_used;
+
+/* The row index.  g_row_req is the body's latest request, written from the
+ * chip-select interrupt; g_row_next is what the next message 0x05 carries,
+ * latched from g_row_req at each status send -- which is what puts the two
+ * cycles between a request and its answer.  Both start at 00 00, the
+ * "nothing new" index a Sony lens opens a session with. */
+static volatile uint8_t  g_row_req[2];
+static uint8_t           g_row_next[2];
+volatile uint16_t        em_row_req_n;
 
 static volatile uint8_t  g_reply_pending;
 static volatile uint8_t  g_reply_id;
@@ -691,6 +723,35 @@ static void focus_cmd_set(const struct em_focus_cmd *c)
 	em_focus_pending = 1;
 }
 
+/* A 0x2F record: the body asks for a row of the optical table. */
+static void row_request(const uint8_t *r)
+{
+	g_row_req[0] = r[1];
+	g_row_req[1] = r[2];
+	count16(&em_row_req_n);
+}
+
+/* Message 0x03's records.  Same encoding as message 0x04's, but the only
+ * record seen in a 0x03 is the row index, so that is the only one acted on:
+ * a Move or a Stop read out of a frame that has never carried one would drive
+ * the motor on a guess.  Anything else ends the walk. */
+static void em_parse_03_records(const uint8_t *rx, uint16_t end)
+{
+	uint16_t i = EM03_REC_START;
+
+	while (i < end) {
+		uint8_t size = record_size(rx[i]);
+
+		if (size == 0u || (uint16_t)(i + size) > end) {
+			return;
+		}
+		if (rx[i] == EM_REC_ROW_INDEX) {
+			row_request(&rx[i]);
+		}
+		i += size;
+	}
+}
+
 static void em_parse_records(const uint8_t *rx, uint16_t end)
 {
 	uint16_t i = EM04_REC_START;
@@ -822,9 +883,11 @@ static void em_parse_records(const uint8_t *rx, uint16_t end)
 			break;
 
 		case EM_REC_ROW_INDEX:
-			/* The optical table's row selector.  This adapter has
-			 * no table, so there is nothing to select. */
+			/* The optical table's row selector.  Never seen in a
+			 * 0x04, but Yongnuo walks 0x03 and 0x04 with one
+			 * parser, so it is honoured here too. */
 			rec_count(EM_REC_SLOT_ROW);
+			row_request(r);
 			break;
 
 		default:
@@ -1059,6 +1122,21 @@ static void on_cs_edge(int level)
 
 		if (rx[16] >= 2u || (skip ^= 1u) == 0u) {
 			em_msg_06[EM06_CYCLE] ^= EM06_CYCLE_BIT;
+		}
+	}
+
+	/* MESSAGE 0x03's RECORDS: the row index.  Only the 23-byte payload a
+	 * Sony native gets carries one; the 20-byte form a body sends an
+	 * adapter ends where the records would start.  Bounded by the frame's
+	 * declared length, as message 0x04's are. */
+	if (rx[3] != EM_CLASS_INIT && rx[5] == 0x03u && !em_shutdown_acked) {
+		uint16_t end = (uint16_t)rx[1] | ((uint16_t)rx[2] << 8);
+
+		if (end > n) {
+			end = n;
+		}
+		if (end >= EM03_REC_START + 3u) {
+			em_parse_03_records(rx, (uint16_t)(end - 3u));
 		}
 	}
 
@@ -1656,6 +1734,25 @@ void em_init(void)
 	em_t_init_done = millis();
 }
 
+/* Message 0x05 pl[77..80]: the row the body asked for two cycles ago, and its
+ * table value.  The interrupt is masked for the copy so a request landing in
+ * between cannot split the pair. */
+static void status05_row_index(void)
+{
+	uint8_t tag = g_row_next[1];
+	uint8_t k   = (uint8_t)(tag - EM05_ROW_TBL_LO);
+
+	em_msg_05[EM05_ROW_INDEX]     = g_row_next[0];
+	em_msg_05[EM05_ROW_INDEX + 1] = tag;
+	em_msg_05[EM05_ROW_INDEX + 2] = 0x00;
+	em_msg_05[EM05_ROW_INDEX + 3] = (k < sizeof(g_row_tbl)) ? g_row_tbl[k] : 0x00;
+
+	__disable_irq();
+	g_row_next[0] = g_row_req[0];
+	g_row_next[1] = g_row_req[1];
+	__enable_irq();
+}
+
 /* The status half of em_poll, on its own. */
 void em_pump_status(void)
 {
@@ -1666,6 +1763,7 @@ void em_pump_status(void)
 
 	em_msg_05[4] = g_reply_seq;
 	em_msg_06[4] = g_reply_seq;
+	status05_row_index();
 
 	delay_us(EM_LEAD_US);
 	if (em_status05_len == EM05_LEN_LONG) {

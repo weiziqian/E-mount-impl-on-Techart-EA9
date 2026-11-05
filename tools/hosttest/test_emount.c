@@ -2027,6 +2027,121 @@ int main(void)
 		}
 	}
 
+	/* --- 0x05 pl[77..80]: the row the body asked for, two cycles later --
+	 * The body's sequence to a SELP1650, as captured, then an init tag, a
+	 * tag at each end of the table and one past it.  Each cycle is the lens's
+	 * status pair followed by the body's 0x03, in that order on the wire. */
+	{
+		static const uint8_t REQ[][2] = {
+			{ 0x15, 0x16 }, { 0x15, 0x16 }, { 0x15, 0x17 }, { 0x15, 0x17 },
+			{ 0x09, 0x0B }, { 0x07, 0x07 }, { 0x14, 0x14 }, { 0x15, 0x15 },
+			{ 0x0C, 0x0C }, { 0x06, 0x06 }, { 0x00, 0x00 },
+		};
+		static const uint8_t TBL[14] = { 0x06, 0x06, 0x0C, 0x0C, 0x12, 0x12,
+		                                 0x0A, 0x0A, 0x14, 0x14, 0x1E, 0x1E,
+		                                 0x32, 0x32 };
+		const unsigned NREQ = sizeof(REQ) / sizeof(REQ[0]);
+		uint8_t m03[32], m03s[29];
+		uint16_t row_n0 = em_row_req_n;
+		unsigned k;
+
+		/* The native 23-byte payload: 20-byte header, then 2F lo hi. */
+		memset(m03, 0, sizeof(m03));
+		m03[0] = 0xF0; m03[1] = 32; m03[3] = 0x01; m03[5] = 0x03;
+		m03[26] = 0x2F; m03[31] = 0x55;
+		/* The 20-byte adapter form, with nothing where a record would go. */
+		memset(m03s, 0, sizeof(m03s));
+		m03s[0] = 0xF0; m03s[1] = 29; m03s[3] = 0x01; m03s[5] = 0x03;
+		m03s[28] = 0x55;
+
+		/* Clear whatever earlier tests left in the two-stage latch. */
+		m03[27] = 0; m03[28] = 0;
+		for (k = 0; k < 2; k++) {
+			host_body_frame(m03, sizeof(m03)); em_poll();
+			host_frame_sync(); em_poll();
+		}
+
+		for (k = 0; k < NREQ + 2; k++) {
+			int before = sent_n;
+
+			host_frame_sync();
+			em_poll();
+			if (sent_n != before + 2) {
+				fail("row index cycle %u: no status pair", k);
+				continue;
+			}
+			check_frame(before, 0x05, "0x05 with a row index");
+			if (k >= 2) {
+				const uint8_t *f = sent[before];
+				const uint8_t *want = REQ[k - 2];
+				uint8_t t = (uint8_t)(want[1] - 7u);
+				uint8_t w80 = (t < 14) ? TBL[t] : 0;
+
+				if (f[0x53] != want[0] || f[0x54] != want[1]
+				    || f[0x55] != 0 || f[0x56] != w80) {
+					fail("0x05 pl[77..80] = %02x %02x %02x %02x "
+					     "two cycles after a request for %02x %02x; "
+					     "expected %02x %02x 00 %02x",
+					     f[0x53], f[0x54], f[0x55], f[0x56],
+					     want[0], want[1], want[0], want[1], w80);
+				}
+			}
+			if (k < NREQ) {
+				m03[27] = REQ[k][0];
+				m03[28] = REQ[k][1];
+				host_body_frame(m03, sizeof(m03));
+				em_poll();
+			}
+		}
+		if ((uint16_t)(em_row_req_n - row_n0) != 2 + NREQ) {
+			fail("row requests counted %u, expected %u",
+			     (unsigned)(uint16_t)(em_row_req_n - row_n0), 2 + NREQ);
+		}
+
+		/* The adapter form carries no request, so the index holds. */
+		m03[27] = 0x15; m03[28] = 0x16;
+		host_body_frame(m03, sizeof(m03)); em_poll();
+		for (k = 0; k < 4; k++) {
+			int before = sent_n;
+
+			host_frame_sync(); em_poll();
+			if (k >= 1 && sent_n == before + 2
+			    && (sent[before][0x53] != 0x15 || sent[before][0x54] != 0x16)) {
+				fail("the 20-byte 0x03 changed the row index to %02x %02x",
+				     sent[before][0x53], sent[before][0x54]);
+			}
+			host_body_frame(m03s, sizeof(m03s)); em_poll();
+		}
+
+		/* A 0x2F in a 0x04's records counts as a request too. */
+		{
+			uint8_t m04[25];
+			int before;
+
+			memset(m04, 0, sizeof(m04));
+			m04[0] = 0xF0; m04[1] = 25; m04[3] = 0x01; m04[5] = 0x04;
+			m04[19] = 0x2F; m04[20] = 0x0B; m04[21] = 0x0C; m04[24] = 0x55;
+			host_body_frame(m04, sizeof(m04)); em_poll();
+			host_frame_sync(); em_poll();
+			before = sent_n;
+			host_frame_sync(); em_poll();
+			if (sent_n == before + 2
+			    && (sent[before][0x53] != 0x0B || sent[before][0x54] != 0x0C
+			        || sent[before][0x56] != 0x12)) {
+				fail("a 0x2F record in message 0x04 was not honoured: "
+				     "%02x %02x .. %02x", sent[before][0x53],
+				     sent[before][0x54], sent[before][0x56]);
+			}
+		}
+
+		/* Leave the latch at 00 00 for whatever runs next. */
+		m03[27] = 0; m03[28] = 0;
+		for (k = 0; k < 2; k++) {
+			host_body_frame(m03, sizeof(m03)); em_poll();
+			host_frame_sync(); em_poll();
+		}
+	}
+
 	/* A full transmit log makes every `sent[before + 1]` read a stale
 	 * frame, so it must be an error, not a silent truncation. */
 	if (sent_overflow) {

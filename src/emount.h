@@ -537,6 +537,10 @@ void    em_post_query_answer(uint8_t tag, uint16_t value);
 /* Counters, so a dump can say which instructions a body actually uses. */
 extern volatile uint16_t em_rec_n[7];    /* indexed by EM_REC_SLOT_* below */
 extern volatile uint16_t em_rec_unknown; /* records whose tag ended the walk */
+/* Row-index requests (0x2F records) from message 0x03 and 0x04 together.
+ * Message 0x05 pl[77..78] carries each one two cycles later, and pl[80] the
+ * table value Yongnuo derives from pl[78] (emount.c, EM05_ROW_INDEX). */
+extern volatile uint16_t em_row_req_n;
 /* Which of them use the defocus scale: Move records by mode (rec[4] & 7;
  * mode 6 is in defocus units), and Scan records by the unit of their speed
  * code -- [0] position units, [1] defocus units (bit 7 set). */
