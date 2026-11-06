@@ -154,18 +154,25 @@
 #define EM05_FLAG_REPORTS 0x80u
 #define EM05_FLAG_MOVING  0x40u
 
-/* Message 0x05 payload[77..80] = frame offsets 0x53..0x56: the optical table's
- * ROW INDEX, a byte pair, then the second index pair (msg_0x05.md).
+/* Message 0x05 payload[77..80] = frame offsets 0x53..0x56: the row numbers of
+ * slots C and D, then two bytes the body stores but does not act on.
  *
- * The body chooses the row.  Its message 0x03 carries a 0x2F record, `2F lo
- * hi`, and a Sony lens puts that pair into the 0x05 it sends two cycles later
- * -- 421 of 421 frames over three sessions (msg_0x03.md).  pl[79] is 0x00 on
- * every device measured.  pl[80] is not echoed: the lens computes it from
- * pl[78] through Yongnuo's 14-entry table, which is what fixed their 50 mm DF
- * on an A7M5, and the values it gives match a Sony SEL5518Z on the wire.
+ * The body chooses the rows.  Its message 0x03 carries a 0x2F record, `2F
+ * rowC rowD`, sent only if 0x01 declares 0x2F (bit 46).  A Sony lens puts
+ * that pair into the 0x05 it sends two cycles later -- 421 of 421 frames
+ * over three sessions (msg_0x03.md).  An A7 IV (0x3ab854) files slot C as
+ * row pl[77], and slot D as row pl[78] if that differs; rows 0 and 1 are
+ * discarded.
  *
- * Only the index is sent.  Slots C and D keep what the template holds:
- * this adapter has no per-row data to put there. */
+ * Slots C and D stay zero: this adapter has no per-row data.  A zero row
+ * decodes to a flat zero curve, which is what the Yongnuo 35 DA sends for
+ * every requested row.
+ *
+ * pl[79] is 0x00, as on every device measured.  pl[80] is Yongnuo's
+ * 14-entry lookup on pl[78], the table added in the 50 DF release that fixed
+ * the A7M5.  NOT USED: the A7 IV only copies pl[79..82] into a log record
+ * and never branches on them.  It is sent because Yongnuo and Sony send it,
+ * not because any body is known to read it. */
 #define EM05_ROW_INDEX    0x53
 #define EM05_ROW_TBL_LO   0x07u
 static const uint8_t g_row_tbl[14] = {

@@ -416,6 +416,11 @@ int main(void)
 		}
 	}
 
+	/* --- 0x2F is declared (bit 46), or the body never asks for a row --- */
+	if (!(em_msg_01[6 + 46 / 8] & (1u << (46 % 8)))) {
+		fail("0x01 does not advertise the 0x2F row-index record (bit 46)");
+	}
+
 	/* --- message 0x35 is advertised (bit 52) and answered, 48 bytes --- */
 	{
 		int idx = request(0x35, 0x21, 0x00, 0x00);
