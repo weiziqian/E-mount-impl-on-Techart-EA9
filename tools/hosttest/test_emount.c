@@ -1620,15 +1620,21 @@ int main(void)
 			fail("at rest pl[20..21] %u pl[2..3] %u, want 5000 5000",
 			     POS(0x1A), POS(0x08));
 		}
-		/* Running: the latch plus the last frame's displacement (+40),
-		 * bounded by the target. */
+		/* Running, starting from rest (no eighths sampled, so no speed):
+		 * the latch plus the bound -- the starting acceleration 11.4/26
+		 * units/ms^2 held up to the 6.25 cap, 17 ms: 6.25*17 - 6.25^2 *
+		 * 26 / (2 * 11.4) = 61.8 -- against about 52 the plant really
+		 * covers.  Not the last frame's +40 at constant speed, which is
+		 * what falls behind while the mechanism accelerates. */
+		em_set_forecast_model(6250u, 11431u, 26u);
+		em_frame_period_ms = 17u;
 		em_set_motor(1);
 		host_frame_sync();
 		em_sample_position(5040);
 		em_set_focus_position(5050, 5300);
 		before = sent_n; em_poll(); f = sent[before + 1];
-		if (POS(0x1A) != 5040 || POS(0x08) != 5080) {
-			fail("running pl[20..21] %u pl[2..3] %u, want 5040 5080",
+		if (POS(0x1A) != 5040 || POS(0x08) != 5040 + 62) {
+			fail("from rest pl[20..21] %u pl[2..3] %u, want 5040 5102",
 			     POS(0x1A), POS(0x08));
 		}
 		host_frame_sync();
@@ -1656,13 +1662,49 @@ int main(void)
 			fail("unlatched frame sync sent %u %u, want 5200 5200",
 			     POS(0x1A), POS(0x08));
 		}
+		/* Still at rest, the encoder jitters: pl[20..21] follows it,
+		 * pl[2..3] holds the position it took on the first rest frame. */
+		em_set_focus_position(5203, 5203);
+		host_frame_sync();
+		before = sent_n; em_poll(); f = sent[before + 1];
+		em_set_focus_position(5198, 5198);
+		host_frame_sync();
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x1A) != 5198 || POS(0x08) != 5200) {
+			fail("at rest with jitter sent %u %u, want 5198 5200",
+			     POS(0x1A), POS(0x08));
+		}
+		/* At cruise: a frame sampled in eighths at 6 units/ms.  The
+		 * forecast is the cruise distance, 6.25 x 17 = 106, not more
+		 * than a few units past it -- and not less than the 102 the
+		 * mechanism really covers. */
+		em_set_motor(1);
+		host_frame_sync();
+		em_sample_position(5000);
+		{
+			unsigned t;
+
+			for (t = 1; t <= 16; t++) {
+				host_millis += 1;
+				em_sample_position((int32_t)(5000 + 6 * t));
+			}
+			host_millis += 1;
+		}
+		em_set_focus_position(5102, 5600);
+		host_frame_sync();
+		before = sent_n; em_poll(); f = sent[before + 1];
+		if (POS(0x1A) != 5102 || POS(0x08) < 5102 + 102
+		    || POS(0x08) > 5102 + 110) {
+			fail("at cruise pl[20..21] %u pl[2..3] %u, want 5102 5204..5212",
+			     POS(0x1A), POS(0x08));
+		}
 		/* A forecast is clamped into the advertised travel. */
 		em_set_motor(1);
 		host_frame_sync();
 		em_sample_position(5000);
 		host_frame_sync();
-		em_sample_position(5500);
-		em_set_focus_position(5500, 99999);
+		em_sample_position(5600);
+		em_set_focus_position(5600, 99999);
 		before = sent_n; em_poll(); f = sent[before + 1];
 		if (POS(0x08) != ENC_TRAVEL_HI) {
 			fail("pl[2..3] was not clamped (%u)", POS(0x08));

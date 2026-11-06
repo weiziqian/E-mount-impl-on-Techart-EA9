@@ -232,6 +232,7 @@ static void quiet_idlog_page(void)
  */
 static void pump(int32_t pos);
 static void focus_report_at(int32_t counts);
+static void forecast_model(const struct servo_cfg *cfg);
 static uint8_t focus_retarget(int32_t *target);
 static uint8_t focus_abort(void);
 static void    focus_report_cut(uint8_t running, uint8_t drive_param);
@@ -1110,6 +1111,7 @@ static uint8_t focus_drive_absorb(const struct em_focus_cmd *c)
 	g_drive_param       = c->drive_param;
 	g_live_cfg.v_cruise = drive_v_cruise(c->drive_vel);
 	g_live_cfg.stop_ms  = SCAN_STOP_MS;
+	forecast_model(&g_live_cfg);
 
 	g_absorb_target  = (dir > 0) ? FOCUS_TRAVEL_COUNTS : 0;
 	g_absorb_pending = (g_absorb_target != g_move_target);
@@ -1215,6 +1217,19 @@ static uint8_t focus_retarget(int32_t *target)
  * Returns the outcome.  It does NOT send an event -- who is entitled to an
  * event depends on which instruction this leg belonged to, and only the caller
  * knows that. */
+/* Hand message 0x06's forecast the limits of the move about to run, in
+ * protocol units: its speed cap, the speed at its full duty (the feedforward
+ * model, duty = v / ff_div + ff_offset, solved for v), and its time constant. */
+static void forecast_model(const struct servo_cfg *cfg)
+{
+	uint32_t v_sat = cfg->duty_max > cfg->ff_offset
+	                 ? (uint32_t)(cfg->duty_max - cfg->ff_offset) * cfg->ff_div
+	                 : 0u;
+
+	em_set_forecast_model((uint32_t)cfg->v_cruise / FOCUS_COUNTS_PER_UNIT,
+	                      v_sat / FOCUS_COUNTS_PER_UNIT, cfg->tau_ms);
+}
+
 static uint8_t focus_run(int32_t want, uint16_t target_u,
                          const struct servo_cfg *cfg)
 {
@@ -1241,6 +1256,7 @@ static uint8_t focus_run(int32_t want, uint16_t target_u,
 	g_move_target = want;
 	g_move_dir    = delta >= 0 ? 1 : -1;
 	g_absorb_pending = 0;   /* a takeover belongs to the leg it arrived in */
+	forecast_model(cfg);
 	servo_move_rel(delta, cfg, &r);
 	g_moving      = 0;
 	focus_report();

@@ -126,6 +126,15 @@ void em_pump_status(void);
  * carries them at the next status frame (emount.c, status06_focus). */
 void em_set_focus_position(int32_t pos, int32_t target);
 
+/* The mechanism's limits, for message 0x06 pl[2..3]'s forecast, in protocol
+ * units: the speed cap of the running move, the speed at full duty, and the
+ * driven time constant.  The forecast assumes full-duty acceleration up to the
+ * cap, so it does not fall behind where focus really gets to (emount.c,
+ * forecast06).  Set by the caller for every move, and again when a running
+ * move's cap changes. */
+void em_set_forecast_model(uint32_t v_cap_ups, uint32_t v_sat_ups,
+                           uint16_t tau_ms);
+
 /* The focus motor, for message 0x06 payload[0..1]: 0 idle, +1 running toward
  * higher positions, -1 toward lower. */
 void em_set_motor(int8_t dir);

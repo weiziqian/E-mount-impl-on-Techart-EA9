@@ -67,6 +67,7 @@
  * payload[2..3] the target, payload[20..21] at the frame sync. */
 #define EM06_POS_A        0x08
 #define EM06_POS_B        0x1A
+#define EM06_FORECAST_FRAMES 1   /* pl[2..3] runs this many frames ahead */
 
 /* The travel limits the body clamps every target into: message 0x06
  * payload[7..8] and payload[9..10] = frame offsets 0x0D and 0x0F. */
@@ -1288,6 +1289,20 @@ static uint8_t  g_sub_idx;        /* next slot to fill, 1..SUB_N-1 */
 static uint8_t  g_sub_valid;      /* g_sub[0] holds a real latch */
 static uint32_t g_sub_vd;         /* em_vd_edges at that latch */
 static int16_t  g_frame_disp;     /* L[0] minus the previous L[0], per frame */
+static int32_t  g_v0_q8;          /* speed at the latch, units/ms x 256 */
+
+/* The forecast's mechanism model (em_set_forecast_model), units/ms x 256. */
+static uint32_t g_fc_cap_q8 = 1600u;   /* 25 counts/ms = 6.25 units/ms, cruise */
+static uint32_t g_fc_sat_q8 = 2926u;   /* 45.7 counts/ms, duty 1280 */
+static uint16_t g_fc_tau_ms = 26u;
+
+void em_set_forecast_model(uint32_t v_cap_ups, uint32_t v_sat_ups,
+                           uint16_t tau_ms)
+{
+	g_fc_cap_q8 = v_cap_ups * 256u / 1000u;
+	g_fc_sat_q8 = v_sat_ups * 256u / 1000u;
+	g_fc_tau_ms = tau_ms ? tau_ms : 1u;
+}
 
 static uint8_t sat8(int32_t v)
 {
@@ -1325,6 +1340,20 @@ void em_sample_position(int32_t pos)
 		               ? (int16_t)(((int32_t)p - (int32_t)g_sub[0])
 		                           / (int32_t)(vd - g_sub_vd))
 		               : 0;
+		/* The speed at the latch, for the forecast: the last eighth's
+		 * average, raised by the half-eighth of full-duty acceleration
+		 * it lags behind -- so it is not below the real speed. */
+		{
+			int32_t  eighth_us = (int32_t)em_frame_period_ms * 1000 / SUB_N;
+			int32_t  dv = g_sub_valid && eighth_us > 0
+			              ? (int32_t)p - (int32_t)g_sub[SUB_N - 1] : 0;
+			int32_t  v  = eighth_us > 0 ? dv * 256000 / eighth_us : 0;
+			int32_t  a  = (int32_t)g_fc_sat_q8 - (v < 0 ? -v : v);
+			int32_t  up = a > 0 ? a * eighth_us
+			                      / (2000 * (int32_t)g_fc_tau_ms) : 0;
+
+			g_v0_q8 = v > 0 ? v + up : v < 0 ? v - up : 0;
+		}
 		g_sub[0]    = p;
 		g_sub_idx   = 1;
 		g_sub_valid = 1;
@@ -1370,6 +1399,8 @@ void em_set_in_motion(uint8_t moving)
 static uint16_t g_pos_now;        /* last reported position */
 static uint16_t g_pos_target;     /* where the running move is going */
 static uint8_t  g_pos_set;        /* a position has been reported */
+static uint16_t g_pos_rest;       /* pl[2..3] while at rest, taken once */
+static uint8_t  g_pos_rest_held;  /* g_pos_rest has been taken */
 
 void em_set_focus_position(int32_t pos, int32_t target)
 {
@@ -1378,16 +1409,69 @@ void em_set_focus_position(int32_t pos, int32_t target)
 	g_pos_set    = 1;
 }
 
+/* How far focus can get toward the target, `left` units away, within
+ * EM06_FORECAST_FRAMES frames of the latch.  An upper bound, not a
+ * prediction.  The plant is tau * dv/dt + v = v_sat at full duty, so its
+ * acceleration only falls as it speeds up: holding the latch's acceleration
+ * a0 = (v_sat - u) / tau for the whole frame, then the move's speed cap,
+ * gives a speed that is never below the real one -- and so a distance that is
+ * never short of it.  Two pieces, both closed form (units x 256, ms):
+ *
+ *   cap not reached:  d = u*T + (v_sat - u) * T^2 / (2 tau)
+ *   cap reached:      d = cap*T - (cap - u)^2 * tau / (2 (v_sat - u))
+ *
+ * the second being "accelerate to the cap, then cruise" with the time to the
+ * cap, (cap - u) * tau / (v_sat - u), folded in.  Already at or above the cap
+ * (or v_sat): u*T, no deceleration assumed.  Integer division only shrinks
+ * what is subtracted, so rounding errs long.  Deceleration is not modelled:
+ * near the target it reports the target early rather than late, and it never
+ * passes the target.  Moving away from the target: 0 -- no forecast past
+ * where it is. */
+static int32_t forecast06(int32_t left, int8_t m)
+{
+	int32_t  dir  = left > 0 ? 1 : left < 0 ? -1 : 0;
+	uint32_t room = (uint32_t)(left * dir) << 8;     /* x 256 */
+	uint32_t t    = (uint32_t)em_frame_period_ms * EM06_FORECAST_FRAMES;
+	uint32_t tau  = g_fc_tau_ms;
+	uint32_t cap  = g_fc_cap_q8, sat = g_fc_sat_q8;
+	uint32_t u, x;
+
+	/* Moving away: driven away, or still travelling away -- in the last
+	 * eighth or over the last frame (a reversal coasting the old way). */
+	if (dir == 0 || m * dir < 0 || g_v0_q8 * dir < 0
+	    || (int32_t)g_frame_disp * dir < 0) {
+		return 0;
+	}
+	u = (uint32_t)(g_v0_q8 * dir);
+
+	if (u >= cap || u >= sat) {
+		x = u * t;
+	} else if ((sat - u) * t <= (cap - u) * tau) {
+		x = u * t + (sat - u) * t * t / (2u * tau);
+	} else {
+		x = cap * t - (cap - u) * (cap - u) * tau / (2u * (sat - u));
+	}
+	if (x > room) {
+		x = room;
+	}
+	return dir * (int32_t)((x + 255u) >> 8);
+}
+
 /* Message 0x06 payload[0..3] and [20..21], written just before each send.
  * As Yongnuo 50 DF builds them (FUN_08016150, FUN_080160a4):
  *
  *   pl[20..21]  the position latched at the last frame sync
- *   pl[2..3]    that position plus a one-frame forecast: while the motor
- *               runs, the last frame's displacement, bounded so that it
- *               neither turns back nor passes the move's target (Yongnuo's
- *               forecast cannot overshoot either, msg_0x06.md); at rest,
- *               the position itself.  Yongnuo computes the displacement
- *               from its motion profile; this one is measured.
+ *   pl[2..3]    that position plus a forecast: while the motor runs, the
+ *               farthest focus can get toward the target in one frame
+ *               (forecast06: the latch's full-duty acceleration held, up to
+ *               the move's speed cap), never past the target, clamped into the advertised
+ *               travel.  One frame because an A7 IV files pl[2..3] under
+ *               the next frame (msg_0x06.md).  Moving away from the target,
+ *               it is the position itself; at rest,
+ *               the position at the first frame of rest, held there until
+ *               the motor runs again -- steady, as Sony natives send it,
+ *               where pl[20..21] jitters.  Yongnuo computes the
+ *               displacement from its motion profile; this one is measured.
  *   pl[0..1]    02 02 / 02 04 if the motor was running at the frame sync
  *               or is running now (02 = toward higher positions), else
  *               82 00.  The direction is the one it actually moved in the
@@ -1416,14 +1500,22 @@ static void status06_focus(void)
 	{
 		int32_t at   = g_sub[0];
 		int32_t left = (int32_t)g_pos_target - at;
-		int32_t d    = m ? g_frame_disp : 0;
+		int32_t d    = m ? forecast06(left, m) : 0;
 
-		if (left >= 0) {
-			d = d < 0 ? 0 : d > left ? left : d;
+		if (m) {
+			g_pos_rest_held = 0;
+			put16(em_msg_06, EM06_POS_A, clamp_travel(at + d));
 		} else {
-			d = d > 0 ? 0 : d < left ? left : d;
+			/* At rest: the position on the first frame with no move
+			 * running, then held, so encoder jitter does not reach
+			 * pl[2..3].  The body takes 13 frames of an unchanged
+			 * pl[2..3] as the end of a Drive (msg_0x06.md). */
+			if (!g_pos_rest_held) {
+				g_pos_rest      = (uint16_t)at;
+				g_pos_rest_held = 1;
+			}
+			put16(em_msg_06, EM06_POS_A, g_pos_rest);
 		}
-		put16(em_msg_06, EM06_POS_A, clamp_travel(at + d));
 	}
 
 	v = m ? EM06_MOVING : EM06_AT_REST;
