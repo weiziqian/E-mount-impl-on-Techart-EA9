@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#define OPTICAL_FILE_LEN    2584u
+#define OPTICAL_FILE_LEN    296u
 #define OPTICAL_PAGE08_LEN  500u
 
 extern const uint8_t optical_file[OPTICAL_FILE_LEN];

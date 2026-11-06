@@ -64,8 +64,11 @@ void em_poll(void);
 #define EM_0C_WAIT_US    2000u
 #define EM_0C_READY_US   200u
 
-/* The lens ID we report in message 0x07 payload[9..10], u16 LE -- 50496,
- * in the template (emount_packets.c).
+/* The lens ID we report in message 0x07 payload[9..10], u16 LE -- 50531
+ * (0xC563), in the template (emount_packets.c).  Our own number, no longer
+ * Yongnuo's 0xC540, but still in the third-party block: an A7 IV classes
+ * 0xC000-0xFFFF (low 12 bits not 0xFFF) as third-party (lens_id.md), the
+ * class 0xC540 was in, so its treatment does not change.
  *
  * Stock is 234 (0x00EA), in the legacy/A-mount range that every measured
  * ADAPTER sits in -- the two Viltrox EF adapters report 78.  Native E-mount

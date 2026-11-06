@@ -86,6 +86,11 @@ static uint16_t checksum(const uint8_t *f, uint16_t len)
 	return s;
 }
 
+static uint32_t rd32(const uint8_t *p)
+{
+	return p[0] | (p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 /* Build an init-class request for one message id, the shape a body sends.
  * a0/a1 land at payload[0]/payload[1] -- frame offsets 6 and 7, which are the
  * bytes the 0x1b and 0x34 handlers echo back. */
@@ -203,8 +208,12 @@ int main(void)
 		uint16_t lid = em_msg_07[15]
 		               | ((uint16_t)em_msg_07[16] << 8);
 
-		if (lid != 50496u) {
-			fail("lens ID is %u, expected %u", lid, 50496u);
+		if (lid != 0xC563u) {
+			fail("lens ID is %#06x, expected 0xc563", lid);
+		}
+		/* still third-party: top two bits set, low 12 bits not 0xFFF */
+		if ((lid >> 14) != 3u || (lid & 0x0FFFu) == 0x0FFFu) {
+			fail("lens ID %#06x left the third-party block", lid);
 		}
 	}
 	if (em_msg_07[6] != 0x01) {
@@ -1941,7 +1950,7 @@ int main(void)
 	/* --- messages 0x3A/0x3B: the paged optical file ------------------- */
 	{
 		uint8_t  req[16];
-		uint8_t  file[6 * 488];
+		uint8_t  file[488];
 		uint16_t n, k;
 		int      before, i;
 		unsigned page;
@@ -1961,15 +1970,57 @@ int main(void)
 			if (f[3] != 0x03 || f[4] != 0x00) {
 				fail("0x3A: class/seq %02x %02x, want 03 00", f[3], f[4]);
 			}
-			if ((f[7] | (f[8] << 8)) != 2600 || f[11] != 6 || f[12] != 0) {
-				fail("0x3A: size %u pages %u, want 2600 and 6",
-				     f[7] | (f[8] << 8), f[11] | (f[12] << 8));
+			if ((f[7] | (f[8] << 8)) != OPTICAL_FILE_LEN + 16
+			    || f[11] != 1 || f[12] != 0) {
+				fail("0x3A: size %u pages %u, want %u and 1",
+				     f[7] | (f[8] << 8), f[11] | (f[12] << 8),
+				     OPTICAL_FILE_LEN + 16);
+			}
+		}
+
+		/* The file itself: chunks consistent with LF's length, one
+		 * aperture plus the end marker, and a check word that is the XOR
+		 * of every u32 LE word before it (msg_0x3B.md). */
+		{
+			const uint8_t *o = optical_file;
+			uint32_t x = 0, lf = rd32(o + 4);
+			unsigned p = 16, nchunk = 0;
+
+			if (o[0] != 'L' || o[1] != 'F' || lf + 16 != OPTICAL_FILE_LEN) {
+				fail("optical file: LF header or length %u wrong", lf);
+			}
+			for (k = 0; k + 4u < OPTICAL_FILE_LEN; k += 4) {
+				x ^= rd32(o + k);
+			}
+			if (x != rd32(o + OPTICAL_FILE_LEN - 4)) {
+				fail("optical file: check word %08x, want %08x",
+				     rd32(o + OPTICAL_FILE_LEN - 4), x);
+			}
+			while (p + 8 <= OPTICAL_FILE_LEN - 4) {
+				const uint8_t *c = o + p;
+
+				if (c[0] == 'E' && c[1] == 'D'
+				    && (c[8 + 6] | (c[8 + 7] << 8)) != 2) {
+					fail("optical file: ED has %u apertures, want 2",
+					     c[8 + 6] | (c[8 + 7] << 8));
+				}
+				if (c[0] == 'C' && c[1] == 'S'
+				    && (c[8 + 4] | (c[8 + 5] << 8)) != 2) {
+					fail("optical file: CS has %u apertures, want 2",
+					     c[8 + 4] | (c[8 + 5] << 8));
+				}
+				p += (c[2] | (c[3] << 8)) + rd32(c + 4);
+				nchunk++;
+			}
+			if (p != OPTICAL_FILE_LEN - 4 || nchunk != 3) {
+				fail("optical file: %u chunks end at %u, want 3 at %u",
+				     nchunk, p, OPTICAL_FILE_LEN - 4);
 			}
 		}
 
 		/* Read it back, page by page, and join the pages. */
 		memset(file, 0xAA, sizeof(file));
-		for (page = 1; page <= 6; page++) {
+		for (page = 1; page <= 1; page++) {
 			n = make_request(req, 0x03, (uint8_t)(0x30 + page), 0x3B,
 			                 (uint8_t)page, 0x00);
 			before = sent_n;
@@ -1989,7 +2040,7 @@ int main(void)
 			memcpy(&file[(page - 1) * 488], &sent[before][9], 488);
 		}
 		if (memcmp(file, optical_file, OPTICAL_FILE_LEN) != 0) {
-			fail("the six 0x3B pages do not join into the LF file");
+			fail("the 0x3B page does not hold the LF file");
 		}
 		for (k = OPTICAL_FILE_LEN; k < sizeof(file); k++) {
 			if (file[k] != 0) {
@@ -2005,7 +2056,7 @@ int main(void)
 		em_poll();
 		if (sent_n == before + 1
 		    && (sent[before][7] != 9
-		        || memcmp(&sent[before][9], &file[5 * 488], 488) != 0)) {
+		        || memcmp(&sent[before][9], &file[0], 488) != 0)) {
 			fail("0x3B page 9 was not answered with the last page");
 		}
 

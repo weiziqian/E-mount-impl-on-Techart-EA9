@@ -541,7 +541,8 @@ static void em_send_id(uint8_t id)
 /* MESSAGES 0x3A AND 0x3B: the paged optical file, as Yongnuo 50 DF serves it
  * (FUN_080175e8, reached from its receive dispatcher on class 0x03 only).
  * The body selects a file with 0x3A pl[0] and reads it with 0x3B, one page
- * per request; the content is the DF's own, verbatim (optical_file.c).
+ * per request; the content is the DF's, cut to the f/1.8 entry and with its
+ * check word recomputed (optical_file.c) -- 296 bytes, one page.
  *
  *   0x3A pl[0] = 00   select the LF file: reply 32 bytes, seq 0, pl[1..2] =
  *                     size + 16, pl[5..6] = pages = (size + 16) / 488 + 1
