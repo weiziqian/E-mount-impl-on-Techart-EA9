@@ -445,6 +445,14 @@ static uint8_t  g_home_trace_n;
  * parking to it would drive somewhere arbitrary. */
 static int      g_homed;
 
+/* Set for the length of motor_home().  The position is not known then, but
+ * where the mechanism is GOING is: infinity, track 0.  So the body is told
+ * exactly that -- at 0, and moving toward it while the drive runs -- rather
+ * than the template's stale position marked at rest.  Six boots in eight
+ * start parked there already (NOTES.md 112.2), so it is usually literally
+ * true, and the value does not jump when homing ends. */
+static uint8_t  g_homing;
+
 /* Which page the next park writes.  A flash page cannot be rewritten between
  * erases -- programming only clears bits -- so two parks writing the same page
  * leave the bitwise AND of both records, which is silent nonsense.  It happened:
@@ -512,16 +520,20 @@ static void pump(int32_t pos)
 	 * focus loop nothing to work with.
 	 *
 	 * Guarded on g_homed: before homing, zero is not infinity, so the
-	 * mapping has no anchor and the value would be meaningless. */
-	if (g_homed) {
+	 * mapping has no anchor and the value would be meaningless.  During
+	 * homing the callers pass 0, the destination (see g_homing). */
+	if (g_homed || g_homing) {
 		focus_report_at(pos);
 	}
 	em_poll();
 	/* Queries are answered on the next frame even mid-move, as Yongnuo
-	 * does; otherwise one asked during a leg waits for the leg to end. */
-	if (g_homed) {
-		focus_answer_queries();
-	}
+	 * does; otherwise one asked during a leg waits for the leg to end.
+	 * Not guarded on g_homed: every answer is a conversion of the query's
+	 * own operand at the declared focal length (focus_map.c,
+	 * focus_dist.c) and never reads the encoder, so it is as right before
+	 * homing as after -- and held back, it waited up to 800 ms and a fifth
+	 * query was dropped from the four-deep queue. */
+	focus_answer_queries();
 	vdd_track_sample();
 }
 
@@ -561,6 +573,18 @@ static uint8_t home_still_for(struct home_still *st, uint32_t ms)
  * at all, since that block is unreachable in every shipped image (servo.md 10)
  * -- we home because we want a known zero, and it parks at power-off instead.
  */
+/* A focus instruction that arrived during homing waits in emount.c's slot
+ * until homing ends; homing never takes it.  Until then the lens reports
+ * itself as moving: at rest with no event would read as a move that ended
+ * short of its target without a 1D 00.  Moving, then at rest WITH the event
+ * once the instruction has run, is an ordinary -- if slow -- move.  The
+ * direction and target stay homing's (toward 0): the instruction has not been
+ * converted, and before the zero is set it cannot be. */
+static uint8_t home_cmd_waiting(void)
+{
+	return em_peek_focus_op() != EM_OP_NONE;
+}
+
 static void motor_home(void)
 {
 	uint32_t w[16];
@@ -570,10 +594,35 @@ static void motor_home(void)
 	struct home_still still;
 	unsigned i;
 
-	vdd_read_burst(&idle_lo, &idle_hi, 20);
+	g_homing = 1;
+
+	/* The idle supply, with the bus served throughout.  This was
+	 * vdd_read_burst(20): twenty milliseconds with no em_poll, longer than
+	 * a frame, starting on the first frame after the handshake -- so the
+	 * body's first one or two status pairs went out late or not at all.
+	 * Same reading, same window, same place: right before the drive, in
+	 * the supply state the drive runs in. */
+	t0 = millis();
+	idle_lo = 0xFFFF;
+	idle_hi = 0;
+	do {
+		uint16_t v = vdd_read_mv();
+
+		if (v < idle_lo) {
+			idle_lo = v;
+		}
+		if (v > idle_hi) {
+			idle_hi = v;
+		}
+		g_moving = home_cmd_waiting();
+		pump(0);
+	} while ((uint32_t)(millis() - t0) < 20u);
 	before = abs_encoder_track();
 
 	vdd_track_reset();
+	g_moving      = 1;          /* toward track 0, infinity */
+	g_move_target = 0;
+	g_move_dir    = -1;
 	if (!STOCK.dry) {
 		motor_attach_pins();
 		motor_drive(-HOME_DUTY);
@@ -582,10 +631,8 @@ static void motor_home(void)
 	i  = 0;
 	home_still_init(&still);
 	while ((uint32_t)(millis() - t0) < HOME_MS) {
-		/* 0 because the position is not reportable yet: g_homed is still
-		 * clear, so pump() skips the report entirely.  Passing a real
-		 * reading here would cost an SPI transaction per iteration for a
-		 * value nothing consumes. */
+		/* 0, not a reading: before the zero is set a reading means
+		 * nothing, and 0 is where this is going (g_homing). */
 		pump(0);
 		if (i < SERVO_TRACE_N
 		    && (uint32_t)(millis() - t0) >= i * HOME_TRACE_MS) {
@@ -613,6 +660,8 @@ static void motor_home(void)
 	t0 = millis();
 	home_still_init(&still);
 	while ((uint32_t)(millis() - t0) < HOME_SETTLE_MS) {
+		/* Settling: at 0, at rest -- unless the body is waiting. */
+		g_moving = home_cmd_waiting();
 		pump(0);                /* still pre-homing; see above */
 		if ((uint32_t)(millis() - t0) >= HOME_SETTLE_MIN_MS
 		    && home_still_for(&still, HOME_STILL_MS)) {
@@ -668,7 +717,14 @@ static void motor_home(void)
 
 	/* Infinity is now zero. */
 	abs_encoder_track_reset();
-	g_homed = 1;
+	g_homed  = 1;
+	g_homing = 0;
+	/* Homing's motion state ends with homing.  A waiting instruction is
+	 * taken in the same pass of the main loop, with no em_poll between, so
+	 * no frame goes out at rest before it starts -- and one that turns out
+	 * to need no movement (inside the deadband, or a Stop) must not
+	 * inherit a "moving" nobody will ever clear. */
+	g_moving = 0;
 }
 
 /* Park to infinity, called from the message 0x16 handler before the
