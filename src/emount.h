@@ -354,14 +354,10 @@ uint16_t em_defocus_scale(void);
  * after every exposure, and start-up hung as well (NOTES.md 89).  So the
  * fiction buys nothing here, and the honest single point is what stands.
  *
- * WHY f/1.8 AND NOT f/2.0.  It used to be f/2.0, which was the stock's own
- * boot value and therefore the smallest possible deviation.  What moved it is
- * EM_SLOT_B_TYPE1: that row encodes an f-number through the protocol constant
- * `value[0] x F` ~ 0.0998, and the row this build sends is a real f/1.8 row.
- * A lens whose optical row says f/1.8 and whose descriptor says f/2.0 is
- * describing two different lenses to the same body, which is precisely the
- * class of inconsistency this file exists to remove.  Change one of these and
- * the other has to move with it.
+ * WHY f/1.8 AND NOT f/2.0.  It used to be f/2.0, the stock's own boot value.
+ * It moved with an f/1.8 slot B type-1 row this build once sent in message
+ * 0x28; that row is gone (the A7 IV ignores type 1 there, see EM_SLOT_B_TYPE0),
+ * and f/1.8 stayed.
  *
  * Four bytes of the descriptor block now differ from a stock LM-EA9 --
  * pl[44], pl[46], pl[51] take descriptor 0x16 instead of 0x18, and pl[52] is
@@ -434,24 +430,23 @@ extern volatile uint16_t em_m03_n;
  * Bit 7 of byte 0 is the type flag -- slot A rows are type 1, and slot B's two
  * types are two different physical quantities sharing one field.
  *
- * Where they go:
+ * Where they go -- the SAME type-0 row in all three messages:
  *
- *   message 0x05  slot A at pl[32..37], slot B **type 0** at pl[38..43]
- *   message 0x28  slot A at pl[11..16], slot B **type 1** at pl[17..22]
+ *   message 0x05  slot A at pl[32..37], slot B at pl[38..43]
+ *   message 0x28  slot A at pl[11..16], slot B at pl[17..22]
+ *   message 0x35  slot A at pl[11..16], slot B at pl[20..25]
  *
- * Why the split: message 0x05 alternates the two slot B types frame by frame
- * on a real lens, and message 0x28 carries only the type 1 row.  We do not
- * alternate -- there is one value of each -- so each message gets the type it
- * is supposed to carry.  The stock writes something in both places, so both
- * are fields a body may read.
+ * Why one row: a real lens alternates slot B's two types in 0x05, and puts the
+ * parity-0 half (usually type 1) into 0x28 / 0x35 (Yongnuo).  The A7 IV
+ * decodes slot B of 0x28 / 0x35 only when it is type 0, and an all-zero row
+ * IS type 0 (bit 7 clear) -- value zero, not "absent".  So a zero row there
+ * overwrote the pupil value from 0x05 at every capture.  Sending 0x05's own
+ * row keeps the body's value steady (msg_0x35.md, Slot B).
  *
  * What the stock puts there, for comparison: message 0x05 slot A all zeros,
  * which is not a row at all; message 0x05 slot B `26 00 00 00 00 00`, a flat
  * p = 1.500; message 0x28 slot A all but one byte zero; message 0x28 slot B
- * `22 00 00 00 00 00`, which is a flat 0.5 AND the wrong type for that field.
- * So the adapter has always claimed a pupil distance of 1.5 x focal length,
- * never said where the field is sampled, and contradicted itself between the
- * two messages.
+ * `22 00 00 00 00 00`, a flat 0.5.
  */
 #define EM_ROW_BYTES 6u
 
@@ -463,9 +458,6 @@ extern volatile uint16_t em_m03_n;
 
 /* Unknown optical params, could be the exit pupil? Might relate to PDAF */
 #define EM_SLOT_B_TYPE0  0x22, 0x00, 0x00, 0x00, 0x00, 0x00
-
-/* Unknown optical params, could be the pupil size. Not used in the code */
-#define EM_SLOT_B_TYPE1  0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 
 /* The body's "no target" sentinel, on both channels.  Driving to it would
  * command a position far outside any travel a lens advertises. */

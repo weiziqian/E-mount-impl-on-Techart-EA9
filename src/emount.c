@@ -152,6 +152,13 @@
 #define EM05_POS_COARSE   0x3C          /* pl[54] 0x06 units from infinity / 256 */
 #define EM05_MIN_FOCUS    0x22          /* pl[28..29] minimum focus distance */
 #define EM05_RING_DIR     0x42          /* pl[60] focus ring direction      */
+
+/* Messages 0x28 / 0x35 payload[0..3] repeat message 0x05 payload[20..23] for
+ * the frame the body is exposing: the distance code, a zero byte, the coarse
+ * distance (msg_0x35.md; Yongnuo copies them from its status snapshot, and the
+ * A7 IV files payload[0..1] as the subject distance of the exposure). */
+#define EM28_DISTANCE     0x06          /* pl[0..1] distance code           */
+#define EM28_DIST_COARSE  0x09          /* pl[3]                            */
 #define EM05_FLAG_REPORTS 0x80u
 #define EM05_FLAG_MOVING  0x40u
 
@@ -1578,6 +1585,10 @@ void em_set_subject_distance(uint16_t code, uint8_t coarse, uint8_t coarse_pos)
 	put16(em_msg_05, EM05_DISTANCE, code);
 	em_msg_05[EM05_DIST_COARSE] = coarse;
 	em_msg_05[EM05_POS_COARSE]  = coarse_pos;
+	put16(em_msg_28, EM28_DISTANCE, code);
+	em_msg_28[EM28_DIST_COARSE] = coarse;
+	put16(em_msg_35, EM28_DISTANCE, code);
+	em_msg_35[EM28_DIST_COARSE] = coarse;
 }
 
 void em_set_min_focus(uint16_t code)

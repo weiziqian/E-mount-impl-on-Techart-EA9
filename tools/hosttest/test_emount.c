@@ -558,32 +558,27 @@ int main(void)
 
 	}
 
-	/* --- the optical rows: each field carries the row type it should --- */
+	/* --- slot B: one type-0 row, the same in 0x05, 0x28 and 0x35 -----
+	 * The A7 IV decodes 0x28 / 0x35 slot B when bit 7 is clear -- an
+	 * all-zero row included -- so anything but 0x05's row changes the
+	 * body's pupil value at every capture (msg_0x35.md, Slot B). */
 	{
 		const struct {
 			const uint8_t *row;
-			uint8_t  type;       /* what bit 7 must say     */
 			const char *name;
 		} ROW[] = {
-			{ &em_msg_05[0x2C], 0, "message 0x05 slot B" },
-			{ &em_msg_28[0x17], 1, "message 0x28 slot B" },
-			{ &em_msg_35[0x1A], 1, "message 0x35 slot B" },
+			{ &em_msg_28[0x17], "message 0x28 slot B" },
+			{ &em_msg_35[0x1A], "message 0x35 slot B" },
 		};
 		unsigned r;
 
-		/* Bit 7 of byte 0 is the row type.  Get it wrong and the body
-		 * is handed the right numbers as the wrong physical quantity. */
+		if (em_msg_05[0x2C] & 0x80) {
+			fail("message 0x05 slot B is not a type 0 row (%#04x)",
+			     em_msg_05[0x2C]);
+		}
 		for (r = 0; r < sizeof(ROW) / sizeof(ROW[0]); r++) {
-			unsigned k;
-
-			/* An all-zero row is the null row, which has no type. */
-			for (k = 0; k < EM_ROW_BYTES && !ROW[r].row[k]; k++) {
-			}
-			if (k < EM_ROW_BYTES
-			    && !!(ROW[r].row[0] & 0x80) != ROW[r].type) {
-				fail("%s is not a type %u row (byte 0 %#04x)",
-				     ROW[r].name, ROW[r].type,
-				     ROW[r].row[0]);
+			if (memcmp(ROW[r].row, &em_msg_05[0x2C], EM_ROW_BYTES)) {
+				fail("%s differs from message 0x05's", ROW[r].name);
 			}
 		}
 	}
@@ -2071,6 +2066,17 @@ int main(void)
 		if (em_msg_05[0x1D] != 0xFF) {
 			fail("the coarse distance is not at pl[23]");
 		}
+		/* 0x28 / 0x35 pl[0..3] repeat 0x05 pl[20..23], pl[2] zero. */
+		em_set_subject_distance(0x0181, 0xE0, 0x00);
+		if (em_msg_28[0x06] != 0x81 || em_msg_28[0x07] != 0x01
+		    || em_msg_28[0x08] != 0x00 || em_msg_28[0x09] != 0xE0) {
+			fail("0x28 pl[0..3] does not follow the subject distance");
+		}
+		if (em_msg_35[0x06] != 0x81 || em_msg_35[0x07] != 0x01
+		    || em_msg_35[0x08] != 0x00 || em_msg_35[0x09] != 0xE0) {
+			fail("0x35 pl[0..3] does not follow the subject distance");
+		}
+		em_set_subject_distance(0x0700, 0xFF, 0x00);
 
 		/* pl[22]: bit 7 always set on a lens that reports motion, bit 6
 		 * only while something is moving.  Setting bit 6 must not
