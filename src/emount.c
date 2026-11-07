@@ -263,6 +263,7 @@ volatile uint16_t em_frame_period_ms = EM_FRAME_PERIOD_DEFAULT;
 volatile uint16_t em_frame_period_n;
 static volatile uint32_t g_t_prev_vd;
 static volatile uint32_t g_t_vd_us;    /* micros() at the last frame sync */
+static volatile uint32_t g_t_vd_prev_us;  /* ... and at the one before */
 volatile uint32_t em_id_mask_lo;
 volatile uint32_t em_id_mask_hi;
 volatile uint8_t  em_id_log[EM_ID_LOG_LEN];
@@ -1221,7 +1222,8 @@ static void on_vd_edge(void)
 {
 	uint32_t now = millis();
 
-	g_t_vd_us = micros();
+	g_t_vd_prev_us = g_t_vd_us;
+	g_t_vd_us      = micros();
 	em_vd_edges++;
 	g_motor_vd = g_motor;
 	if (!em_t_first_vd) {
@@ -1280,12 +1282,19 @@ void em_set_motor(int8_t dir)
  * writer (FUN_080160a4) sends pl[32+k] = L[k+1] - L[k+2], k = 0..6 -- OLDER
  * minus newer, one eighth of a frame each.
  *
- * Here the samples are taken from the caller's loop, which reads the encoder
- * anyway, at the first call past each eighth: within one loop iteration of
- * the instant Yongnuo samples at. */
+ * Here there is no timer: the encoder is read by the caller's loop, which
+ * reads it anyway, and every reading goes into a time-stamped ring.  When a
+ * frame sync has gone by, L[1..8] are INTERPOLATED out of the ring at the
+ * exact instants -- the previous sync plus k eighths of the measured interval
+ * between the two syncs, L[8] at the sync itself -- so neither a late loop
+ * iteration nor a blocking step that skipped some eighths moves them.  The
+ * body expects the frame-sync instant (msg_0x06.md): it files these points by
+ * frame and lines them up with the exposure. */
+static uint16_t g_pos_now;        /* last reported position */
+static uint16_t g_pos_target;     /* where the running move is going */
+static uint8_t  g_pos_set;        /* a position has been reported */
 #define SUB_N 8
-static uint16_t g_sub[SUB_N + 1];
-static uint8_t  g_sub_idx;        /* next slot to fill, 1..SUB_N-1 */
+static uint16_t g_sub[SUB_N + 1];   /* L[8] in [0] once latched, L[1..8] */
 static uint8_t  g_sub_valid;      /* g_sub[0] holds a real latch */
 static uint32_t g_sub_vd;         /* em_vd_edges at that latch */
 static int16_t  g_frame_disp;     /* L[0] minus the previous L[0], per frame */
@@ -1304,6 +1313,110 @@ void em_set_forecast_model(uint32_t v_cap_ups, uint32_t v_sat_ups,
 	g_fc_tau_ms = tau_ms ? tau_ms : 1u;
 }
 
+/* THE RING.  One entry per encoder reading, (micros, position), newest at
+ * g_ring_head - 1.  A reading closer than POS_RING_MIN_US to the entry before
+ * the newest... more exactly: while the newest entry is closer than that to
+ * the one before it, each new reading overwrites it.  So however fast the
+ * loop reads, all neighbours but the newest are >= 0.625 ms apart and 64
+ * entries span >= 39 ms -- past the longest frame latch_frame accepts (37.5 ms).  The first
+ * reading after a frame sync is always added, so the sync has a reading on
+ * each side.  A reading more than POS_RING_STALE_US after the newest clears
+ * the ring first: entries that old say nothing about now, and past 2^31 us
+ * the signed time comparisons would misread them.  64 is a power of two, so
+ * indexing is a mask -- a Cortex-M0+ divides in software. */
+#define POS_RING_N        64u
+#define POS_RING_MASK     (POS_RING_N - 1u)
+#define POS_RING_MIN_US   625u
+#define POS_RING_STALE_US 1000000u
+#define POS_EXTRAP_US     2000u    /* how far past the newest reading to project */
+static uint32_t g_ring_t[POS_RING_N];
+static uint16_t g_ring_p[POS_RING_N];
+static uint8_t  g_ring_head;      /* next slot to write */
+static uint8_t  g_ring_n;         /* entries held, 0..POS_RING_N */
+static uint32_t g_ring_vd;        /* em_vd_edges when the newest was written */
+
+static uint8_t ring_idx(uint8_t back)   /* back = 0: the newest; back < g_ring_n */
+{
+	return (uint8_t)((g_ring_head - 1u - back) & POS_RING_MASK);
+}
+
+static void ring_push(uint16_t p)
+{
+	uint32_t t  = micros();
+	uint32_t vd = em_vd_edges;
+
+	if (g_ring_n && t - g_ring_t[ring_idx(0)] > POS_RING_STALE_US) {
+		g_ring_n = 0;
+	}
+	/* The newest entry is provisional while it is still within
+	 * POS_RING_MIN_US of the one before it: overwrite it.  So every pair of
+	 * neighbours but the newest is >= POS_RING_MIN_US apart. */
+	if (g_ring_n >= 2 && vd == g_ring_vd
+	    && g_ring_t[ring_idx(0)] - g_ring_t[ring_idx(1)] < POS_RING_MIN_US) {
+		g_ring_t[ring_idx(0)] = t;          /* replace the newest */
+		g_ring_p[ring_idx(0)] = p;
+		return;
+	}
+	g_ring_t[g_ring_head] = t;
+	g_ring_p[g_ring_head] = p;
+	g_ring_head = (uint8_t)((g_ring_head + 1u) & POS_RING_MASK);
+	if (g_ring_n < POS_RING_N) {
+		g_ring_n++;
+	}
+	g_ring_vd = vd;
+}
+
+/* The position at instant `at`, given b: the newest entry at or before `at`
+ * (b = 0: `at` is at or past the newest reading; b = g_ring_n: older than
+ * every reading).  Between two readings: linear, rounded to nearest.  Older
+ * than the ring: its oldest reading.  Past the newest: projected along the
+ * last two readings for up to POS_EXTRAP_US, else held. */
+static int32_t ring_interp(uint8_t b, uint32_t at)
+{
+	uint8_t i, j;
+	int32_t span, into, d;
+
+	if (b >= g_ring_n) {
+		return g_ring_p[ring_idx((uint8_t)(g_ring_n - 1u))];
+	}
+	i = ring_idx(b);
+	if (b == 0) {
+		uint32_t past = at - g_ring_t[i];
+
+		if (past == 0 || g_ring_n < 2 || past > POS_EXTRAP_US) {
+			return g_ring_p[i];
+		}
+		j = ring_idx(1);
+		span = (int32_t)(g_ring_t[i] - g_ring_t[j]);
+		if (span <= 0) {
+			return g_ring_p[i];
+		}
+		return (int32_t)g_ring_p[i]
+		       + ((int32_t)g_ring_p[i] - (int32_t)g_ring_p[j])
+		         * (int32_t)past / span;
+	}
+	j    = ring_idx((uint8_t)(b - 1u));     /* the next newer reading */
+	span = (int32_t)(g_ring_t[j] - g_ring_t[i]);
+	into = (int32_t)(at - g_ring_t[i]);
+	d    = (int32_t)g_ring_p[j] - (int32_t)g_ring_p[i];
+	if (span <= 0) {
+		return g_ring_p[j];
+	}
+	return (int32_t)g_ring_p[i]
+	       + (d * into + (d >= 0 ? span / 2 : -span / 2)) / span;
+}
+
+/* Step b back from where it is to the newest entry at or before `at`.  Called
+ * with instants in DESCENDING order, so one walk of the ring serves all nine
+ * points of a frame. */
+static uint8_t ring_seek(uint8_t b, uint32_t at)
+{
+	while (b < g_ring_n && (int32_t)(g_ring_t[ring_idx(b)] - at) > 0) {
+		b++;
+	}
+	return b;
+}
+
 static uint8_t sat8(int32_t v)
 {
 	if (v > 127) {
@@ -1314,60 +1427,86 @@ static uint8_t sat8(int32_t v)
 	return (uint8_t)(int8_t)v;
 }
 
+/* A frame sync has gone by: interpolate L[1..8] for the frame that ended at
+ * it, and derive the trace, the frame's displacement and the speed at the
+ * sync from them. */
+static void latch_frame(void)
+{
+	uint8_t *h = &em_msg_06[EM06_VEL_HIST];
+	uint32_t t_now, t_prev, span, vd;
+	int32_t  L[SUB_N + 1];
+	uint8_t  k, b;
+	int      span_ok, latch_ok, trace_ok;
+
+	__disable_irq();
+	vd     = em_vd_edges;
+	t_now  = g_t_vd_us;
+	t_prev = g_t_vd_prev_us;
+	__enable_irq();
+
+	span    = t_now - t_prev;
+	span_ok = span >= EM_FRAME_PERIOD_MIN * 1000u * 3u / 4u
+	          && span <= EM_FRAME_PERIOD_MAX * 1000u * 5u / 4u;
+	/* A latch is real only with readings to take it from and a sync that
+	 * was timed: the handshake counts syncs by polling, untimed. */
+	latch_ok = g_ring_n != 0 && t_now != 0;
+	trace_ok = latch_ok && span_ok && g_sub_valid;
+
+	if (g_ring_n == 0) {
+		for (k = 1; k <= SUB_N; k++) {
+			L[k] = g_pos_now;
+		}
+	} else {
+		b        = ring_seek(0, t_now);
+		L[SUB_N] = clamp_travel(ring_interp(b, t_now));
+		for (k = SUB_N - 1; k >= 1; k--) {
+			uint32_t at = t_prev + span * k / SUB_N;
+
+			if (!span_ok) {
+				L[k] = L[SUB_N];
+				continue;
+			}
+			b    = ring_seek(b, at);
+			L[k] = clamp_travel(ring_interp(b, at));
+		}
+	}
+	for (k = 0; k < EM06_VEL_HIST_N; k++) {
+		h[k] = trace_ok ? sat8(L[k + 1] - L[k + 2]) : 0u;
+	}
+	/* The last frame's displacement -- per frame, if syncs went by
+	 * unlatched. */
+	g_frame_disp = latch_ok && g_sub_valid
+	               ? (int16_t)((L[SUB_N] - (int32_t)g_sub[0])
+	                           / (int32_t)(vd - g_sub_vd))
+	               : 0;
+	/* The speed at the sync, for the forecast: the last eighth's average,
+	 * raised by the half-eighth of full-duty acceleration it lags behind --
+	 * so it is not below the real speed. */
+	{
+		int32_t eighth_us = span_ok ? (int32_t)(span / SUB_N) : 0;
+		int32_t dv = trace_ok ? L[SUB_N] - L[SUB_N - 1] : 0;
+		int32_t v  = eighth_us > 0 ? dv * 256000 / eighth_us : 0;
+		int32_t a  = (int32_t)g_fc_sat_q8 - (v < 0 ? -v : v);
+		int32_t up = a > 0 && eighth_us > 0
+		             ? a * eighth_us / (2000 * (int32_t)g_fc_tau_ms) : 0;
+
+		g_v0_q8 = v > 0 ? v + up : v < 0 ? v - up : 0;
+	}
+	for (k = 1; k <= SUB_N; k++) {
+		g_sub[k] = (uint16_t)L[k];
+	}
+	g_sub[0]    = (uint16_t)L[SUB_N];
+	g_sub_valid = (uint8_t)latch_ok;
+	g_sub_vd    = vd;
+}
+
+/* Every encoder reading the caller makes, into the ring; the first one after
+ * a frame sync also latches that frame. */
 void em_sample_position(int32_t pos)
 {
-	uint32_t vd = em_vd_edges;
-	uint16_t p  = clamp_travel(pos);
-
-	if (vd != g_sub_vd) {
-		uint8_t *h = &em_msg_06[EM06_VEL_HIST];
-		uint8_t  k;
-
-		/* A frame whose eighths were not all reached (a blocking step
-		 * in between) has its missing ones read as where it ended. */
-		while (g_sub_idx < SUB_N) {
-			g_sub[g_sub_idx++] = p;
-		}
-		g_sub[SUB_N] = p;
-		for (k = 0; k < EM06_VEL_HIST_N; k++) {
-			h[k] = g_sub_valid
-			       ? sat8((int32_t)g_sub[k + 1] - (int32_t)g_sub[k + 2])
-			       : 0u;
-		}
-		/* The last frame's displacement, for pl[2..3]'s forecast -- per
-		 * frame, if syncs went by unlatched. */
-		g_frame_disp = g_sub_valid
-		               ? (int16_t)(((int32_t)p - (int32_t)g_sub[0])
-		                           / (int32_t)(vd - g_sub_vd))
-		               : 0;
-		/* The speed at the latch, for the forecast: the last eighth's
-		 * average, raised by the half-eighth of full-duty acceleration
-		 * it lags behind -- so it is not below the real speed. */
-		{
-			int32_t  eighth_us = (int32_t)em_frame_period_ms * 1000 / SUB_N;
-			int32_t  dv = g_sub_valid && eighth_us > 0
-			              ? (int32_t)p - (int32_t)g_sub[SUB_N - 1] : 0;
-			int32_t  v  = eighth_us > 0 ? dv * 256000 / eighth_us : 0;
-			int32_t  a  = (int32_t)g_fc_sat_q8 - (v < 0 ? -v : v);
-			int32_t  up = a > 0 ? a * eighth_us
-			                      / (2000 * (int32_t)g_fc_tau_ms) : 0;
-
-			g_v0_q8 = v > 0 ? v + up : v < 0 ? v - up : 0;
-		}
-		g_sub[0]    = p;
-		g_sub_idx   = 1;
-		g_sub_valid = 1;
-		g_sub_vd    = vd;
-		return;
-	}
-
-	if (g_sub_idx < SUB_N && em_frame_period_ms) {
-		uint32_t due = (uint32_t)g_sub_idx * em_frame_period_ms
-		               * 1000u / SUB_N;
-
-		if ((uint32_t)(micros() - g_t_vd_us) >= due) {
-			g_sub[g_sub_idx++] = p;
-		}
+	ring_push(clamp_travel(pos));
+	if (g_sub_vd != em_vd_edges) {
+		latch_frame();
 	}
 }
 
@@ -1396,14 +1535,12 @@ void em_set_in_motion(uint8_t moving)
 	em_msg_05[EM05_FLAGS] = v;
 }
 
-static uint16_t g_pos_now;        /* last reported position */
-static uint16_t g_pos_target;     /* where the running move is going */
-static uint8_t  g_pos_set;        /* a position has been reported */
 static uint16_t g_pos_rest;       /* pl[2..3] while at rest, taken once */
 static uint8_t  g_pos_rest_held;  /* g_pos_rest has been taken */
 
 void em_set_focus_position(int32_t pos, int32_t target)
 {
+	ring_push(clamp_travel(pos));
 	g_pos_now    = clamp_travel(pos);
 	g_pos_target = clamp_travel(target);
 	g_pos_set    = 1;
@@ -1491,10 +1628,10 @@ static void status06_focus(void)
 	if (!g_pos_set) {
 		return;
 	}
-	/* A frame sync that came after the loop's last position report: latch
-	 * that report, read moments before the edge. */
+	/* A frame sync with no reading after it yet: latch now, projecting the
+	 * last readings a little past the edge (ring_interp). */
 	if (g_sub_vd != em_vd_edges) {
-		em_sample_position(g_pos_now);
+		latch_frame();
 	}
 	put16(em_msg_06, EM06_POS_B, g_sub[0]);
 	{

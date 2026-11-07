@@ -27,6 +27,7 @@ extern const int *host_cs_seq;
 extern unsigned   host_cs_seq_n, host_cs_seq_i;
 extern int      host_pad_to;
 extern uint32_t host_millis;
+extern uint32_t host_us;
 void host_body_frame(const uint8_t *frame, uint16_t len);
 void host_frame_sync(void);
 int  host_cs_released(void);
@@ -1800,11 +1801,12 @@ int main(void)
 		host_frame_sync();
 		em_sample_position(4800 + 2 * 60);
 
-		/* Eighths of 20 ms fall at 2.5 ms steps, taken on the first
-		 * millisecond past each: 3 5 8 10 13 15 18, then 20 at the sync.
-		 * Older minus newer, so a move up reads negative. */
+		/* Eighths of 20 ms fall at 2.5 ms steps, interpolated out of the
+		 * millisecond readings at exactly those instants: 5 units each,
+		 * L[1] at 2.5 ms .. L[8] at the sync.  Older minus newer, so a
+		 * move up reads negative. */
 		{
-			static const int8_t want[7] = { -4, -6, -4, -6, -4, -6, -4 };
+			static const int8_t want[7] = { -5, -5, -5, -5, -5, -5, -5 };
 
 			for (k = 0; k < 7; k++) {
 				sum += (int8_t)h[k];
@@ -1814,8 +1816,180 @@ int main(void)
 				}
 			}
 		}
-		if (sum != -34) {
-			fail("the trace sums to %d, not -34 (L[1]..L[8])", sum);
+		if (sum != -35) {
+			fail("the trace sums to %d, not -35 (L[1]..L[8])", sum);
+		}
+		{
+			int before = sent_n;
+
+			em_poll();
+			if (sent_n > before + 1
+			    && (sent[before + 1][0x1A] | (sent[before + 1][0x1B] << 8))
+			       != 4800 + 2 * 60) {
+				fail("pl[20..21] is not the position at the sync");
+			}
+		}
+
+		/* A blocking step: no reading from 4 to 16 ms.  The eighths in
+		 * the gap are interpolated across it, not piled up at its end. */
+		base = host_millis;
+		for (t = 0; t < 20; t++) {
+			if (t > 4 && t < 16) {
+				continue;
+			}
+			host_millis = base + t;
+			em_sample_position(4920 + 2 * (int)t);
+		}
+		host_millis = base + 20;
+		host_frame_sync();
+		em_sample_position(4920 + 40);
+		for (k = 0; k < 7; k++) {
+			if ((int8_t)h[k] != -5) {
+				fail("across a gap pl[%u] = %d, want -5", 32 + k,
+				     (int8_t)h[k]);
+			}
+		}
+
+		/* The first reading after the sync comes 3 ms late: the latch is
+		 * still the position AT the sync, not 3 ms of travel past it. */
+		base = host_millis;
+		for (t = 0; t < 20; t++) {
+			host_millis = base + t;
+			em_sample_position(4960 + 2 * (int)t);
+		}
+		host_millis = base + 20;
+		host_frame_sync();
+		host_millis = base + 23;
+		em_sample_position(4960 + 2 * 23);
+		{
+			int before = sent_n;
+
+			em_poll();
+			if (sent_n > before + 1) {
+				const uint8_t *g = sent[before + 1];
+				unsigned at = g[0x1A] | (g[0x1B] << 8);
+
+				if (at != 4960 + 40) {
+					fail("a late reading latched %u, want %u at the sync",
+					     at, 4960 + 40);
+				}
+			} else {
+				fail("no 0x06 after the late reading");
+			}
+		}
+		for (k = 0; k < 7; k++) {
+			if ((int8_t)h[k] != -5) {
+				fail("with a late reading pl[%u] = %d, want -5",
+				     32 + k, (int8_t)h[k]);
+			}
+		}
+
+		/* No reading after the sync before 0x06 goes out: the last two
+		 * readings are projected to it (1 ms past the newest, +2). */
+		base = host_millis;
+		for (t = 0; t < 19; t++) {
+			host_millis = base + t;
+			em_sample_position(5006 + 2 * (int)t);
+		}
+		host_millis = base + 19;
+		host_frame_sync();
+		{
+			int before = sent_n;
+
+			em_set_motor(1);
+			em_poll();
+			em_set_motor(0);
+			if (sent_n > before + 1) {
+				const uint8_t *g = sent[before + 1];
+				unsigned at = g[0x1A] | (g[0x1B] << 8);
+
+				if (at != 5006 + 2 * 19) {
+					fail("projected latch %u, want %u", at,
+					     5006 + 2 * 19);
+				}
+			} else {
+				fail("no 0x06 for the projected latch");
+			}
+		}
+
+		/* Reading every 0.1 ms through a 30 ms frame, the longest one:
+		 * readings closer than 0.625 ms overwrite the newest entry instead
+		 * of flushing the ring, so the whole frame is still there.  2
+		 * units/ms in 1-unit steps, so 7.5 per eighth: each step -7 or -8,
+		 * L[1] at 3.75 ms, 52 or 53 units below L[8].  A flushed ring would
+		 * hold only the last few ms and flatten the early eighths. */
+		{
+			unsigned us;
+			int sum30 = 0;
+
+			base = host_millis;
+			host_frame_sync();
+			for (us = 0; us < 30000; us += 100) {
+				host_millis = base + us / 1000;
+				host_us     = us % 1000;
+				em_sample_position(5100 + (int)(us / 500));
+			}
+			host_millis = base + 30;
+			host_us     = 0;
+			host_frame_sync();
+			em_sample_position(5100 + 60);
+			for (k = 0; k < 7; k++) {
+				sum30 += (int8_t)h[k];
+				if ((int8_t)h[k] < -8 || (int8_t)h[k] > -7) {
+					fail("reading every 0.1 ms pl[%u] = %d, want -7/-8",
+					     32 + k, (int8_t)h[k]);
+				}
+			}
+			if (sum30 < -53 || sum30 > -52) {
+				fail("reading every 0.1 ms the trace sums to %d", sum30);
+			}
+		}
+
+		/* Two seconds with no reading, and the lens has moved meanwhile.
+		 * Readings resume halfway through a frame: the eighths before
+		 * them must not reach back two seconds to the old position --
+		 * the stale ring is dropped, and the trace is flat. */
+		host_millis += 2000;
+		host_frame_sync();
+		base = host_millis;
+		for (t = 10; t < 20; t++) {
+			host_millis = base + t;
+			em_sample_position(5300);
+		}
+		host_millis = base + 20;
+		host_frame_sync();
+		em_sample_position(5300);
+		for (k = 0; k < 7; k++) {
+			if (h[k] != 0) {
+				fail("after a stale ring pl[%u] = %d, want 0", 32 + k,
+				     (int8_t)h[k]);
+			}
+		}
+
+		/* A frame across the 32-bit wrap of micros(). */
+		host_millis = 4294967u - 30u;
+		host_frame_sync();
+		em_sample_position(5000);
+		base = host_millis;
+		for (t = 0; t < 20; t++) {
+			host_millis = base + t;
+			em_sample_position(5000 + 2 * (int)t);
+		}
+		host_millis = base + 20;
+		host_frame_sync();
+		base = host_millis;
+		for (t = 0; t < 20; t++) {
+			host_millis = base + t;
+			em_sample_position(5040 + 2 * (int)t);
+		}
+		host_millis = base + 20;
+		host_frame_sync();
+		em_sample_position(5080);
+		for (k = 0; k < 7; k++) {
+			if ((int8_t)h[k] != -5) {
+				fail("across the micros() wrap pl[%u] = %d, want -5",
+				     32 + k, (int8_t)h[k]);
+			}
 		}
 
 		/* At rest it is all zero again one frame later. */
