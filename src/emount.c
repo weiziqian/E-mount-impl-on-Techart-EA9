@@ -216,6 +216,7 @@ volatile uint16_t em_stop_n;
 volatile uint16_t em_rec_n[EM_REC_SLOT_N];
 volatile uint16_t em_rec_unknown;
 volatile uint16_t em_move_mode_n[8];
+volatile uint16_t em_move34_n;
 volatile uint16_t em_scan_unit_n[2];
 volatile uint16_t em_aperture_req;
 volatile uint16_t em_m03_aperture;
@@ -308,6 +309,66 @@ static volatile uint8_t  g_reply_seq;
  * interrupt.  32 covers the longest of them, the 25-byte 0x0A. */
 #define EM_REQ_SNAP 32
 static volatile uint8_t  g_req[EM_REQ_SNAP];
+
+static uint16_t clamp_travel(int32_t pos);
+static void focus_cmd_set(const struct em_focus_cmd *c);
+static void count16(volatile uint16_t *n);
+static uint16_t g_pos_now;        /* last reported position */
+
+/* MESSAGE 0x34: move to a position within a time limit (msg_0x34.md), as
+ * Yongnuo 50 DF does it (FUN_0801620c).  The body sends it from its release
+ * sequence, as a frame of its own:
+ *
+ *   pl[0..1]  target, position units
+ *   pl[3]     bits 0-1 mode; other bits flags
+ *   pl[4]     milliseconds to the body's deadline
+ *
+ * A target inside the travel is a position whatever the mode.  The move is
+ * capped at what fits the time: Yongnuo takes pl[4] less 13 ms when it is
+ * above 13, at 18 units per millisecond -- some three quarters of its top
+ * speed.  Here the rate is set by the caller from this mechanism's cruise
+ * speed (em_set_move34_speed).  A target outside the travel under a non-zero
+ * mode is a distance code or a table value that Yongnuo converts; this does
+ * not, and stays where it is.  The body's no-target 0x7FFF never moves it.
+ * The move is SILENT: the reply is its answer, so no 1D event follows.
+ *
+ * Returns the position the lens is now going to -- the reply's pl[1..2]. */
+static uint32_t g_move34_ups = 4687u;   /* 0.75 x 25 counts/ms, in units/s */
+
+void em_set_move34_speed(uint32_t ups)
+{
+	g_move34_ups = ups;
+}
+
+static uint16_t timed_move34(void)
+{
+	uint16_t t    = (uint16_t)g_req[6] | ((uint16_t)g_req[7] << 8);
+	uint8_t  mode = g_req[9];
+	uint32_t ms   = g_req[10] > 13u ? g_req[10] - 13u : g_req[10];
+	int32_t  here = g_pos_now;
+	int32_t  step = (int32_t)(g_move34_ups * ms / 1000u);
+	int32_t  to;
+	struct em_focus_cmd c = { 0 };
+
+	if (t == EM_NO_TARGET
+	    || ((mode & 0x07u) && clamp_travel(t) != t)) {
+		return (uint16_t)here;
+	}
+	to = clamp_travel(t);
+	if (to - here > step) {
+		to = here + step;
+	} else if (here - to > step) {
+		to = here - step;
+	}
+	if (to != here) {
+		c.op     = EM_OP_MOVE;
+		c.target = (uint16_t)to;
+		c.silent = 1;
+		focus_cmd_set(&c);
+	}
+	count16(&em_move34_n);
+	return (uint16_t)to;
+}
 
 static const struct ea9_packet *find_packet(uint8_t id)
 {
@@ -521,11 +582,14 @@ static void em_send_id(uint8_t id)
 	}
 	frame = p->frame;
 
-	/* The one reply with request-dependent content: message 0x34 echoes
-	 * the request's pl[0..1] into its own pl[1..2]. */
+	/* The one reply with request-dependent content: message 0x34, the
+	 * timed move, answers with where the lens is now going. */
 	if (id == 0x34u) {
-		frame[7] = g_req[6];
-		frame[8] = g_req[7];
+		uint16_t to = timed_move34();
+
+		frame[6] = 0x00u;
+		frame[7] = (uint8_t)to;
+		frame[8] = (uint8_t)(to >> 8);
 	}
 
 	/* Message 0x0C: the template answers 01, and the switch to 1.5 Mbaud
@@ -1290,7 +1354,6 @@ void em_set_motor(int8_t dir)
  * iteration nor a blocking step that skipped some eighths moves them.  The
  * body expects the frame-sync instant (msg_0x06.md): it files these points by
  * frame and lines them up with the exposure. */
-static uint16_t g_pos_now;        /* last reported position */
 static uint16_t g_pos_target;     /* where the running move is going */
 static uint8_t  g_pos_set;        /* a position has been reported */
 #define SUB_N 8

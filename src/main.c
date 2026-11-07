@@ -1579,7 +1579,8 @@ static void focus_exec(const struct em_focus_cmd *c)
 		if (g_abort_by_stop) {
 			em_post_event(EM_REC_STOP, 0x01u);
 		}
-	} else {
+	} else if (!c->silent) {
+		/* A 0x34 move is answered by its own reply, not by 1D 00. */
 		em_post_event(EM_REC_MOVE, 0x00u);
 	}
 }
@@ -1680,6 +1681,10 @@ int main(void)
 	em_set_powerdown_handler(powerdown_signal);
 
 	em_init();
+	/* Message 0x34's timed moves: planned at three quarters of a normal
+	 * move's cruise speed, as Yongnuo plans at ~3/4 of its top speed. */
+	em_set_move34_speed((uint32_t)STOCK.v_cruise * 3u / 4u
+	                    / FOCUS_COUNTS_PER_UNIT);
 	/* The nearest distance the full extension reaches, at the declared
 	 * focal length -- the same model as the subject distance. */
 	em_set_min_focus(focus_distance_code(FOCUS_TRAVEL_COUNTS, em_focal_mm10));

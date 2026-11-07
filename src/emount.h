@@ -135,6 +135,11 @@ void em_set_focus_position(int32_t pos, int32_t target);
 void em_set_forecast_model(uint32_t v_cap_ups, uint32_t v_sat_ups,
                            uint16_t tau_ms);
 
+/* Message 0x34, the timed move: how far a move may be planned per
+ * millisecond of the body's time limit, in protocol units per second
+ * (emount.c, timed_move34). */
+void em_set_move34_speed(uint32_t ups);
+
 /* The focus motor, for message 0x06 payload[0..1]: 0 idle, +1 running toward
  * higher positions, -1 toward lower. */
 void em_set_motor(int8_t dir);
@@ -526,6 +531,9 @@ struct em_focus_cmd {
 
 	int16_t  drive_vel;     /* Drive: signed velocity                      */
 	uint8_t  drive_param;   /* Drive: rec[1], echoed in the event          */
+
+	uint8_t  silent;        /* MOVE: no completion event -- a message 0x34
+	                         * move, answered by its own reply             */
 };
 
 /* Consume the pending instruction.  Returns 0 if none is pending. */
@@ -558,6 +566,8 @@ extern volatile uint16_t em_row_req_n;
  * code -- [0] position units, [1] defocus units (bit 7 set). */
 extern volatile uint16_t em_move_mode_n[8];
 extern volatile uint16_t em_scan_unit_n[2];
+/* Message 0x34 timed moves answered. */
+extern volatile uint16_t em_move34_n;
 #define EM_REC_SLOT_STOP    0u
 #define EM_REC_SLOT_MOVE    1u
 #define EM_REC_SLOT_SCAN    2u

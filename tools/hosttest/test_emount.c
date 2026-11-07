@@ -383,20 +383,72 @@ int main(void)
 		}
 	}
 
-	/* --- message 0x34 echoes the request's pl[0..1] into pl[1..2] ---- */
+	/* --- message 0x34: the timed move ---------------------------------
+	 * A 32-byte frame of its own: pl[0..1] target, pl[3] mode, pl[4] ms to
+	 * the deadline.  Reply pl[0] 00, pl[1..2] where the lens now goes; the
+	 * move is capped at 4687 units/s x (ms - 13), and it is SILENT. */
 	{
-		int idx = request(0x34, 0x20, 0x5A, 0xC3);
+		struct {
+			uint16_t t; uint8_t mode, ms; uint16_t want; int moves;
+		} cs[] = {
+			{ 5050, 0, 40, 5050, 1 },   /* 27 ms -> 126 units: reached   */
+			{ 5600, 0, 40, 5126, 1 },   /* far: capped at +126            */
+			{ 4500, 0, 10, 4954, 1 },   /* 10 ms (not > 13) -> 46 units   */
+			{ 0x7FFF, 0, 40, 5000, 0 }, /* no target: stays               */
+			{ 0x0700, 3, 40, 5000, 0 }, /* mode 3 outside travel: stays   */
+			{ 5040, 3, 40, 5040, 1 },   /* mode 3 inside travel: position */
+			{ 5000, 0, 40, 5000, 0 },   /* already there                  */
+		};
+		unsigned k;
 
-		if (idx < 0) {
-			fail("no 0x34 reply");
-		} else {
-			if (sent[idx][6] != 0x00 || sent[idx][7] != 0x5A
-			    || sent[idx][8] != 0xC3) {
-				fail("0x34 reply pl[0..2] = %02x %02x %02x, "
-				     "want 00 5a c3", sent[idx][6],
-				     sent[idx][7], sent[idx][8]);
+		for (k = 0; k < sizeof(cs) / sizeof(cs[0]); k++) {
+			uint8_t f[32];
+			uint16_t sum = 0, i;
+			int before;
+			struct em_focus_cmd cmd;
+
+			(void)em_take_focus_cmd(&cmd);      /* nothing pending */
+			em_set_focus_position(5000, 5000);
+			memset(f, 0, sizeof(f));
+			f[0] = 0xF0; f[1] = 32; f[3] = 0x02; f[4] = (uint8_t)(0x60 + k);
+			f[5] = 0x34;
+			f[6] = (uint8_t)cs[k].t; f[7] = (uint8_t)(cs[k].t >> 8);
+			f[9] = cs[k].mode; f[10] = cs[k].ms;
+			for (i = 1; i <= 32 - 4; i++) {
+				sum += f[i];
 			}
-			check_frame(idx, 0x34, "echo");
+			f[29] = (uint8_t)sum; f[30] = (uint8_t)(sum >> 8); f[31] = 0x55;
+			before = sent_n;
+			host_body_frame(f, 32);
+			em_poll();
+			if (sent_n != before + 1 || sent_len[before] != 32) {
+				fail("0x34 case %u: no 32-byte reply", k);
+				continue;
+			}
+			check_frame(before, 0x34, "0x34");
+			if (sent[before][6] != 0x00
+			    || (sent[before][7] | (sent[before][8] << 8)) != cs[k].want) {
+				fail("0x34 case %u: reply %02x %u, want 00 %u", k,
+				     sent[before][6],
+				     sent[before][7] | (sent[before][8] << 8),
+				     cs[k].want);
+			}
+			for (i = 9; i < 29; i++) {
+				if (sent[before][i] != 0) {
+					fail("0x34 case %u: reply byte %u is %02x", k, i,
+					     sent[before][i]);
+					break;
+				}
+			}
+			if (em_take_focus_cmd(&cmd) != (uint8_t)cs[k].moves) {
+				fail("0x34 case %u: move %s", k,
+				     cs[k].moves ? "missing" : "queued");
+			} else if (cs[k].moves
+			           && (cmd.op != EM_OP_MOVE || cmd.target != cs[k].want
+			               || !cmd.silent)) {
+				fail("0x34 case %u: op %u target %u silent %u", k,
+				     cmd.op, cmd.target, cmd.silent);
+			}
 		}
 	}
 
@@ -413,7 +465,7 @@ int main(void)
 	 * declared without one stalls the handshake there.  These had none
 	 * and were withdrawn; they must not come back by accident. */
 	{
-		static const uint8_t gone[] = { 0x17, 0x1E, 0x29, 0x2A, 0x2B };
+		static const uint8_t gone[] = { 0x17, 0x1E, 0x29, 0x2A, 0x2B, 0x34 };
 		unsigned k;
 
 		for (k = 0; k < sizeof(gone); k++) {
