@@ -460,7 +460,6 @@ static uint8_t  g_homing;
  * in 60 ms, a speed never measured. */
 #define PARK_ATTEMPTS 2
 static unsigned g_park_n;
-static uint32_t g_pa23_at;
 
 static uint32_t g_boot;
 static uint32_t g_flash_boots;
@@ -482,8 +481,8 @@ static void build_marker_page(uint32_t page)
 	w[1] = EM_DIAG_FORMAT;
 	w[2] = 0x30595244u;           /* "DRY0" -- coils live */
 	w[3] = 0;
-	w[4] = 3;
-	w[5] = 0x46464F42u;           /* "BOFF" -- the full stock shutdown */
+	w[4] = 6;
+	w[5] = 0x41505442u;           /* "BTPA" -- bus off, TX low, PA23; no VD wait */
 	diag_page(page, w, 16);
 }
 
@@ -731,7 +730,7 @@ static void motor_home(void)
  * acknowledgement goes out (emount.c).  The stock does the same thing with its
  * own stored park position.
  *
- * Bounded on purpose.  The body is waiting for the echo, so this gets one
+ * Bounded on purpose.  The body is waiting for the acknowledgement, so this gets one
  * attempt at a short timeout and whatever happens, happens -- emount.c sends
  * the acknowledgement regardless.  A lens left mid-travel is a much smaller
  * problem than a camera that will not switch off.
@@ -764,73 +763,49 @@ static const struct servo_cfg PARK = {
 	.pump       = pump,
 };
 
-/* The tail of the stock shutdown (EA9.md a measurement run), after the acknowledgement.
+/* After the 0x16 acknowledgement: what the body is waiting for.
  *
- * WHY PA23 IS NOW REPLICATED.  I left it out before as "unexplained", and the
- * shutdown still hung.  What is now known: the body does send message 0x16, we
- * do acknowledge it, we do park, and the body still keeps the adapter powered
- * for more than 4 s afterwards without saying anything.  It is waiting for
- * something, and PA23 is the only thing left in the stock sequence that a body
- * could possibly observe -- the other two steps (disabling our own UART, going
- * to sleep) are internal.
+ * The A7 IV, once it has the reply, cuts the motor supply, switches its own
+ * UART off and polls RXD every 5 ms until it reads low, for up to ~30 s
+ * (msg_0x16.md).  RXD is our TX.  So: switch our UART off, take PA00 away
+ * from the SERCOM and drive it low.  Shown on the a9 II to release the body
+ * as fast as the stock's PA23 does (NOTES.md §120).
  *
- * atmel_start_init makes PA23 an output driven LOW and the stock drives it HIGH
- * here, which is the shape of a signal, not of a mode pin.  It doubles as the
- * bootloader's stay-in-bootloader input before the app configures it, which is
- * why it looked ambiguous; on the app side it is unambiguously an output.
+ * PA23 high is STILL needed (§122).  Without it the power-off itself is
+ * just as fast, but a power-on that follows before the body has finished
+ * shutting down is noticeably slower.  What PA23 drives on this board is
+ * not known.
  *
- * NOT reproduced: disabling the UART, and the halt.
- *
- * The UART disable was tried and reverted on the user's objection, which is a
- * good one: a lens that cannot hear anything cannot be woken, and the only way
- * back is a power cycle.  The behaviour it was meant to stop -- talking again
- * after announcing shutdown -- is better fixed in the protocol layer, where it
- * is reversible: after the acknowledgement the responder stays silent to
- * everything except a fresh session opener (emount.c).  Same observable
- * silence, no trap.
+ * Dropped from the stock sequence:
+ *   VD sync      the stock waits for two frame-sync pulses first.  The body
+ *                does not look at VD here, so the wait only delayed RXD low,
+ *                by up to 500 ms when VD had already stopped (§121).
+ *   halt         staying alive costs nothing; the body cuts power.
  */
 static void powerdown_signal(void)
 {
-	uint32_t t0;
-	int low = 0;
-
 	diag_tally_mark(DIAG_MARK_SHUTREQ, 0);
+
+	/* Let the acknowledgement finish on the wire before the UART goes. */
 	delay_ms(50);
 
-	/* The stock's next step, in its order: switch the USART off before
-	 * waiting for the frame sync and before PA23.
-	 *
-	 * Reverted once on the user's objection that a deaf lens cannot be
-	 * woken, and proposed again by them now.  The objection is
-	 * weaker than it was: the body is measured cutting power about 700 ms
-	 * after PA23, so the deaf window ends in power loss.  em_uart_send()
+	/* MEASURED, and load-bearing: switching the USART off is the only
+	 * difference between an image that boots normally and one that stalls
+	 * on the next power-on -- a clean single-variable A/B on the a9 II
+	 * (§52).  Do not remove it without a measurement.  em_uart_send()
 	 * returns immediately once disabled -- it waits on DRE, which a
 	 * disabled SERCOM never sets, so one send afterwards would hang the
-	 * firmware for good.
-	 *
-	 * 2026-09-20: MEASURED, and it is load-bearing.  This step is the only
-	 * difference between an image that boots normally and one that stalls
-	 * on the next power-on -- a clean single-variable A/B on the a9 II.
-	 * Do not remove it again without a measurement; it was dropped once
-	 * on an argument and cost six hardware runs. */
+	 * firmware for good. */
 	em_uart_disable();
 
-	/* Wait for the frame sync to stop, as the stock does -- two consecutive
-	 * low readings 1 ms apart -- but bounded, because a body that keeps
-	 * clocking must not strand us here. */
-	t0 = millis();
-	while ((uint32_t)(millis() - t0) < 500u) {
-		delay_ms(1);
-		low = em_pin_level(EM_PIN_BODY_VD) ? 0 : low + 1;
-		if (low >= 2) {
-			break;
-		}
-	}
+	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_TX);
+	PORT->Group[0].DIRSET.reg = (1u << EM_PIN_TX);
+	PORT->Group[0].PINCFG[EM_PIN_TX].reg &= ~(uint8_t)PORT_PINCFG_PMUXEN;
+	diag_tally_mark(DIAG_MARK_TXLOW, 0);
 
+	/* PA23 high -- required, see above (§122). */
 	PORT->Group[0].OUTSET.reg = (1u << 23);
-	g_pa23_at = millis();
-	diag_tally_mark(DIAG_MARK_PA23, (uint8_t)low);
-	delay_ms(100);
+	diag_tally_mark(DIAG_MARK_PA23, 0);
 }
 
 static void park_to_infinity(void)

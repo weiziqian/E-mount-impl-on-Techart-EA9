@@ -171,7 +171,8 @@ def summarise_motor(motr, dry=False):
 
 
 MARKS = {0xB0: "boot", 0xB2: "bus up", 0xB3: "handshake",
-         0xB4: "0x16 acked", 0xB5: "PA23 driven", 0xB6: "NO BODY"}
+         0xB4: "0x16 acked", 0xB5: "PA23 driven", 0xB6: "NO BODY",
+         0xB7: "TX driven low"}
 
 
 def summarise_tally(blob, tally_off):
@@ -597,18 +598,21 @@ def decode_trail(blob, label):
             # off w[4] labelled those dumps as the no-shutdown arm, which is the
             # opposite of what they were.
             #
-            # Only BOFF is built now; the rest are the bisect's arms
+            # Only BOTX is built now; the rest are the bisect's arms
             # (NOTES.md §52-53), kept so its dumps still decode.  A historical
             # dump is not an error and must not be flagged as one.
             variants = {0x48534F4E: ("NOSH", 0, "shutdown path REMOVED -- no ack, park or PA23"),
                         0x54554853: ("SHUT", 1, "full path, bus LEFT ENABLED"),
                         0x3332414E: ("NA23", 2, "ack + park, NO PA23"),
-                        0x46464F42: ("BOFF", 3, "full stock shutdown incl. bus off")}
+                        0x46464F42: ("BOFF", 3, "full stock shutdown incl. bus off"),
+                        0x4F4C5854: ("TXLO", 4, "shutdown drives TX low, NO PA23 (§120 experiment)"),
+                        0x58544F42: ("BOTX", 5, "bus off + TX low, no PA23, no VD wait"),
+                        0x41505442: ("BTPA", 6, "bus off + TX low + PA23, no VD wait")}
             if w[5] == 0:
                 print("         (built before the shutdown-variant marker existed)")
             elif w[5] in variants:
                 name, expect, desc = variants[w[5]]
-                note = "" if name == "BOFF" else "   [historical]"
+                note = "" if name == "BTPA" else "   [historical]"
                 print(f"         {name}: {desc}{note}")
                 if w[4] != expect:
                     print(f"         *** marker inconsistent: {name} but w[4]={w[4]},"

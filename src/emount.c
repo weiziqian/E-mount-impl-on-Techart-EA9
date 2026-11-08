@@ -311,8 +311,8 @@ static volatile int8_t g_motor;
 static volatile int8_t g_motor_vd;
 static volatile uint8_t  g_reply_seq;
 
-/* Three replies are built from the request: 0x0A and 0x16 echo it whole,
- * 0x34 copies two bytes of it.  The reply goes out from em_poll, by which time
+/* Two replies are built from the request: 0x0A echoes it whole, 0x34
+ * copies two bytes of it.  The reply goes out from em_poll, by which time
  * the body may already have opened another window and reset the receive
  * buffer -- so the request is snapshotted here at parse time, in the
  * interrupt.  32 covers the longest of them, the 25-byte 0x0A. */
@@ -421,23 +421,16 @@ static void em_transmit(uint8_t *frame, uint16_t len)
 	em_frames_tx++;
 }
 
-/* The shutdown acknowledgement: send the body's own frame straight back.
+/* The shutdown acknowledgement: a fixed 10-byte frame, class 0x02, seq 0,
+ * id 0x16, payload 00 -- Yongnuo's stored reply, byte for byte.
  *
- * That is literally what the stock does -- transmit(rx_buffer, rx[1]) -- so
- * the reply is the request with a recomputed checksum.
+ * The stock echoes the request instead.  Either works because the A7 IV only
+ * looks for a reply with id 0x16 and reads nothing in it (msg_0x16.md), and a
+ * fixed frame cannot carry anything of the request's back to the body.
  *
- * What is NOT reproduced, and why:
- *   park     the stock moves to a stored position first.  We have no parking
- *            policy yet and inventing one would move the mechanism at shutdown
- *            for no reason we can justify.
- *   PA23     the stock drives it high here.  PA23 is also the bootloader's
- *            stay-in-bootloader input (EA9.md §11.4) and what driving it means
- *            at this point is not understood.  Not replicating an unexplained
- *            pin write on the shutdown path.
- *   halt     the stock disables the bus and sleeps.  Going quiet is enough for
- *            the body, and staying alive means a 0x16 that turns out not to be
- *            a shutdown cannot strand us -- the next init-class request revives
- *            the status loop.
+ * What releases the body is not this frame alone: after it, the body cuts
+ * the motor supply, switches its own UART off and polls RXD every 5 ms until
+ * it reads low.  The powerdown handler (main.c) is what gets RXD there.
  */
 void em_set_park_handler(void (*park)(void))
 {
@@ -456,33 +449,23 @@ void em_set_shutdown_enabled(uint8_t on)
 
 static void em_shutdown_ack(void)
 {
-	uint8_t echo[EM_REQ_SNAP];
-	uint16_t n = g_req[1];
-	uint16_t i;
+	uint8_t ack[EM_HEADER_LEN + 4] = {
+		EM_FRAME_START, 0, 0, EM_CLASS_INIT, 0x00, EM_ID_SHUTDOWN, 0x00,
+	};
 	uint8_t already = em_shutdown_acked;
 
-	/* Park first, acknowledge second -- the order the stock uses.  Snapshot
-	 * the request before parking: the park takes long enough for the body
-	 * to open another receive window and overwrite g_req. */
-	if (n >= EM_HEADER_LEN && n <= EM_REQ_SNAP) {
-		for (i = 0; i < n; i++) {
-			echo[i] = g_req[i];
-		}
-	}
-
-	/* A repeated 0x16 gets its echo -- the body may simply not have heard
-	 * the first -- but the park and the power-down signal happen once. */
+	/* Park first, acknowledge second -- the order the stock uses, and the
+	 * only one that works: the body cuts the motor supply as soon as it
+	 * has the reply.  A repeated 0x16 gets its reply -- the body may
+	 * simply not have heard the first -- but the park and the power-down
+	 * signal happen once. */
 	if (!em_shutdown_acked && g_park) {
 		g_park();
 	}
 
-	/* Unconditionally, even if the park stalled: the echo is what releases
-	 * the body, and a lens stuck mid-travel is a far smaller problem than a
-	 * camera that will not switch off. */
-	if (n < EM_HEADER_LEN || n > EM_REQ_SNAP) {
-		return;
-	}
-	em_transmit(echo, n);
+	/* Unconditionally, even if the park stalled: a lens stuck mid-travel
+	 * is a far smaller problem than a camera that will not switch off. */
+	em_transmit(ack, sizeof(ack));
 
 	em_shutdown_acked = 1;
 	em_t_shutdown     = millis();

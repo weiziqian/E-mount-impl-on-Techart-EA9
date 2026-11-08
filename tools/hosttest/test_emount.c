@@ -780,9 +780,9 @@ int main(void)
 	}
 
 	/* --- message 0x16: the shutdown request --------------------------- */
-	/* Not an AF trigger.  The stock parks, then echoes the body's own frame
-	 * back as an acknowledgement, then goes quiet.  Ignoring it is what left
-	 * a real body waiting at power-off. */
+	/* Not an AF trigger.  We park, then answer with Yongnuo's fixed frame
+	 * (class 02, seq 0, payload 00) -- the body reads only the id -- then
+	 * go quiet.  Ignoring it is what left a real body waiting at power-off. */
 	{
 		int before = sent_n;
 
@@ -791,26 +791,22 @@ int main(void)
 		em_poll();
 
 		if (sent_n != before + 1) {
-			fail("message 0x16 drew %d replies, expected exactly one "
-			     "(the echo)", sent_n - before);
+			fail("message 0x16 drew %d replies, expected exactly one",
+			     sent_n - before);
 		} else {
 			const uint8_t *e = sent[before];
 
-			if (sent_len[before] != len) {
-				fail("0x16 echo is %d bytes, the request was %d",
-				     sent_len[before], len);
+			if (sent_len[before] != 10) {
+				fail("0x16 reply is %d bytes, expected 10",
+				     sent_len[before]);
 			}
-			if (e[3] != 0x02 || e[4] != 0x55 || e[5] != EM_ID_SHUTDOWN) {
-				fail("0x16 echo is not the request: class %#04x "
-				     "seq %#04x id %#04x", e[3], e[4], e[5]);
+			if (e[3] != 0x02 || e[4] != 0x00 || e[5] != EM_ID_SHUTDOWN
+			    || e[6] != 0x00) {
+				fail("0x16 reply is not 02 00 16 00: class %#04x "
+				     "seq %#04x id %#04x pl %#04x",
+				     e[3], e[4], e[5], e[6]);
 			}
-			/* A 10-byte frame has exactly ONE payload byte: [6].
-			 * [7] and [8] are the checksum, which em_transmit
-			 * recomputes -- as the stock's own echo does. */
-			if (e[6] != 0xAB) {
-				fail("0x16 echo lost the payload byte: %#04x", e[6]);
-			}
-			check_frame(before, EM_ID_SHUTDOWN, "0x16 echo");
+			check_frame(before, EM_ID_SHUTDOWN, "0x16 reply");
 		}
 		if (!em_shutdown_acked) {
 			fail("0x16 did not set the shutdown flag");
@@ -842,7 +838,7 @@ int main(void)
 			fail("the ignored request was not counted");
 		}
 
-		/* A repeated 0x16 gets its echo -- the body may not have heard
+		/* A repeated 0x16 gets its reply -- the body may not have heard
 		 * the first -- but must not park a second time. */
 		before = sent_n;
 		park_calls = 0;

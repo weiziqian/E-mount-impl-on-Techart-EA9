@@ -152,7 +152,8 @@ uint32_t diag_boot_tally(uint32_t rcause);
 #define DIAG_MARK_BUSUP     0xB2u   /* em_init returned                 */
 #define DIAG_MARK_HANDSHAKE 0xB3u   /* message 0x0a answered            */
 #define DIAG_MARK_SHUTREQ   0xB4u   /* message 0x16 acknowledged        */
-#define DIAG_MARK_PA23      0xB5u   /* the power-down signal was driven */
+#define DIAG_MARK_PA23      0xB5u   /* shutdown: PA23 driven high        */
+#define DIAG_MARK_TXLOW     0xB7u   /* shutdown: TX driven low (RXD at the body) */
 /* NO BODY.  em_init blocks in a bare `while (!chip_select)` loop, so a boot on
  * a bench supply or on the USB flasher writes page 0 and then waits forever --
  * which in the trail is indistinguishable from a camera that cut power before

@@ -36,9 +36,9 @@ void em_poll(void);
 
 /* Message 0x16 is the body asking the lens to SHUT DOWN, not an autofocus
  * trigger as an earlier reading of this file guessed.  The stock sequence
- * (EA9.md §2.6) is: park, wait for arrival, echo the body's own frame back as
- * an acknowledgement, disable the bus, wait for the frame sync to stop, and
- * halt.  Ignoring it leaves the body waiting -- which is the shutdown hang. */
+ * (EA9.md §2.6) is: park, wait for arrival, acknowledge, disable the bus, sync
+ * to the frame pulse twice, drive PA23 high, and halt.  Ignoring it leaves the
+ * body waiting -- which is the shutdown hang. */
 #define EM_ID_SHUTDOWN   0x16u
 
 /* The first message of every handshake ever observed, on every body:
@@ -94,14 +94,15 @@ extern volatile uint8_t  em_ignored_after_shutdown;  /* requests left unanswered
 /* Called on message 0x16 BEFORE the acknowledgement goes out, so the lens can
  * park the way the stock does.  Optional: builds with no motor register none.
  *
- * It must return promptly -- the body is waiting for the echo, and the echo is
- * what unblocks its power-off.  A park that stalls or times out must not stop
+ * It must return promptly -- the body is waiting for the acknowledgement, and
+ * cuts the motor supply as soon as it has it.  A park that stalls or times out must not stop
  * the acknowledgement, so the caller sends it either way. */
 void em_set_park_handler(void (*park)(void));
 
 /* Called AFTER the acknowledgement has gone out.  The stock does three more
- * things at this point -- disable the bus, wait for the frame sync to stop,
- * drive PA23 high -- and then halts (EA9.md §2.6).  Whatever of that a build
+ * things at this point -- disable the bus, sync to the frame pulse twice,
+ * drive PA23 high -- and then halts (EA9.md §2.6).  The body meanwhile polls
+ * RXD until it reads low (msg_0x16.md).  Whatever of that a build
  * wants to reproduce goes here. */
 void em_set_powerdown_handler(void (*fn)(void));
 
