@@ -414,6 +414,13 @@ extern volatile uint8_t  em_status05_len;      /* 105 or 117, as now chosen  */
 extern volatile uint16_t em_m03_aperture;
 extern volatile uint16_t em_m03_n;
 
+/* Message 0x04 pl[3], the focus control mode: 0x83 the body drives focus,
+ * 0x81 manual focus (autofocus.md 3.5).  em_focus_mf follows the latest 0x04
+ * whose checksum verifies; em_mf_edges counts its 0 -> 1 transitions. */
+#define EM04_MODE_MF 0x81u
+extern volatile uint8_t  em_focus_mf;
+extern volatile uint16_t em_mf_edges;
+
 /* THE OPTICAL ROWS -- what this adapter tells the body about its pupil.
  *
  * Two 6-byte rows in the block-float format the protocol uses for optical data

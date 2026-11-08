@@ -2498,6 +2498,48 @@ int main(void)
 		}
 	}
 
+	/* MESSAGE 0x04 pl[3], THE FOCUS MODE.  The 0x81 frame is one an a9 II
+	 * actually sent (autofocus.md 3.5), checksum and all.  The mode drives
+	 * the motor, so a frame whose checksum fails must change nothing. */
+	{
+		uint8_t m04[22] = {
+			0xF0, 0x16, 0x00, 0x01, 0x9B, 0x04,
+			0x00, 0x00, 0x19, 0x81, 0x00, 0x00, 0x28,
+			0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+			0x80, 0x01, 0x55,
+		};
+		uint16_t edges = em_mf_edges, s;
+
+		host_pad_to = 32;
+		host_body_frame(m04, sizeof(m04)); em_poll();
+		if (!em_focus_mf || em_mf_edges != edges + 1) {
+			fail("0x04 pl[3] = 0x81 (a captured a9 II frame) did not "
+			     "read as manual focus: mf=%u edges +%u",
+			     em_focus_mf, (unsigned)(em_mf_edges - edges));
+		}
+		host_body_frame(m04, sizeof(m04)); em_poll();
+		if (em_mf_edges != edges + 1) {
+			fail("a second 0x81 frame counted as a new entry into MF");
+		}
+
+		/* 0x83 with its checksum fixed: back to AF. */
+		m04[9] = 0x83;
+		s = checksum(m04, sizeof(m04));
+		m04[19] = (uint8_t)s; m04[20] = (uint8_t)(s >> 8);
+		host_body_frame(m04, sizeof(m04)); em_poll();
+		if (em_focus_mf) {
+			fail("0x04 pl[3] = 0x83 did not leave manual focus");
+		}
+
+		/* 0x81 with the 0x83 checksum: corrupted, must be ignored. */
+		m04[9] = 0x81;
+		host_body_frame(m04, sizeof(m04)); em_poll();
+		if (em_focus_mf || em_mf_edges != edges + 1) {
+			fail("a 0x04 with a bad checksum changed the focus mode");
+		}
+		host_pad_to = 0;
+	}
+
 	/* A full transmit log makes every `sent[before + 1]` read a stale
 	 * frame, so it must be an error, not a silent truncation. */
 	if (sent_overflow) {

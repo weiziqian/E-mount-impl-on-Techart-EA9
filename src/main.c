@@ -1579,6 +1579,88 @@ static void focus_drive(const struct em_focus_cmd *c)
 	                          &g_live_cfg));
 }
 
+/* MANUAL FOCUS: RETURN TO INFINITY.
+ *
+ * The stock's v1.5.0 feature ("auto-return to infinity when switching to MF",
+ * servo.md 10): on entering manual focus -- message 0x04 pl[3] = 0x81 -- it
+ * moves once to the lower clamp, 4144, the infinity end.  Edge-triggered, so
+ * it moves once per entry, and leaving manual focus re-arms it.
+ *
+ * What is NOT the stock's is the gate.  The stock waits for eleven
+ * consecutive 0x81 frames; this waits instead until the focus path is idle --
+ * no leg running (focus_exec is blocking, so the main loop only gets here
+ * between legs) and no instruction waiting -- so the return can never fight
+ * an instruction the body has already issued.  A corrupted frame is excluded
+ * by emount.c checking the checksum before it trusts pl[3].
+ *
+ * The return is the LENS's move, not the body's: it posts no event, and it
+ * takes no instruction from the mailbox.  Anything the body sends, or the body
+ * leaving manual focus, ends the leg (mf_return_abort) and leaves the
+ * instruction where it is for the main loop, which runs it as usual -- so the
+ * body is answered exactly as it would be from rest.  A return cut short is
+ * not retried (mf_return). */
+static struct servo_cfg g_mf_cfg;
+static uint8_t          g_mf_prev;       /* em_focus_mf at the last look  */
+static uint8_t          g_mf_return_due; /* entered MF, not yet returned  */
+
+static uint8_t mf_return_abort(void)
+{
+	return em_peek_focus_op() != EM_OP_NONE || !em_focus_mf;
+}
+
+static void mf_return(void)
+{
+	uint8_t outcome;
+
+	g_mf_cfg          = STOCK;
+	g_mf_cfg.abort    = mf_return_abort;
+	g_mf_cfg.retarget = 0;      /* the body's Moves are not ours to chase */
+
+	/* Not em_set_scan_state(): that would also cancel a 1F 00 still
+	 * counting down from the body's last Scan, and that event is owed. */
+	g_last_op       = EM_OP_NONE;
+	g_abort_pending = 0;
+	g_abort_by_stop = 0;
+	outcome = focus_run(0, focus_counts_to_em06(0), &g_mf_cfg);
+	(void)outcome;
+
+	/* Done either way.  Arrived, or cut short -- by the body leaving
+	 * manual focus, or by an instruction, and an instruction issued
+	 * after manual focus began is the body positioning focus itself,
+	 * which a retry would undo.  The stock, too, returns once per entry. */
+	g_mf_return_due = 0;
+}
+
+/* Called once, when homing ends.  An entry into manual focus during homing is
+ * not an edge: homing is itself the move to infinity, so it has already done
+ * what that entry asks for.  Taking it as an edge would also run the return
+ * AFTER an instruction that waited out homing -- undoing a position the body
+ * chose while already in manual focus.  mf_service never runs during homing
+ * (motor_home only pumps the bus), so this is the only place the two meet. */
+static void mf_after_homing(void)
+{
+	g_mf_prev       = em_focus_mf;
+	g_mf_return_due = 0;
+}
+
+/* Once per main-loop pass, between legs. */
+static void mf_service(void)
+{
+	uint8_t mf = em_focus_mf;
+
+	if (mf && !g_mf_prev) {
+		g_mf_return_due = 1;
+	} else if (!mf) {
+		g_mf_return_due = 0;    /* back to AF: nothing to do, as before */
+	}
+	g_mf_prev = mf;
+
+	if (g_mf_return_due && !g_next_pending
+	    && em_peek_focus_op() == EM_OP_NONE) {
+		mf_return();
+	}
+}
+
 /* Act on one instruction from the body. */
 static void focus_exec(const struct em_focus_cmd *c)
 {
@@ -1876,6 +1958,7 @@ int main(void)
 		if (!g_aborted && em_handshake_done && step == 0
 		    && HOME_GATE_OPEN()) {
 			motor_home();
+			mf_after_homing();
 			focus_report();
 			step = 1;
 		}
@@ -1898,6 +1981,10 @@ int main(void)
 
 			if (em_take_focus_cmd(&cmd) && !g_aborted) {
 				focus_exec(&cmd);
+			}
+
+			if (!g_aborted) {
+				mf_service();
 			}
 		}
 	}

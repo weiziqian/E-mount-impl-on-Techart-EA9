@@ -228,6 +228,8 @@ volatile uint16_t em_scan_unit_n[2];
 volatile uint16_t em_aperture_req;
 volatile uint16_t em_m03_aperture;
 volatile uint16_t em_m03_n;
+volatile uint8_t  em_focus_mf;
+volatile uint16_t em_mf_edges;
 volatile uint8_t  em_m08[EM_M08_LEN];
 volatile uint8_t  em_m0a[EM_M0A_LEN];
 volatile uint8_t  em_m0a_len;
@@ -1241,6 +1243,29 @@ static void on_cs_edge(int level)
 
 		if (end > n) {
 			end = n;
+		}
+		/* THE FOCUS MODE, pl[3].  It moves the motor -- the main loop
+		 * returns to infinity on entering manual focus -- and nothing
+		 * else on this path checks a checksum, so a frame whose
+		 * checksum does not verify is skipped here rather than let one
+		 * corrupted byte drive the helicoid.  Skipped, not counted as
+		 * "not manual": it says nothing either way. */
+		if (end >= 13u && end == ((uint16_t)rx[1] | ((uint16_t)rx[2] << 8))) {
+			uint16_t sum = 0, k;
+
+			for (k = 1; k <= (uint16_t)(end - 4u); k++) {
+				sum += rx[k];
+			}
+			if (rx[end - 1] == EM_FRAME_END
+			    && rx[end - 3] == (uint8_t)sum
+			    && rx[end - 2] == (uint8_t)(sum >> 8)) {
+				uint8_t mf = (rx[9] == EM04_MODE_MF);
+
+				if (mf && !em_focus_mf) {
+					count16(&em_mf_edges);
+				}
+				em_focus_mf = mf;
+			}
 		}
 		if (end >= EM04_REC_START + 3u) {
 			em_parse_records(rx, (uint16_t)(end - 3u));
