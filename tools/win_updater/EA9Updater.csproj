@@ -11,7 +11,7 @@
     <AssemblyName>EA9Updater</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>Community EA9 Firmware Updater</Product>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
     <DebugType>none</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>

@@ -60,7 +60,7 @@ Every 2 seconds the updater looks for the adapter on USB. A poll only enumerates
 
 If writing fails, the next poll checks the adapter again.
 
-The bootloader version is the triplet the bootloader recorded at the last START, i.e. what the last updater declared. It is **not** the firmware version the camera shows (message 0x07). This updater declares `Firmware.DeclaredVersion` (2.0.0) in START. There is no UI to change it.
+The bootloader version is the triplet the bootloader recorded at the last START, i.e. what the last updater declared. It is **not** the firmware version the camera shows (message 0x07). This updater declares `Firmware.DeclaredVersion` (2.1.0) in START. There is no UI to change it.
 
 ## 5. Patching focal length and lens name
 
