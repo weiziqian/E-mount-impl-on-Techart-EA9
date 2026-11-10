@@ -59,9 +59,12 @@ void em_poll(void);
 
 /* The chip-select handshake that follows the 0x0C reply (emount.c,
  * em_baud_switch).  Each wait on the body's CS gives up after
- * EM_0C_WAIT_US; the body takes ~0.13 ms.  EM_0C_READY_US is how long the
- * lens CS stays up after the body's drops (190-430 us on real devices). */
-#define EM_0C_WAIT_US    2000u
+ * EM_0C_WAIT_US.  An a9 II takes ~0.13 ms, but an A7 IV only re-checks our CS
+ * on a timer (possibly every 5 ms), and a wait that gives up early drops our
+ * CS before the body has seen it rise -- its handshake then times out.
+ * Yongnuo and TTArtisan wait with no limit at all.  EM_0C_READY_US is how long
+ * the lens CS stays up after the body's drops (190-430 us on real devices). */
+#define EM_0C_WAIT_US    200000u
 #define EM_0C_READY_US   200u
 
 /* The lens ID we report in message 0x07 payload[9..10], u16 LE -- 50531
@@ -464,8 +467,11 @@ extern volatile uint16_t em_mf_edges;
 /* Vignetting compensation param */
 #define EM_SLOT_A        0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 
-/* Unknown optical params, could be the exit pupil? Might relate to PDAF */
-#define EM_SLOT_B_TYPE0  0x22, 0x00, 0x00, 0x00, 0x00, 0x00
+/* Pupil magnification p = exit-pupil distance / focal length (PROBABLE,
+ * optical_data.md 5.1): flat, type 0, exponent 2, p = 0x400 / 1024 = 1.0 --
+ * a 50 mm M lens's exit pupil at about 50 mm.  Was 22 00.., p = 0.5, below
+ * every lens observed. */
+#define EM_SLOT_B_TYPE0  0x24, 0x00, 0x00, 0x00, 0x00, 0x00
 
 /* The body's "no target" sentinel, on both channels.  Driving to it would
  * command a position far outside any travel a lens advertises. */

@@ -34,6 +34,7 @@
  *   0x06 pl[26..29]   6c 02 00 00 (pl[26..27] = 620, meaning unknown)
  *   0x05 pl[28..29]   minimum focus distance, written once at start-up
  *                     (em_set_min_focus)
+ *   0x05 pl[95]       11, as Sony's zooms (EM05_PL95)
  *   0x07 pl[0]        01, native device class -- on an a9 II this enables
  *                     video AF (stills AF then runs as Scans)
  *   0x07 pl[6]        firmware version, BCD 0x21 (2.1)
@@ -97,6 +98,16 @@ uint8_t em_msg_01[EA9_LEN_01] = {
 	/* +0x28 */ 0x55,
 };
 
+/* Message 0x05 pl[95] (frame offset 0x65), the same in the 105- and the
+ * 117-byte form.  An A7 IV turns it into an aperture value,
+ * 0x1A00 - 256 * log2(v), i.e. f = 32 / sqrt(v), and hands it to the main
+ * processor; what it is used for there is unknown (msg_0x05.md).  Every lens
+ * that can autofocus sends a non-zero value -- 0x11 (f/7.8) on Sony's zooms,
+ * 0x02 (f/22.6) on the SEL5518Z and both Yongnuo lenses -- and only manual
+ * lenses and adapters send 0, "none".  0x11, as the SELP1650, SEL55210 and
+ * SEL2870 send it; the stock sent 0. */
+#define EM05_PL95 0x11u
+
 uint8_t em_msg_05[EA9_LEN_05] = {
 	/* +0x00 */ 0xf0, 0x69, 0x00, 0x01, 0x64, 0x05, EM_LO(EM_APERTURE_NOW), EM_HI(EM_APERTURE_NOW),
 	/* +0x08 */ EM_LO(EM_APERTURE_NOW), EM_HI(EM_APERTURE_NOW), 0x00, 0x00, 0x10, 0x00, 0x07, 0x2a,
@@ -111,7 +122,7 @@ uint8_t em_msg_05[EA9_LEN_05] = {
 	/* +0x48 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	/* +0x50 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	/* +0x58 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	/* +0x60 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x06,
+	/* +0x60 */ 0x00, 0x00, 0x00, 0x00, 0x00, EM05_PL95, 0x36, 0x06,
 	/* +0x68 */ 0x55,
 };
 
