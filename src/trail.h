@@ -18,7 +18,11 @@
  * focus-channel tally.  The decoder must not read a version-1 snapshot as a
  * tally -- RCAUSE 1 (POR) renders as "0x04 x1", which is a fabricated
  * observation, and fabricated observations are worse than missing ones. */
-#define EM_DIAG_FORMAT  5u
+/* 5 -> 6: the receive path became a DMA ring with a framer.  NORM w[4..5]
+ * carry its counters (bytes skipped, frames rejected, request queue) instead
+ * of window sizes and truncations, which no longer exist; FAIL w[13] high half
+ * is the bytes received by the end of the first window, not inside it. */
+#define EM_DIAG_FORMAT  6u
 
 #define TAG_IDLOG       0x49444C47u
 #define TAG_NORM        0x4E4F524Du

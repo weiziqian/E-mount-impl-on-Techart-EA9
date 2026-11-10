@@ -269,7 +269,6 @@ volatile uint32_t em_t_first_frame;
 volatile uint32_t em_t_handshake;
 volatile uint32_t em_t_first_status;
 volatile uint32_t em_t_last_frame;
-volatile uint32_t em_rx_bytes_at_open;
 volatile uint32_t em_rx_bytes_at_close;
 volatile uint32_t em_first_window_ms;
 volatile uint32_t em_cs_edges;
@@ -289,9 +288,6 @@ volatile uint8_t  em_norm_id[EM_NORM_SLOTS];
 volatile uint16_t em_norm_count[EM_NORM_SLOTS];
 volatile uint8_t  em_norm_used;
 volatile uint8_t  em_norm_overflow;
-volatile uint16_t em_truncated;
-volatile uint8_t  em_window_len[4];
-volatile uint8_t  em_window_used;
 volatile struct em_capture em_cap[EM_CAP_SLOTS];
 volatile uint8_t  em_cap_used;
 volatile struct em_capture em_pre[EM_PRE_SLOTS];
@@ -306,8 +302,6 @@ static volatile uint8_t  g_row_req[2];
 static uint8_t           g_row_next[2];
 volatile uint16_t        em_row_req_n;
 
-static volatile uint8_t  g_reply_pending;
-static volatile uint8_t  g_reply_id;
 static volatile uint8_t  g_status_due;
 
 /* The focus motor's state for message 0x06 payload[0..1] (em_set_motor):
@@ -317,13 +311,67 @@ static volatile int8_t g_motor;
 static volatile int8_t g_motor_vd;
 static volatile uint8_t  g_reply_seq;
 
-/* Two replies are built from the request: 0x0A echoes it whole, 0x34
- * copies two bytes of it.  The reply goes out from em_poll, by which time
- * the body may already have opened another window and reset the receive
- * buffer -- so the request is snapshotted here at parse time, in the
- * interrupt.  32 covers the longest of them, the 25-byte 0x0A. */
+/* THE REQUEST QUEUE.  Every init-class request is queued whole as it is
+ * parsed (in the chip-select interrupt) and answered in arrival order from
+ * em_poll.  One slot used to do this, and a second request landing before the
+ * first was answered overwrote it -- the first then never got a reply, which
+ * a body treats as SYNC TIMEOUT.  An A7 IV can have two requests out at once
+ * in a session: its async channel (0x3ae4fc) does not wait for the sync one.
+ *
+ * Two replies are built from the request's bytes: 0x0A echoes it whole, 0x34
+ * copies two of them.  So each entry carries the request, up to 32 bytes --
+ * the longest, the 25-byte 0x0A, fits.  g_req is the one being answered. */
 #define EM_REQ_SNAP 32
-static volatile uint8_t  g_req[EM_REQ_SNAP];
+#define EM_REQ_Q    8               /* a power of 2 */
+static volatile uint8_t  g_rq[EM_REQ_Q][EM_REQ_SNAP];
+static volatile uint8_t  g_rq_head;   /* written by the interrupt */
+static volatile uint8_t  g_rq_tail;   /* written by em_poll */
+volatile uint16_t        em_req_dropped;
+volatile uint8_t         em_req_depth_max;
+static uint8_t           g_req[EM_REQ_SNAP];
+
+/* Queue one init-class request.  Interrupt context. */
+static void req_push(const uint8_t *rx, uint16_t n)
+{
+	uint8_t head  = g_rq_head;
+	uint8_t depth = (uint8_t)((head - g_rq_tail) & (EM_REQ_Q - 1u));
+	uint16_t i;
+
+	if (depth == EM_REQ_Q - 1u) {
+		if (em_req_dropped != 0xFFFFu) {
+			em_req_dropped++;
+		}
+		return;
+	}
+	for (i = 0; i < EM_REQ_SNAP; i++) {
+		g_rq[head][i] = (i < n) ? rx[i] : 0;
+	}
+	g_rq_head = (uint8_t)((head + 1u) & (EM_REQ_Q - 1u));
+	if (depth + 1u > em_req_depth_max) {
+		em_req_depth_max = (uint8_t)(depth + 1u);
+	}
+}
+
+/* Take the oldest into g_req; returns its id, or -1 if there is none. */
+static int req_pop(void)
+{
+	uint8_t tail = g_rq_tail;
+	uint16_t i;
+
+	if (tail == g_rq_head) {
+		return -1;
+	}
+	for (i = 0; i < EM_REQ_SNAP; i++) {
+		g_req[i] = g_rq[tail][i];
+	}
+	g_rq_tail = (uint8_t)((tail + 1u) & (EM_REQ_Q - 1u));
+	return g_req[5];
+}
+
+static void req_clear(void)
+{
+	g_rq_tail = g_rq_head;
+}
 
 static uint16_t clamp_travel(int32_t pos);
 static void focus_cmd_set(const struct em_focus_cmd *c);
@@ -622,8 +670,8 @@ static void em_send_id(uint8_t id)
  *                     all zero.  The one-page object is a whole frame and is
  *                     sent whole, with its header rewritten.
  *
- * The request's two bytes are taken when it arrives (on_cs_edge): this class
- * can interleave with the 60 Hz frames, which overwrite g_req. */
+ * The request's two bytes are taken when it arrives (em_frame_in): this class
+ * is not queued with the init requests, and arrives between the 60 Hz frames. */
 #define EM_ID_FILE_SIZE   0x3Au
 #define EM_ID_FILE_PAGE   0x3Bu
 #define EM_3A_LEN         32u
@@ -973,28 +1021,10 @@ static void em_parse_records(const uint8_t *rx, uint16_t end)
 	}
 }
 
-/* The body's chip select, both edges (0x53a4).  Rising arms the receiver;
- * falling means a whole frame has landed. */
-static void on_cs_edge(int level)
+/* One whole frame from the body, checksum verified: rx[0] is its 0xF0 and n
+ * its declared length.  Chip-select interrupt context. */
+static void em_frame_in(const uint8_t *rx, uint16_t n)
 {
-	const uint8_t *rx;
-	uint16_t n;
-
-	em_cs_edges++;
-
-	if (level) {
-		em_uart_rx_reset();
-		return;
-	}
-
-	rx = em_uart_rx_buf();
-	n  = em_uart_rx_len();
-	if (n < EM_HEADER_LEN || rx[0] != EM_FRAME_START) {
-		if (n) {
-			em_bad_frames++;
-		}
-		return;
-	}
 	em_frames_rx++;
 	em_last_class = rx[3];
 
@@ -1015,9 +1045,6 @@ static void on_cs_edge(int level)
 		em_pre_used++;
 	}
 
-	for (uint16_t i = 0; i < EM_REQ_SNAP; i++) {
-		g_req[i] = (i < n) ? rx[i] : 0;
-	}
 	if (!em_t_first_frame) {
 		em_t_first_frame = millis();
 	}
@@ -1029,24 +1056,6 @@ static void on_cs_edge(int level)
 	 * an interrupt and could otherwise land between em_transmit computing
 	 * a checksum and sending the byte it covers. */
 	g_reply_seq = (uint8_t)(rx[4] + 1);
-
-	/* Genuine truncation only -- a window shorter than the frame in it. */
-	if ((n & 0xFF) < rx[1]) {
-		em_truncated++;
-	}
-	{
-		uint8_t j;
-
-		for (j = 0; j < em_window_used; j++) {
-			if (em_window_len[j] == (uint8_t)n) {
-				break;
-			}
-		}
-		if (j == em_window_used && j < 4) {
-			em_window_len[j] = (uint8_t)n;
-			em_window_used++;
-		}
-	}
 
 	if (rx[3] != EM_CLASS_INIT) {
 		/* Tally normal-class traffic by (length, id) -- see emount.h. */
@@ -1299,9 +1308,8 @@ static void on_cs_edge(int level)
 		if (g_woke && !em_wake_first_id) {
 			em_wake_first_id = rx[5];
 		}
-		em_last_id      = rx[5];
-		g_reply_id      = rx[5];
-		g_reply_pending = 1;
+		em_last_id = rx[5];
+		req_push(rx, n);
 		if (rx[5] < 32) {
 			em_id_mask_lo |= (1u << rx[5]);
 		} else if (rx[5] < 64) {
@@ -1310,6 +1318,114 @@ static void on_cs_edge(int level)
 		if (em_id_log_n < EM_ID_LOG_LEN) {
 			em_id_log[em_id_log_n++] = rx[5];
 		}
+	}
+}
+
+/* THE FRAMER.  The receive ring holds bytes, not windows: a frame is wherever
+ * an 0xF0 starts a run whose length field, 0x55 terminator and checksum all
+ * agree.  This replaces "rising edge clears the buffer, falling edge parses
+ * it", which needed both edges handled on time.  A CPU held up for a few
+ * milliseconds -- a flash write right as the body's first request came in,
+ * dump_fail_start.bin -- took the rising edge late, cleared the head of the
+ * frame that had already arrived, and the body never got an answer.  Now a
+ * late edge only means a late parse.
+ *
+ * It runs only with the body's chip select LOW -- on a falling edge, or by
+ * hand in em_init after the bring-up window -- for two reasons.  The window is
+ * over, so a frame that has not completed never will and its 0xF0 is not one.
+ * And reading the DMA's position suspends the channel for a moment, which is
+ * only harmless while the body sends nothing (em_uart.c).  A falling edge
+ * handled so late that the next window has already opened finds the line
+ * high and does nothing; that window's own fall parses both, one frame late.
+ *
+ * The body pads its windows (16, 32 or 48 bytes), so padding is skipped here
+ * one byte at a time; a padding 0xF0 followed by bytes that pass all three
+ * checks is the only way to mistake it for a frame.
+ *
+ * Checksum: the 16-bit sum of everything after the 0xF0 up to the checksum,
+ * as on the lens's own frames.  Every body frame captured passes it. */
+#define EM_FRAME_MIN      9u      /* header 6 + checksum 2 + terminator 1 */
+#define EM_RX_SETTLE_US   30u     /* a last byte still in flight at the fall */
+static uint8_t g_frame[EM_RX_BUF_LEN];
+volatile uint16_t em_rx_skipped;  /* bytes that started no frame: padding */
+
+static uint16_t em_rx_drain(void)
+{
+	uint16_t avail;
+	uint16_t frames  = 0;
+	uint8_t  settled = 0;
+
+	if (em_pin_level(EM_PIN_BODY_CS)) {
+		return 0;
+	}
+	avail = em_uart_rx_count();
+	while (avail) {
+		uint16_t len, k, sum;
+
+		if (em_uart_rx_at(0) != EM_FRAME_START) {
+			em_uart_rx_consume(1);
+			avail--;
+			count16(&em_rx_skipped);
+			continue;
+		}
+		len = (avail >= 3u)
+		      ? (uint16_t)(em_uart_rx_at(1) | ((uint16_t)em_uart_rx_at(2) << 8))
+		      : 0u;
+		if (avail < 3u || avail < len) {
+			if (!settled) {
+				/* The fall can beat the last byte by a few us.  If
+				 * the next window has opened meanwhile, leave the
+				 * tail for its fall rather than read mid-transfer. */
+				settled = 1;
+				delay_us(EM_RX_SETTLE_US);
+				if (em_pin_level(EM_PIN_BODY_CS)) {
+					break;
+				}
+				avail = em_uart_rx_count();
+				continue;
+			}
+			if (avail < 3u) {
+				em_uart_rx_consume(avail);
+				break;
+			}
+		}
+		if (len < EM_FRAME_MIN || len > EM_RX_BUF_LEN || avail < len
+		    || em_uart_rx_at(len - 1u) != EM_FRAME_END) {
+			goto not_a_frame;
+		}
+		for (sum = 0, k = 1; k <= (uint16_t)(len - 4u); k++) {
+			sum = (uint16_t)(sum + em_uart_rx_at(k));
+		}
+		if (em_uart_rx_at(len - 3u) != (uint8_t)sum
+		    || em_uart_rx_at(len - 2u) != (uint8_t)(sum >> 8)) {
+			goto not_a_frame;
+		}
+		for (k = 0; k < len; k++) {
+			g_frame[k] = em_uart_rx_at(k);
+		}
+		em_uart_rx_consume(len);
+		avail = (uint16_t)(avail - len);
+		em_frame_in(g_frame, len);
+		frames++;
+		continue;
+
+not_a_frame:
+		if (em_bad_frames != 0xFFu) {
+			em_bad_frames++;
+		}
+		em_uart_rx_consume(1);
+		avail--;
+	}
+	return frames;
+}
+
+/* The body's chip select, both edges (0x53a4).  The fall ends a window and
+ * runs the framer; the rise needs nothing -- the DMA is already receiving. */
+static void on_cs_edge(int level)
+{
+	em_cs_edges++;
+	if (!level) {
+		(void)em_rx_drain();
 	}
 }
 
@@ -2041,30 +2157,27 @@ void em_init(void)
 		}
 	}
 
-	/* The window has just opened.  Drop anything picked up from the idle
-	 * line beforehand, so what follows is this window and nothing else. */
-	em_rx_bytes_at_open = em_rx_bytes;
-	em_uart_rx_reset();
+	/* The window has just opened.  Nothing is read from the ring while it
+	 * is: the DMA position is only read with the line low (em_uart.c).
+	 * Whatever the idle line left in it is skipped by the framer. */
 	em_t_cs_first_high = millis();
 
 	while (em_pin_level(EM_PIN_BODY_CS)) {
 	}
-	em_rx_bytes_at_close = em_rx_bytes;
+	(void)em_uart_rx_count();          /* brings em_rx_bytes up to date */
+	em_rx_bytes_at_close = em_rx_bytes;  /* everything since the UART came up */
 	em_first_window_ms   = millis() - em_t_cs_first_high;
 
-	em_eic_init(on_cs_edge, on_vd_edge);
-
-	/* Whatever that window held is a real frame, captured from its start.
-	 * There was no falling edge to parse it -- the EIC was not armed yet --
-	 * so run the falling-edge path by hand.  A normal boot's first window is
-	 * an empty sync pulse and this does nothing. */
-	if (em_uart_rx_len() >= EM_HEADER_LEN
-	    && em_uart_rx_buf()[0] == EM_FRAME_START) {
+	/* Whatever that window held: there was no edge interrupt to parse it --
+	 * the EIC is not armed yet -- so run the framer by hand, BEFORE arming
+	 * it, so the two never run at once.  A normal boot's first window is an
+	 * empty sync pulse and this finds nothing.  Bytes that arrive after it
+	 * stay in the ring for the next edge. */
+	if (em_rx_drain()) {
 		em_init_frame_rescued = 1;
-		on_cs_edge(0);
-	} else {
-		em_uart_rx_reset();
 	}
+
+	em_eic_init(on_cs_edge, on_vd_edge);
 
 	delay_ms(50);
 	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_LENS_CS);
@@ -2198,10 +2311,14 @@ void em_poll(void)
 	}
 	g_in_poll = 1;
 
-	if (g_reply_pending) {
-		uint8_t id = g_reply_id;
+	for (;;) {
+		int     got = req_pop();
+		uint8_t id;
 
-		g_reply_pending = 0;
+		if (got < 0) {
+			break;
+		}
+		id = (uint8_t)got;
 		em_send_id(id);
 
 		/* Message 0x0a is the last of the handshake in every capture
@@ -2249,7 +2366,7 @@ void em_poll(void)
 static void em_session_reset(void)
 {
 	__disable_irq();
-	g_reply_pending  = 0;
+	req_clear();
 	g_file_pending   = 0;
 	g_status_due     = 0;
 	em_focus_pending = 0;
@@ -2273,7 +2390,11 @@ static uint8_t em_wake_handshake(void)
 	uint32_t t;
 
 	PORT->Group[0].OUTSET.reg = (1u << EM_PIN_LENS_CS);
-	em_uart_resume();                 /* our TX, the body's RXD, idles high */
+	/* Our TX, the body's RXD, idles high.  This flushes the receive ring --
+	 * a DMA position read -- with the body's chip select HIGH, the one place
+	 * that rule is bent: the line is up for the pin handshake, and the body
+	 * sends no data until that handshake is over. */
+	em_uart_resume();
 
 	for (t = 0; t < EM_0C_WAIT_US; t++) {
 		if (!em_pin_level(EM_PIN_BODY_CS)) {

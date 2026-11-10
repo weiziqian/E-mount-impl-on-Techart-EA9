@@ -26,6 +26,7 @@ extern int      host_baud_at_sent_n;
 extern const int *host_cs_seq;
 extern unsigned   host_cs_seq_n, host_cs_seq_i;
 extern int      host_pad_to;
+extern int      host_fix_checksum;
 extern uint32_t host_millis;
 extern uint32_t host_us;
 void host_body_frame(const uint8_t *frame, uint16_t len);
@@ -662,9 +663,6 @@ int main(void)
 		if (em_norm_used != 2) {
 			fail("normal-class tally: %u kinds, expected 2", em_norm_used);
 		}
-		if (em_truncated != 0) {
-			fail("%u truncations on well-formed frames", em_truncated);
-		}
 
 		/* Nothing so far may be captured: 0x03, and 0x04 frames too
 		 * short to carry a record, are skipped. */
@@ -672,16 +670,19 @@ int main(void)
 			fail("captured %u windows before any focus command",
 			     em_cap_used);
 		}
-		/* A frame that declares more than it delivers must be caught. */
+		/* A frame that declares more than it delivers is not a frame:
+		 * the framer rejects it once the window has closed. */
 		{
 			uint8_t trunc[12];
+			uint8_t bad = em_bad_frames;
+			uint32_t got = em_frames_rx;
 			memset(trunc, 0, sizeof(trunc));
 			trunc[0] = 0xF0; trunc[1] = 40; trunc[3] = 0x01; trunc[5] = 0x03;
 			host_body_frame(trunc, sizeof(trunc));
 			em_poll();
-			if (em_truncated != 1) {
+			if (em_bad_frames == bad || em_frames_rx != got) {
 				fail("a frame declaring 40 bytes but delivering 12 "
-				     "was not flagged as truncated");
+				     "was not rejected");
 			}
 		}
 	}
@@ -779,8 +780,10 @@ int main(void)
 		if (park_sent_before != before) {
 			fail("the acknowledgement went out BEFORE the park");
 		}
-		if (sent_n != before + 1) {
-			fail("0x16 with a park produced %d frames, expected 1",
+		/* Two: the 0x16 the body sent again during the park is queued
+		 * and answered too -- a repeat gets its reply, not a second park. */
+		if (sent_n != before + 2) {
+			fail("0x16 with a park produced %d frames, expected 2",
 			     sent_n - before);
 		}
 		em_set_park_handler(0);
@@ -1355,7 +1358,7 @@ int main(void)
 		/* A SHORT WINDOW is the other direction: a frame that declares
 		 * more than arrived must not be read past what arrived. */
 		{
-			uint16_t before_trunc = em_truncated;
+			uint8_t before_bad = em_bad_frames;
 
 			host_pad_to = 0;
 			memset(f, 0, sizeof(f));
@@ -1370,7 +1373,7 @@ int main(void)
 				fail("a frame shorter than it declared was read "
 				     "past its own end");
 			}
-			if (em_truncated == before_trunc) {
+			if (em_bad_frames == before_bad) {
 				fail("the short window was not noticed at all");
 			}
 		}
@@ -2189,10 +2192,9 @@ int main(void)
 		if (em_m08[0] != 0xF0 || em_m08[5] != 0x08) {
 			fail("the captured bytes are not a 0x08 frame");
 		}
-		if (em_m08_len != 10 || em_m08[7] != 0x00) {
+		if (em_m08_len != 10 || em_m08[1] != 10) {
 			fail("a later 0x08 overwrote the first: %u bytes, "
-			     "pl[1] = %#04x", em_m08_len,
-			     em_m08_len >= 8 ? em_m08[7] : 0);
+			     "length field %u", em_m08_len, em_m08[1]);
 		}
 		/* ...while the FLAG does follow the latest, because it is a
 		 * live setting and the capture is a record. */
@@ -2559,11 +2561,127 @@ int main(void)
 
 		/* 0x81 with the 0x83 checksum: corrupted, must be ignored. */
 		m04[9] = 0x81;
+		host_fix_checksum = 0;
 		host_body_frame(m04, sizeof(m04)); em_poll();
+		host_fix_checksum = 1;
 		if (em_focus_mf || em_mf_edges != edges + 1) {
 			fail("a 0x04 with a bad checksum changed the focus mode");
 		}
 		host_pad_to = 0;
+	}
+
+	/* --- the framer and the request queue ----------------------------- */
+	/* Bytes are a ring, frames are found by F0 + length + checksum + 55, and
+	 * every init request is queued.  These are the cases the old "rising edge
+	 * clears, falling edge parses, one reply slot" design lost. */
+	{
+		extern void host_cs_edge(int level);
+		extern void host_preload_rx(const uint8_t *buf, uint16_t len);
+		extern volatile uint16_t em_req_dropped;
+		uint8_t  a[10], b[10], c[10];
+		int      before;
+		uint32_t rx0;
+		unsigned k;
+
+		#define FIXSUM(fr, ln) do { uint16_t s_ = 0, i_;                 \
+			for (i_ = 1; i_ <= (ln) - 4u; i_++) s_ += (fr)[i_];       \
+			(fr)[(ln) - 3] = (uint8_t)s_; (fr)[(ln) - 2] = (uint8_t)(s_ >> 8); \
+		} while (0)
+
+		make_request(a, 0x02, 0x81, 0x0B, 0, 0); FIXSUM(a, 10);
+		make_request(b, 0x02, 0x82, 0x09, 0, 0); FIXSUM(b, 10);
+		make_request(c, 0x02, 0x83, 0x0D, 0, 0); FIXSUM(c, 10);
+
+		/* 1. Two requests before em_poll runs: both answered, in order. */
+		before = sent_n;
+		host_body_frame(a, 10);
+		host_body_frame(b, 10);
+		em_poll();
+		if (sent_n != before + 2 || sent[before][5] != 0x0B
+		    || sent[before + 1][5] != 0x09) {
+			fail("queue: two requests drew %d replies (%#04x, %#04x), "
+			     "expected 0x0B then 0x09", sent_n - before,
+			     sent_n > before ? sent[before][5] : 0,
+			     sent_n > before + 1 ? sent[before + 1][5] : 0);
+		}
+
+		/* 2. A LATE rising edge: the bytes are already in when it is
+		 * handled.  It used to clear them. */
+		before = sent_n;
+		host_preload_rx(a, 10);
+		host_cs_edge(1);
+		host_cs_edge(0);
+		em_poll();
+		if (sent_n != before + 1 || sent[before][5] != 0x0B) {
+			fail("framer: a frame whose rising edge was handled late "
+			     "was lost");
+		}
+
+		/* 3. MERGED edges: frame b whole and the first half of c, then a
+		 * single edge interrupt that finds the line HIGH (c's window).
+		 * Nothing is read while the body may be sending; c's own fall
+		 * then parses both, in order. */
+		before = sent_n;
+		rx0 = em_frames_rx;
+		host_preload_rx(b, 10);
+		host_preload_rx(c, 5);
+		host_cs_edge(1);
+		if (em_frames_rx != rx0) {
+			fail("framer: %u frame(s) parsed with the chip select high",
+			     (unsigned)(em_frames_rx - rx0));
+		}
+		host_preload_rx(c + 5, 5);
+		host_cs_edge(0);
+		em_poll();
+		if (sent_n != before + 2 || sent[before][5] != 0x09
+		    || sent[before + 1][5] != 0x0D) {
+			fail("framer: merged edges answered %d, expected 0x09 "
+			     "then 0x0D", sent_n - before);
+		}
+
+		/* 4. A bad checksum is not a frame, and draws no reply. */
+		before = sent_n;
+		rx0 = em_frames_rx;
+		host_fix_checksum = 0;
+		a[7] ^= 0x01;
+		host_body_frame(a, 10);
+		a[7] ^= 0x01;
+		host_fix_checksum = 1;
+		em_poll();
+		if (sent_n != before || em_frames_rx != rx0) {
+			fail("framer: a frame with a bad checksum was accepted");
+		}
+
+		/* 5. An F0 in the padding, with a plausible length, does not
+		 * swallow the frame behind it. */
+		{
+			static const uint8_t junk[] = { 0x00, 0xF0, 0x20, 0x00, 0x13 };
+
+			before = sent_n;
+			host_preload_rx(junk, sizeof(junk));
+			host_body_frame(b, 10);
+			em_poll();
+			if (sent_n != before + 1 || sent[before][5] != 0x09) {
+				fail("framer: padding with an F0 hid the next frame");
+			}
+		}
+
+		/* 6. A full queue drops and counts, and loses nothing it kept. */
+		{
+			uint16_t dropped = em_req_dropped;
+
+			before = sent_n;
+			for (k = 0; k < 9; k++) {
+				host_body_frame(a, 10);
+			}
+			em_poll();
+			if (sent_n != before + 7 || em_req_dropped != dropped + 2) {
+				fail("queue: 9 requests, %d answered and %u dropped, "
+				     "expected 7 and 2", sent_n - before,
+				     em_req_dropped - dropped);
+			}
+		}
+		#undef FIXSUM
 	}
 
 	/* --- the standby wait: 0x16, release, wake, short init ----------- */

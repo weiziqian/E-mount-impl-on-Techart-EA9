@@ -32,8 +32,22 @@ int      sent_n;
 int      sent_overflow;
 
 /* ---- the frame the "body" is presenting --------------------------------- */
-static uint8_t  rx[256];
-static uint16_t rx_len;
+/* The receive ring, as the framer sees it: bytes in arrival order, read from
+ * rx_rd, written at rx_wr.  Linear and large -- it is compacted whenever it
+ * empties -- so a test never has to think about wrap. */
+static uint8_t  rx[4096];
+static uint16_t rx_rd, rx_wr;
+
+static void rx_append(const uint8_t *b, uint16_t n)
+{
+	if (rx_rd == rx_wr) {
+		rx_rd = rx_wr = 0;
+	}
+	if (rx_wr + n <= sizeof(rx)) {
+		memcpy(rx + rx_wr, b, n);
+		rx_wr = (uint16_t)(rx_wr + n);
+	}
+}
 
 uint32_t host_millis;
 
@@ -59,14 +73,16 @@ void diag_tally_mark(uint8_t code, uint8_t data)
 }
 
 void em_uart_init(void) {}
-void em_uart_rx_reset(void) { rx_len = 0; }
+void em_uart_rx_flush(void) { rx_rd = rx_wr; }
+uint16_t em_uart_rx_count(void) { return (uint16_t)(rx_wr - rx_rd); }
+uint8_t em_uart_rx_at(uint16_t i) { return rx[rx_rd + i]; }
+void em_uart_rx_consume(uint16_t n) { rx_rd = (uint16_t)(rx_rd + n); }
 
 /* Put bytes in the receiver without a chip-select edge, which is exactly what
  * happens when the body transmits inside the bring-up window. */
 void host_preload_rx(const uint8_t *buf, uint16_t len)
 {
-	memcpy(rx, buf, len);
-	rx_len = len;
+	rx_append(buf, len);
 }
 
 /* Bytes the body sends INSIDE the bring-up window.  em_init now clears the
@@ -81,8 +97,6 @@ void host_window_payload(const uint8_t *b, uint16_t n)
 	memcpy(win_buf, b, n);
 	win_len = n;
 }
-uint16_t em_uart_rx_len(void) { return rx_len; }
-const uint8_t *em_uart_rx_buf(void) { return rx; }
 
 /* OUTSET and OUTCLR are write-one-to-act registers with no readback, and C
  * gives no way to hook a struct assignment -- so the test clears both before
@@ -105,7 +119,7 @@ int      host_baud_at_sent_n = -1;
 int host_uart_disables;
 int host_uart_resumes;
 void em_uart_disable(void) { host_uart_disables++; }
-void em_uart_resume(void)  { host_uart_resumes++; rx_len = 0; }
+void em_uart_resume(void)  { host_uart_resumes++; rx_rd = rx_wr; }
 
 /* ... and holds the body's lines off while it polls them itself. */
 int host_eic_paused;
@@ -232,10 +246,7 @@ int em_pin_level(uint8_t pin)
 			 * could not tell whether em_init clears it when the
 			 * window opens -- and the mutant that removed that
 			 * clear passed. */
-			if (rx_len + win_len <= sizeof(rx)) {
-				memcpy(rx + rx_len, win_buf, win_len);
-				rx_len += win_len;
-			}
+			rx_append(win_buf, win_len);
 			win_len = 0;
 		}
 		return v;
@@ -257,26 +268,54 @@ int em_pin_level(uint8_t pin)
  */
 int host_pad_to;
 
+/* Most test frames are built by hand with no checksum.  The framer now
+ * rejects those, as it should, so by default the shim fills the checksum in
+ * the way a real body would.  A test that wants a corrupted frame clears this
+ * for the one frame. */
+int host_fix_checksum = 1;
+
 void host_body_frame(const uint8_t *frame, uint16_t len)
 {
+	uint8_t  buf[512];
 	uint16_t win = len;
 
-	host_reset_cs();
-	host_cs_pin = 1;
-	if (cs_cb) cs_cb(1);
-	memcpy(rx, frame, len);
-	if (host_pad_to > (int)len && host_pad_to <= (int)sizeof(rx)) {
+	if (len > sizeof(buf)) {
+		return;
+	}
+	memcpy(buf, frame, len);
+	if (host_fix_checksum && len >= 9) {
+		uint16_t sum = 0, k;
+
+		for (k = 1; k <= (uint16_t)(len - 4u); k++) {
+			sum = (uint16_t)(sum + buf[k]);
+		}
+		buf[len - 3] = (uint8_t)sum;
+		buf[len - 2] = (uint8_t)(sum >> 8);
+	}
+	if (host_pad_to > (int)len && host_pad_to <= (int)sizeof(buf)) {
 		win = (uint16_t)host_pad_to;
 		/* Padding is whatever the line held, NOT zeroes -- zero is not
 		 * a record tag, so zero padding would hide the bug this exists
 		 * to expose.  0x55 is the terminator byte, which is exactly the
 		 * value that turned up as an operand on hardware. */
-		memset(&rx[len], 0x55, (size_t)(win - len));
+		memset(&buf[len], 0x55, (size_t)(win - len));
 	}
-	rx_len = win;
+
+	host_reset_cs();
+	host_cs_pin = 1;
+	if (cs_cb) cs_cb(1);
+	rx_append(buf, win);
 	host_cs_pin = 0;
 	if (cs_cb) cs_cb(0);
 }
 
 void host_frame_sync(void) { host_reset_cs(); if (vd_cb) vd_cb(); }
 void host_set_cs_pin(int level) { host_cs_pin = level; }
+
+/* A chip-select edge on its own, with no bytes: for scripting edges that are
+ * handled late, merged, or out of step with the data. */
+void host_cs_edge(int level)
+{
+	host_cs_pin = level;
+	if (cs_cb) cs_cb(level);
+}

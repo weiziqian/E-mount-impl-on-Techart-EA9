@@ -662,7 +662,10 @@ extern volatile uint32_t em_frames_tx;      /* frames we have sent */
 extern volatile uint8_t  em_handshake_done; /* set once message 0x0a is answered */
 extern volatile uint8_t  em_last_id;        /* last init-class id requested */
 extern volatile uint8_t  em_last_class;     /* class byte of the last frame */
-extern volatile uint8_t  em_bad_frames;     /* frames that failed the 0xF0 test */
+extern volatile uint8_t  em_bad_frames;     /* F0s that failed length/55/checksum */
+extern volatile uint16_t em_rx_skipped;     /* bytes that started no frame (padding) */
+extern volatile uint16_t em_req_dropped;    /* init requests lost to a full queue */
+extern volatile uint8_t  em_req_depth_max;  /* most requests ever waiting at once */
 
 extern volatile uint32_t em_t_cs_first_high; /* ms when PA02 first went high */
 extern volatile uint32_t em_t_init_done;     /* ms when em_init returned */
@@ -681,12 +684,9 @@ extern volatile uint32_t em_t_last_frame;    /* ms of the most recent valid fram
  * discarded.  Zero on a healthy boot. */
 extern volatile uint8_t  em_init_frame_rescued;
 
-/* em_rx_bytes sampled as the first window opens and again as it closes.
- *
- * "47 bytes arrived" cannot say whether they came from the body inside its
- * window or from a floating line before it -- and those call for opposite
- * fixes.  The difference of these two can. */
-extern volatile uint32_t em_rx_bytes_at_open;
+/* em_rx_bytes as the first window closes: every byte since the UART came up.
+ * With the DMA the count is only brought up to date with the line low, so it
+ * cannot be split at the moment the window opened. */
 extern volatile uint32_t em_rx_bytes_at_close;
 extern volatile uint32_t em_first_window_ms;  /* how long the body held it open */
 
@@ -737,17 +737,6 @@ extern volatile uint16_t em_norm_count[EM_NORM_SLOTS];
 extern volatile uint8_t  em_norm_used;
 extern volatile uint8_t  em_norm_overflow;   /* more than EM_NORM_SLOTS kinds */
 
-/* The body transmits a FIXED-SIZE window, not a frame-sized one: every window
- * measured on an a9 II delivers 32 bytes whatever the frame inside declares,
- * and the bytes past the frame are really sent (proved by pre-filling the
- * buffer with EM_RX_POISON -- none of it survived).  So "declared != received"
- * is the normal case and counting it was noise.
- *
- * What is worth counting is a window SHORTER than the frame it carries, which
- * would be genuine truncation, and the set of window sizes actually seen. */
-extern volatile uint16_t em_truncated;       /* received < declared */
-extern volatile uint8_t  em_window_len[4];   /* distinct window sizes seen */
-extern volatile uint8_t  em_window_used;
 
 /* Raw bytes of the first two windows of each distinct (length, id) kind.
  *

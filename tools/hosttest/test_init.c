@@ -32,10 +32,19 @@ int main(void)
 	memset(req, 0, sizeof(req));
 	req[0] = 0xF0; req[1] = 10; req[3] = 0x02; req[4] = 0x11; req[5] = 0x01;
 	req[9] = 0x55;
-	/* Junk on the idle line BEFORE the window opens.  The receiver is now
-	 * enabled from the start of em_init, so it picks this up; clearing the
-	 * buffer as the window opens is what keeps it out of the frame.  Without
-	 * that clear the rescue sees junk at offset 0 and finds nothing. */
+	{
+		/* A real body's checksum: the framer accepts nothing else. */
+		uint16_t sum = 0, k;
+
+		for (k = 1; k <= 6; k++) {
+			sum = (uint16_t)(sum + req[k]);
+		}
+		req[7] = (uint8_t)sum;
+		req[8] = (uint8_t)(sum >> 8);
+	}
+	/* Junk on the idle line BEFORE the window opens.  The receiver is
+	 * enabled from the start of em_init, so it picks this up; the framer
+	 * must skip it to find the frame behind it. */
 	{
 		static const uint8_t noise[] = { 0x5A, 0xA5, 0x00, 0xFF, 0x13 };
 

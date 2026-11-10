@@ -4,23 +4,25 @@
 
 #include <stdint.h>
 
-#define EM_RX_BUF_LEN 256
-
-/* Written over the head of the buffer at the start of each receive window, so
- * a captured byte that still reads this was never delivered by the body. */
-#define EM_RX_POISON      0xA5u
-#define EM_RX_POISON_LEN  64u
+#define EM_RX_BUF_LEN 256          /* a power of 2: the ring masks with it */
 
 void     em_uart_init(void);
 
-/* Throw away anything buffered and start a new frame.  Called on the rising
- * edge of the body's chip select. */
-void     em_uart_rx_reset(void);
-
-/* How many bytes have landed since the last reset, and the buffer itself.
- * Buffer offset equals frame offset: rx[0] is the 0xF0 (EA9.md §2.1). */
-uint16_t em_uart_rx_len(void);
-const uint8_t *em_uart_rx_buf(void);
+/* THE RECEIVE RING.  Bytes in arrival order, with no idea of windows or
+ * frames -- emount.c finds the frames.  One reader: the chip-select interrupt
+ * (and em_init before it is armed).
+ *
+ * count and flush read the DMA's position, which briefly suspends it: call
+ * them only while the body's chip select is LOW, when it sends nothing.
+ *
+ *   em_uart_rx_count    bytes received and not yet consumed
+ *   em_uart_rx_at(i)    the i-th of them, 0 = the oldest
+ *   em_uart_rx_consume  drop the oldest n
+ *   em_uart_rx_flush    drop everything received so far */
+uint16_t em_uart_rx_count(void);
+uint8_t  em_uart_rx_at(uint16_t i);
+void     em_uart_rx_consume(uint16_t n);
+void     em_uart_rx_flush(void);
 
 /* Blocking: shifts every byte out and returns once the last one has left the
  * shift register, so the caller can time the chip-select release from it. */
@@ -55,5 +57,6 @@ extern volatile uint32_t em_rx_bytes;
 extern volatile uint32_t em_rx_errors;
 extern volatile uint16_t em_rx_status;   /* accumulated STATUS bits */
 extern volatile uint32_t em_t_first_byte; /* ms the very first byte arrived */
+extern volatile uint32_t em_rx_dma_stuck; /* DMA suspends never acknowledged */
 
 #endif /* EM_UART_H */

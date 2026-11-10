@@ -1,6 +1,7 @@
 #include "board.h"
 #include "delay.h"
 #include "diag.h"
+#include "em_uart.h"
 #include "emount.h"
 #include "trail.h"
 
@@ -56,9 +57,10 @@ void trail_norm(uint32_t page)
 	w[1] = EM_DIAG_FORMAT;
 	w[2] = TAG_NORM;
 	w[3] = ((uint32_t)em_norm_used << 16) | ((uint32_t)em_norm_overflow << 8);
-	w[4] = (uint32_t)em_window_len[0] | ((uint32_t)em_window_len[1] << 8)
-	       | ((uint32_t)em_window_len[2] << 16) | ((uint32_t)em_window_len[3] << 24);
-	w[5] = ((uint32_t)em_window_used << 16) | em_truncated;
+	w[4] = ((uint32_t)em_req_depth_max << 24) | ((uint32_t)em_bad_frames << 16)
+	       | em_rx_skipped;
+	w[5] = ((em_rx_dma_stuck > 0xFFFFu ? 0xFFFFu : em_rx_dma_stuck) << 16)
+	       | em_req_dropped;
 	for (i = 0; i < em_norm_used && i < 4; i++) {
 		w[6 + i] = ((uint32_t)em_norm_count[i] << 16)
 		           | ((uint32_t)em_norm_id[i] << 8) | em_norm_len[i];

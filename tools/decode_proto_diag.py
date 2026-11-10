@@ -28,7 +28,7 @@ MAGIC = 0x544F5250
 # run when the firmware went to format 2 and this constant did not -- the boot
 # tally said the run had reached PA23 while its slot decoded as empty.
 # Acceptance is a range; per-field meaning is gated separately, where it changed.
-FORMATS = (1, 2, 3, 4, 5)
+FORMATS = (1, 2, 3, 4, 5, 6)
 FORMAT_LATEST = max(FORMATS)
 NORM = 0x4E4F524D
 CHK  = 0x4348_4B21
@@ -566,8 +566,12 @@ def decode_trail(blob, label):
                   f"captured {w[14] >> 24}")
             print(f"         body CS edges      {w[12]}")
             total, inwin = w[13] & 0xFFFF, w[13] >> 16
-            print(f"         raw bytes received {total}"
-                  f"   ({inwin} of them inside the first window)")
+            if w[1] >= 6:
+                print(f"         raw bytes received {total}"
+                      f"   ({inwin} by the end of the first window)")
+            else:
+                print(f"         raw bytes received {total}"
+                      f"   ({inwin} of them inside the first window)")
             st, errs = (w[14] >> 8) & 0xFFFF, w[14] & 0xFF
             if w[14] >> 31:
                 print("         a frame received during bring-up was RESCUED")
@@ -581,12 +585,18 @@ def decode_trail(blob, label):
                 print("         -> the body pulsed its chip select once and then")
                 print("            said nothing at all.  It is not us mis-framing;")
                 print("            no bytes ever arrived.")
-            elif inwin and not w[10]:
+            elif w[1] < 6 and inwin and not w[10]:
                 print("         -> the body DID send inside its window and no frame")
                 print("            parsed: baud, polarity or framing.")
-            elif total and not inwin:
-                print("         -> every byte arrived OUTSIDE the window.  The body")
-                print("            sent nothing; that is the idle line, not traffic.")
+            elif w[1] < 6 and total and not inwin:
+                # Not "the body sent nothing", as this used to say: these
+                # bytes are the request that follows the pin handshake, lost
+                # to a stalled CPU (dump_fail_start.bin, NOTES.md 125).
+                print("         -> every byte arrived after the first window: the")
+                print("            body's first request, which no frame parsed.")
+            elif w[1] >= 6 and total and not w[10]:
+                print("         -> bytes arrived and no frame passed the framer")
+                print("            (length, 0x55, checksum): baud or framing.")
             continue
         if w[2] == QUIET:
             print(f"page {p:2d}  {tag}: tick {w[4] & 0xFFFF} at t={w[3]} ms")
@@ -752,18 +762,27 @@ def decode_trail(blob, label):
                 ln, mid, cnt = w[6 + i] & 0xFF, (w[6 + i] >> 8) & 0xFF, w[6 + i] >> 16
                 note = LENGTH_MEANING.get(ln, "not in the EA9's length table")
                 print(f"         len {ln:3d}  id {mid:#04x}  x{cnt:<6d} {note}")
-            # w[4] is the first four DISTINCT receive-window lengths, w[5]
-            # packs (window kinds seen << 16 | truncated frames).  An earlier
-            # version read both as if they were one "declared vs got" pair and
-            # printed "196609 frame(s) shorter than declared" for a run with
-            # exactly one truncation.
-            wl = [(w[4] >> (8 * k)) & 0xFF for k in range((w[5] >> 16) & 0xFF)]
-            if wl:
-                print("         receive windows, by byte count: "
-                      + ", ".join(str(v) for v in wl))
-            if w[5] & 0xFFFF:
-                print(f"         {w[5] & 0xFFFF} window(s) shorter than the "
-                      f"frame length they declared")
+            if w[1] >= 6:
+                # Format 6: the framer's and the request queue's counters.
+                print(f"         framer: {w[4] & 0xFFFF} padding byte(s) "
+                      f"skipped, {(w[4] >> 16) & 0xFF} candidate frame(s) "
+                      f"rejected")
+                print(f"         request queue: at most {w[4] >> 24} waiting, "
+                      f"{w[5] & 0xFFFF} dropped")
+                if w[5] >> 16:
+                    print(f"         *** DMA: {w[5] >> 16} position read(s) whose "
+                          f"suspend was never acknowledged ***")
+            else:
+                # w[4] is the first four DISTINCT receive-window lengths,
+                # w[5] packs (window kinds seen << 16 | truncated frames).
+                wl = [(w[4] >> (8 * k)) & 0xFF
+                      for k in range((w[5] >> 16) & 0xFF)]
+                if wl:
+                    print("         receive windows, by byte count: "
+                          + ", ".join(str(v) for v in wl))
+                if w[5] & 0xFFFF:
+                    print(f"         {w[5] & 0xFFFF} window(s) shorter than "
+                          f"the frame length they declared")
             # The RECORDS inside those frames.  The length histogram can only
             # name the one-record forms; this is what the body actually asked
             # for, whatever it packed them into.

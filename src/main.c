@@ -1866,10 +1866,10 @@ int main(void)
 			/* The three that separate "body silent" from "body
 			 * talking, us deaf". */
 			w[12] = em_cs_edges;
-			/* total, and how many of those arrived INSIDE the first
-			 * window -- the two call for opposite fixes. */
+			/* total, and how many had arrived by the end of the first
+			 * window (format 6; before it, inside that window). */
 			w[13] = (em_rx_bytes & 0xFFFFu)
-			        | ((em_rx_bytes_at_close - em_rx_bytes_at_open) << 16);
+			        | (em_rx_bytes_at_close << 16);
 			w[14] = ((uint32_t)em_pre_used << 24)
 			        | ((uint32_t)em_rx_status << 8)
 			        | (em_rx_errors & 0xFFu);
