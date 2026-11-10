@@ -1,16 +1,22 @@
-Firmware 2.1 (7 November 2026)
+Firmware 2.1 (10 November 2026)
 
-- 2.1是试图解决4代机身的兼容性问题
+- Focus now returns to infinity when you switch to MF.
+- Proper support for the camera's sleep mode.
+- More reliable start-up and shutdown, and faster shutdown.
+- More robust communication with the camera.
+
+Known issues:
+- Does not yet work on 4th-gen bodies (A7m4, A7m5, A7C2, A7Cr, A7r4, etc.)
+- AF-S is still unusable: it misses focus.
+- AF tuning is for 50 mm lenses only.
+
+==== Previous versions ====
 
 Firmware 2.0 (4 November 2026)
 
 - The adapter now identifies itself as a native E-mount lens.
 - Autofocus now works in video mode.
 - Improved AF-C range and tracking.
-
-Known issues:
-- AF-S is unusable: it misses focus.
-- The PDAF parameters are tuned for 50 mm lenses only.
 
 I hope you enjoy this community firmware.
 Author: Ziqian Wei
