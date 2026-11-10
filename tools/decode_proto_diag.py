@@ -171,8 +171,8 @@ def summarise_motor(motr, dry=False):
 
 
 MARKS = {0xB0: "boot", 0xB2: "bus up", 0xB3: "handshake",
-         0xB4: "0x16 acked", 0xB5: "PA23 driven", 0xB6: "NO BODY",
-         0xB7: "TX driven low"}
+         0xB4: "0x16 acked", 0xB5: "PA23 driven high", 0xB6: "NO BODY",
+         0xB7: "TX driven low", 0xB8: "standby wait", 0xB9: "woke"}
 
 
 def summarise_tally(blob, tally_off):
@@ -226,6 +226,15 @@ def summarise_tally(blob, tally_off):
             if code == 0xB0:
                 rc = [x for b, x in RCAUSE if data & (1 << b)] or [f"{data:#04x}"]
                 n += f" ({', '.join(rc)})"
+            elif code == 0xB4 and data:
+                # pl[0] of the request -- 01 or 03, by the body's state.
+                # Builds before the standby wait wrote 0 here.
+                n += f" (pl[0]={data:02x})"
+            elif code == 0xB8:
+                n += "" if data else " (body TXD never went low)"
+            elif code == 0xB9:
+                kind = {0x0B: "short init", 0x01: "FULL init"}.get(data, "")
+                n += f" (first id {data:#04x}{', ' + kind if kind else ''})"
             names.append(n)
         reached = {c for c, _ in got}
         if not milestones:
@@ -244,6 +253,15 @@ def summarise_tally(blob, tally_off):
             verdict = "no camera attached (flashing or bench power)"
         else:
             verdict = "*** died before the bus came up ***"
+        sleeps = sum(1 for c, _ in got if c == 0xB8)
+        wakes = sum(1 for c, _ in got if c == 0xB9)
+        if sleeps:
+            # Each wait ends either in a wake or in the power going.  One
+            # more wait than wakes is the normal ending: the last 0x16 was a
+            # real power-off.  Equal counts mean the power went with no 0x16.
+            verdict += (f"; {sleeps} standby wait(s), {wakes} woken"
+                        + ("" if sleeps > wakes else
+                           " -- power went after the last wake with no 0x16"))
         print(f"  boot {idx:2d}   {' -> '.join(names)}")
         print(f"           {verdict}")
 
@@ -607,12 +625,13 @@ def decode_trail(blob, label):
                         0x46464F42: ("BOFF", 3, "full stock shutdown incl. bus off"),
                         0x4F4C5854: ("TXLO", 4, "shutdown drives TX low, NO PA23 (§120 experiment)"),
                         0x58544F42: ("BOTX", 5, "bus off + TX low, no PA23, no VD wait"),
-                        0x41505442: ("BTPA", 6, "bus off + TX low + PA23, no VD wait")}
+                        0x41505442: ("BTPA", 6, "bus off + TX low + PA23, no VD wait"),
+                        0x57504C53: ("SLPW", 7, "bus off + TX low, standby wait, no PA23")}
             if w[5] == 0:
                 print("         (built before the shutdown-variant marker existed)")
             elif w[5] in variants:
                 name, expect, desc = variants[w[5]]
-                note = "" if name == "BTPA" else "   [historical]"
+                note = "" if name == "SLPW" else "   [historical]"
                 print(f"         {name}: {desc}{note}")
                 if w[4] != expect:
                     print(f"         *** marker inconsistent: {name} but w[4]={w[4]},"

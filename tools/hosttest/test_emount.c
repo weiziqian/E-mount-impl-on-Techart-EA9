@@ -66,6 +66,36 @@ static void fake_park(void)
 	}
 }
 
+/* The body's lines across a standby, against the clock.  Every read is one
+ * millisecond, so the waits in em_sleep_until_wake move time forward:
+ *
+ *   TXD (our RX)  high until sb_rx_low_at -- the body finishing power-down
+ *   chip select   high over [sb_glitch_at, sb_glitch_end), a glitch that never
+ *                 falls in time; then over [sb_cs_up_at, sb_cs_down_at), the
+ *                 wake.  TXD goes back up with the wake. */
+#include "diag.h"
+void host_reset_cs(void);
+extern int (*host_pin_hook)(uint8_t pin);
+extern int host_uart_disables, host_uart_resumes, host_eic_paused, host_sleeps;
+extern uint8_t host_tally_code, host_tally_data;
+extern int host_tally_n;
+static uint32_t sb_rx_low_at, sb_glitch_at, sb_glitch_end;
+static uint32_t sb_cs_up_at, sb_cs_down_at;
+
+static int sb_hook(uint8_t pin)
+{
+	uint32_t t = host_millis++;
+
+	if (pin == EM_PIN_RX) {
+		return t < sb_rx_low_at || t >= sb_cs_up_at;
+	}
+	if (pin == EM_PIN_BODY_CS) {
+		return (t >= sb_glitch_at && t < sb_glitch_end)
+		       || (t >= sb_cs_up_at && t < sb_cs_down_at);
+	}
+	return 0;
+}
+
 
 static void fail(const char *fmt, ...)
 {
@@ -2534,6 +2564,114 @@ int main(void)
 			fail("a 0x04 with a bad checksum changed the focus mode");
 		}
 		host_pad_to = 0;
+	}
+
+	/* --- the standby wait: 0x16, release, wake, short init ----------- */
+	/* What the firmware's power-down handler does after the 0x16 reply.
+	 * The body (A7 IV, 0x3b3aec and outer state 2) wakes a lens with the
+	 * attach pin handshake and then sends only 0B 09 0D 10 0A, at the speed
+	 * already negotiated. */
+	{
+		int      before, resumes = host_uart_resumes, bauds = host_baud_changes;
+		uint16_t sleeps = em_sleep_n, wakes = em_wake_n;
+		static const uint8_t short_init[] = { 0x0B, 0x09, 0x0D, 0x10 };
+		unsigned k;
+
+		len = make_request(req, 0x02, 0x70, 0x0A, 0xFF, 0x7F);
+		host_body_frame(req, len);
+		em_poll();
+		if (!em_handshake_done) {
+			fail("standby: the session to start from is not up");
+		}
+
+		len = make_request(req, 0x02, 0x71, EM_ID_SHUTDOWN, 0x03, 0x00);
+		host_body_frame(req, len);
+		em_poll();
+		if (em_m16_pl0 != 0x03) {
+			fail("standby: 0x16 pl[0] recorded as %#04x, sent 03",
+			     em_m16_pl0);
+		}
+
+		sb_rx_low_at  = host_millis + 3;
+		sb_glitch_at  = host_millis + 100;
+		sb_glitch_end = sb_glitch_at + EM_0C_WAIT_US + 10;
+		sb_cs_up_at   = sb_glitch_end + 400;
+		sb_cs_down_at = sb_cs_up_at + 2;
+		host_reset_cs();
+		host_pin_hook = sb_hook;
+		host_sleeps   = 0;
+		em_sleep_until_wake();
+		host_pin_hook = 0;
+
+		/* Twice: once to the glitch, once to the wake.  Never unpaused. */
+		if (host_sleeps != 2) {
+			fail("standby: slept %d time(s), expected 2 (negative = "
+			     "slept with the body's lines live)", host_sleeps);
+		}
+
+		if (em_sleep_n != sleeps + 1 || em_wake_n != wakes + 1) {
+			fail("standby: %u wait(s), %u wake(s), expected one each",
+			     em_sleep_n - sleeps, em_wake_n - wakes);
+		}
+		if (host_millis < sb_cs_down_at) {
+			fail("standby: returned at %u ms, before the wake at %u -- "
+			     "the glitch was taken for a wake",
+			     (unsigned)host_millis, (unsigned)sb_cs_up_at);
+		}
+		if (host_uart_resumes != resumes + 2) {
+			fail("standby: the bus was brought back %d time(s), expected "
+			     "2 (the glitch, then the wake)",
+			     host_uart_resumes - resumes);
+		}
+		if (host_baud_changes != bauds) {
+			fail("standby: the wake changed the bus speed");
+		}
+		if (!((host_port.Group[0].OUTSET.reg >> EM_PIN_LENS_CS) & 1)
+		    || !host_cs_released()) {
+			fail("standby: our chip select did not go up and down for "
+			     "the wake handshake");
+		}
+		if (em_shutdown_acked || em_handshake_done || host_eic_paused) {
+			fail("standby: woke with acked=%u handshake=%u eic paused=%d",
+			     em_shutdown_acked, em_handshake_done, host_eic_paused);
+		}
+
+		/* Nothing goes out until the short init has ended in 0x0A. */
+		before = sent_n;
+		host_frame_sync();
+		em_poll();
+		if (sent_n != before) {
+			fail("standby: %d status frame(s) before the wake's 0x0A",
+			     sent_n - before);
+		}
+
+		for (k = 0; k < sizeof(short_init); k++) {
+			before = sent_n;
+			len = make_request(req, 0x02, (uint8_t)(0x72 + k),
+			                   short_init[k], 0, 0);
+			host_body_frame(req, len);
+			em_poll();
+			if (sent_n != before + 1 || sent[before][5] != short_init[k]) {
+				fail("standby: wake request %#04x was not answered",
+				     short_init[k]);
+			}
+		}
+		len = make_request(req, 0x02, 0x76, 0x0A, 0xFF, 0x7F);
+		host_body_frame(req, len);
+		em_poll();
+		if (!em_handshake_done) {
+			fail("standby: the wake's 0x0A did not reopen the session");
+		}
+		if (host_tally_code != DIAG_MARK_WAKE || host_tally_data != 0x0B) {
+			fail("standby: tally %#04x/%#04x, expected WAKE with first "
+			     "id 0x0B", host_tally_code, host_tally_data);
+		}
+		before = sent_n;
+		host_frame_sync();
+		em_poll();
+		if (sent_n != before + 2) {
+			fail("standby: the status loop did not resume after the wake");
+		}
 	}
 
 	/* A full transmit log makes every `sent[before + 1]` read a stale

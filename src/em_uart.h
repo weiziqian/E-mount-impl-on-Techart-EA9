@@ -38,6 +38,13 @@ void     em_uart_set_baud(uint16_t baud);
  * sets, so a single send after disabling would hang the firmware forever. */
 void     em_uart_disable(void);
 
+/* Bring the bus back after em_uart_disable(), at the speed it had: BAUD is
+ * not touched, so a bus that had switched to 1.5 Mbaud comes back at 1.5.
+ * PA00 goes back to the SERCOM (idling high) and the receiver starts empty.
+ * Waking from the body's standby needs exactly this -- the body keeps the
+ * negotiated speed and does not send 0x0C again (emount.c, em_sleep_until_wake). */
+void     em_uart_resume(void);
+
 /* Raw receiver counters, below the frame layer.
  *
  * "rx frames = 0" cannot distinguish a body that stopped pulsing its chip

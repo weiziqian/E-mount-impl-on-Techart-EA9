@@ -41,9 +41,10 @@ void em_poll(void);
  * body waiting -- which is the shutdown hang. */
 #define EM_ID_SHUTDOWN   0x16u
 
-/* The first message of every handshake ever observed, on every body:
- * 0x01 -> 0x07 -> ...  So it is the session opener, and the only thing that
- * should bring the lens back after it has acknowledged a shutdown. */
+/* The first message of every cold handshake ever observed, on every body:
+ * 0x01 -> 0x07 -> ...  With no power-down handler (the host tests) it is the
+ * only thing that brings the lens back after a shutdown; the firmware comes
+ * back through em_sleep_until_wake instead, whose short init opens with 0x0B. */
 #define EM_ID_SESSION    0x01u
 
 /* The aperture command.  Init-class, an aperture in payload[0..1] on the
@@ -93,6 +94,42 @@ extern volatile uint8_t  em_shutdown_acked;  /* 0x16 answered, status loop off *
 extern volatile uint32_t em_t_shutdown;      /* ms when it was answered */
 extern volatile uint32_t em_t_revived;       /* ms a new session reopened us */
 extern volatile uint8_t  em_ignored_after_shutdown;  /* requests left unanswered */
+extern volatile uint8_t  em_m16_pl0;         /* the last 0x16 request's pl[0] */
+extern volatile uint16_t em_sleep_n;         /* standby waits entered */
+extern volatile uint16_t em_wake_n;          /* ... and woken from */
+extern volatile uint32_t em_t_wake;          /* ms of the latest wake */
+extern volatile uint8_t  em_wake_first_id;   /* first init id after it, 0 = none yet */
+
+/* THE STANDBY WAIT -- what follows the 0x16 reply once RXD has been driven low.
+ *
+ * Message 0x16 does not say whether the camera is switching off or going into
+ * standby: its pl[0] follows the body's own state and has not been seen to
+ * separate the two.  So this does what Yongnuo and TTArtisan do, and treats
+ * every 0x16 the same way: answer, release the line, and wait.  A camera that
+ * is switching off cuts our power during the wait and that is the end of it.
+ * One in standby keeps it, and comes back like this (A7 IV, 0x3b3aec):
+ *
+ *   body CS up  ->  lens CS up  ->  body TXD up  ->  lens TX (its RXD) up
+ *               ->  body CS down  ->  lens CS down
+ *
+ * -- the same pin handshake as a cold attach -- and then a short init:
+ * 0x0B 0x09 0x0D 0x10 0x0A, without 0x01, 0x07 or 0x08 (0x3b1c4c, outer
+ * state 2, "LIF Wakeup End").  So the speed negotiated by 0x0C is kept, and so
+ * is everything the long init told the body; only the per-session state is
+ * reset.  Neither vendor falls back to 750 kbaud, so neither does this.
+ *
+ * Steps: wait for the body's TXD (our RX) to read low -- it drives it low once
+ * it has seen our RXD low -- then for its chip select to rise.  On the rise:
+ * raise our chip select, give PA00 back to the UART at the old speed, wait for
+ * the body's chip select to fall, drop ours.  Then reopen for requests.
+ *
+ * Blocks, possibly for hours -- an a9 II keeps the lens powered through a
+ * camera power-off.  The wait for the wake is STANDBY sleep (CPU and 48 MHz
+ * clock stopped, woken by the EIC on the chip select), so millis() stands
+ * still across it.  Interrupts from the body's lines are held off meanwhile.  The motor is not touched: the body cut its supply on the
+ * reply, and the mechanism was parked before it.  The absolute encoder still
+ * knows where the helicoid is, so nothing is re-homed afterwards. */
+void em_sleep_until_wake(void);
 
 /* Called on message 0x16 BEFORE the acknowledgement goes out, so the lens can
  * park the way the stock does.  Optional: builds with no motor register none.
@@ -105,8 +142,8 @@ void em_set_park_handler(void (*park)(void));
 /* Called AFTER the acknowledgement has gone out.  The stock does three more
  * things at this point -- disable the bus, sync to the frame pulse twice,
  * drive PA23 high -- and then halts (EA9.md §2.6).  The body meanwhile polls
- * RXD until it reads low (msg_0x16.md).  Whatever of that a build
- * wants to reproduce goes here. */
+ * RXD until it reads low (msg_0x16.md).  The firmware's handler gets RXD low
+ * and then calls em_sleep_until_wake. */
 void em_set_powerdown_handler(void (*fn)(void));
 
 /* Turn the whole message-0x16 shutdown path off, so the responder behaves the

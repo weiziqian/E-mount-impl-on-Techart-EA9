@@ -457,8 +457,11 @@ static uint8_t  g_homing;
  * erases -- programming only clears bits -- so two parks writing the same page
  * leave the bitwise AND of both records, which is silent nonsense.  It happened:
  * boot 0 of the motor6 run reported duty_first = 0 alongside 2802 counts moved
- * in 60 ms, a speed never measured. */
-#define PARK_ATTEMPTS 2
+ * in 60 ms, a speed never measured.
+ *
+ * So only the FIRST park records anything.  Every park still moves: each
+ * standby begins with a 0x16, and the lens parks for each one (PARK_ATTEMPTS,
+ * which used to stop the motion after two, is gone with that). */
 static unsigned g_park_n;
 
 static uint32_t g_boot;
@@ -481,8 +484,8 @@ static void build_marker_page(uint32_t page)
 	w[1] = EM_DIAG_FORMAT;
 	w[2] = 0x30595244u;           /* "DRY0" -- coils live */
 	w[3] = 0;
-	w[4] = 6;
-	w[5] = 0x41505442u;           /* "BTPA" -- bus off, TX low, PA23; no VD wait */
+	w[4] = 7;
+	w[5] = 0x57504C53u;           /* "SLPW" -- bus off, TX low, standby wait; no PA23 */
 	diag_page(page, w, 16);
 }
 
@@ -771,20 +774,30 @@ static const struct servo_cfg PARK = {
  * from the SERCOM and drive it low.  Shown on the a9 II to release the body
  * as fast as the stock's PA23 does (NOTES.md §120).
  *
- * PA23 high is STILL needed (§122).  Without it the power-off itself is
- * just as fast, but a power-on that follows before the body has finished
- * shutting down is noticeably slower.  What PA23 drives on this board is
- * not known.
+ * Then WAIT, because 0x16 is also how the body enters standby, and nothing in
+ * it says which (em_sleep_until_wake, emount.h).  Switching off, the body
+ * cuts our power during the wait; in standby it keeps it and wakes us with
+ * the pin handshake and a short init at the speed already negotiated.
+ * Yongnuo and TTArtisan both do this.
+ *
+ * PA23 is NO LONGER DRIVEN.  §122 found a quick re-power-on slower without
+ * it, but PA23 is believed to be XDETECT, and releasing that tells the body
+ * the lens has been removed (A7 IV: `LIF_DETACH_DET`, which cuts the lens's
+ * logic power).  That made standby work by accident -- every wake became a
+ * cold attach -- and is the likeliest reason it was "needed": without it the
+ * body sat in standby waiting for a lens that could not be woken.  Whether
+ * the slow re-power-on comes back with a lens that CAN be woken is the first
+ * thing to check on the camera.
  *
  * Dropped from the stock sequence:
  *   VD sync      the stock waits for two frame-sync pulses first.  The body
  *                does not look at VD here, so the wait only delayed RXD low,
  *                by up to 500 ms when VD had already stopped (§121).
- *   halt         staying alive costs nothing; the body cuts power.
+ *   halt         replaced by the standby wait.
  */
 static void powerdown_signal(void)
 {
-	diag_tally_mark(DIAG_MARK_SHUTREQ, 0);
+	diag_tally_mark(DIAG_MARK_SHUTREQ, em_m16_pl0);
 
 	/* Let the acknowledgement finish on the wire before the UART goes. */
 	delay_ms(50);
@@ -803,9 +816,8 @@ static void powerdown_signal(void)
 	PORT->Group[0].PINCFG[EM_PIN_TX].reg &= ~(uint8_t)PORT_PINCFG_PMUXEN;
 	diag_tally_mark(DIAG_MARK_TXLOW, 0);
 
-	/* PA23 high -- required, see above (§122). */
-	PORT->Group[0].OUTSET.reg = (1u << 23);
-	diag_tally_mark(DIAG_MARK_PA23, 0);
+	/* Returns only if the body wakes us from standby. */
+	em_sleep_until_wake();
 }
 
 static void park_to_infinity(void)
@@ -816,8 +828,8 @@ static void park_to_infinity(void)
 	int32_t  here;
 	unsigned i;
 
-	if (!g_homed || g_park_n >= PARK_ATTEMPTS) {
-		return;                  /* not homed, or out of pages to record in */
+	if (!g_homed) {
+		return;
 	}
 	here = abs_encoder_track();
 	if (here > -PARK.tolerance && here < PARK.tolerance) {

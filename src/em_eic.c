@@ -9,9 +9,11 @@
 
 #define EIC_CONFIG_BOTH_FILT  0xbu    /* FILTEN | SENSE = BOTH */
 #define EIC_CONFIG_RISE_FILT  0x9u    /* FILTEN | SENSE = RISE */
+#define EIC_CONFIG_HIGH       0x4u    /* SENSE = HIGH, no filter */
 
 static void (*g_cs_edge)(int level);
 static void (*g_vd_edge)(void);
+static volatile uint8_t g_sleeping;   /* EIC_Handler only wakes the CPU */
 
 int em_pin_level(uint8_t pin)
 {
@@ -60,9 +62,96 @@ void em_eic_init(void (*cs_edge)(int level), void (*vd_edge)(void))
 	NVIC_EnableIRQ(EIC_IRQn);
 }
 
+void em_eic_pause(void)
+{
+	NVIC_DisableIRQ(EIC_IRQn);
+}
+
+void em_eic_resume(void)
+{
+	EIC->INTFLAG.reg = (1u << EM_EXTINT_BODY_CS) | (1u << EM_EXTINT_BODY_VD);
+	NVIC_ClearPendingIRQ(EIC_IRQn);
+	NVIC_EnableIRQ(EIC_IRQn);
+}
+
+static void eic_set_config(uint32_t config)
+{
+	EIC->CTRL.reg = 0;
+	while (EIC->STATUS.bit.SYNCBUSY) {
+	}
+	EIC->CONFIG[0].reg = config;
+	EIC->CTRL.reg = EIC_CTRL_ENABLE;
+	while (EIC->STATUS.bit.SYNCBUSY) {
+	}
+}
+
+void em_eic_sleep_until_cs_high(void)
+{
+	const uint32_t cs     = 1u << EM_EXTINT_BODY_CS;
+	const uint32_t vd     = 1u << EM_EXTINT_BODY_VD;
+	const uint32_t shift  = 4u * EM_EXTINT_BODY_CS;
+	uint32_t       config = EIC->CONFIG[0].reg;
+	uint32_t       tick   = SysTick->CTRL;
+
+	/* SAMD21 errata: with the default SLEEPPRM the part can fail to wake
+	 * from standby.  DISABLED keeps the flash powered in sleep, which costs
+	 * a few uA and nothing else. */
+	NVMCTRL->CTRLB.bit.SLEEPPRM = NVMCTRL_CTRLB_SLEEPPRM_DISABLED_Val;
+
+	/* In STANDBY, GCLK0 -- and with it the EIC's clock -- is stopped, and
+	 * an EIC without its clock can only wake the part on a LEVEL, unfiltered.
+	 * The caller has already seen the line low, so "high" is the rising edge. */
+	EIC->INTENCLR.reg = cs | vd;
+	eic_set_config((config & ~(0xFu << shift)) | (EIC_CONFIG_HIGH << shift));
+	g_sleeping = 1;
+	NVIC_ClearPendingIRQ(EIC_IRQn);
+	NVIC_EnableIRQ(EIC_IRQn);
+
+	/* The 1 ms tick would wake the part every millisecond. */
+	SysTick->CTRL = tick & ~SysTick_CTRL_TICKINT_Msk;
+	SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+
+	/* PRIMASK across the check and the WFI: a rise between the two leaves
+	 * the interrupt pending, and a pending interrupt ends WFI even masked.
+	 * Unmasked, the handler could run first, clear the enable, and leave
+	 * the WFI with nothing to wake it. */
+	for (;;) {
+		__disable_irq();
+		if (PORT->Group[0].IN.reg & (1u << EM_PIN_BODY_CS)) {
+			__enable_irq();
+			break;
+		}
+		EIC->INTFLAG.reg  = cs;
+		EIC->INTENSET.reg = cs;
+		__DSB();
+		__WFI();
+		__enable_irq();          /* the handler runs here */
+	}
+
+	SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+	SysTick->CTRL = tick;
+	g_sleeping = 0;
+
+	/* Back to the paused state the caller is in: callbacks off, the
+	 * session's edge config restored. */
+	NVIC_DisableIRQ(EIC_IRQn);
+	EIC->INTENCLR.reg = cs | vd;
+	eic_set_config(config);
+	EIC->INTFLAG.reg  = cs | vd;
+	EIC->INTENSET.reg = cs | vd;
+}
+
 void EIC_Handler(void)
 {
 	uint32_t flags = EIC->INTFLAG.reg;
+
+	/* Asleep: the interrupt's only job was to end the WFI.  A level
+	 * interrupt keeps firing while the line is high, so turn it off. */
+	if (g_sleeping) {
+		EIC->INTENCLR.reg = 1u << EM_EXTINT_BODY_CS;
+		EIC->INTFLAG.reg  = flags;
+		return;
+	}
 
 	if (flags & (1u << EM_EXTINT_BODY_CS)) {
 		EIC->INTFLAG.reg = (1u << EM_EXTINT_BODY_CS);

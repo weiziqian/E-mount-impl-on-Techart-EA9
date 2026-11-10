@@ -144,6 +144,17 @@ void em_uart_disable(void)
 	em_uart_sync();
 }
 
+void em_uart_resume(void)
+{
+	/* Mux first, so the pin goes straight from driven-low GPIO to the
+	 * idling transmitter without floating in between. */
+	PORT->Group[0].PINCFG[EM_PIN_TX].reg |= PORT_PINCFG_PMUXEN;
+	EMSERCOM->USART.CTRLA.reg |= SERCOM_USART_CTRLA_ENABLE;
+	em_uart_sync();
+	g_disabled = 0;
+	em_uart_rx_reset();
+}
+
 void em_uart_set_baud(uint16_t baud)
 {
 	if (g_disabled) {

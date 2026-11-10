@@ -101,6 +101,30 @@ uint16_t host_baud = EM_BAUD;
 int      host_baud_changes;
 int      host_baud_at_sent_n = -1;
 
+/* The standby wait takes the bus down and brings it back. */
+int host_uart_disables;
+int host_uart_resumes;
+void em_uart_disable(void) { host_uart_disables++; }
+void em_uart_resume(void)  { host_uart_resumes++; rx_len = 0; }
+
+/* ... and holds the body's lines off while it polls them itself. */
+int host_eic_paused;
+void em_eic_pause(void)  { host_eic_paused = 1; }
+void em_eic_resume(void) { host_eic_paused = 0; }
+
+/* The sleep, as the scripted lines see it: the CPU stops until the chip
+ * select reads high.  Called paused, returns paused. */
+int host_sleeps;
+void em_eic_sleep_until_cs_high(void)
+{
+	host_sleeps++;
+	if (!host_eic_paused) {
+		host_sleeps = -1000;       /* the test fails on this */
+	}
+	while (!em_pin_level(EM_PIN_BODY_CS)) {
+	}
+}
+
 void em_uart_set_baud(uint16_t baud)
 {
 	host_baud = baud;
@@ -163,8 +187,15 @@ int      host_vd_after_ms = -1;
 const int *host_cs_seq;
 unsigned   host_cs_seq_n, host_cs_seq_i;
 
+/* Overrides everything below when set: the standby test scripts the body's
+ * TXD and chip select against the clock, and advances the clock itself. */
+int (*host_pin_hook)(uint8_t pin);
+
 int em_pin_level(uint8_t pin)
 {
+	if (host_pin_hook) {
+		return host_pin_hook(pin);
+	}
 	if (host_wait_mode) {
 		if (pin == EM_PIN_BODY_VD) {
 			if (host_vd_after_ms >= 0

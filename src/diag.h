@@ -151,9 +151,17 @@ uint32_t diag_boot_tally(uint32_t rcause);
 #define DIAG_MARK_BOOT      0xB0u   /* payload: RCAUSE                  */
 #define DIAG_MARK_BUSUP     0xB2u   /* em_init returned                 */
 #define DIAG_MARK_HANDSHAKE 0xB3u   /* message 0x0a answered            */
-#define DIAG_MARK_SHUTREQ   0xB4u   /* message 0x16 acknowledged        */
-#define DIAG_MARK_PA23      0xB5u   /* shutdown: PA23 driven high        */
+#define DIAG_MARK_SHUTREQ   0xB4u   /* message 0x16 acknowledged; payload its pl[0] */
+#define DIAG_MARK_PA23      0xB5u   /* shutdown: PA23 driven high (no longer written) */
 #define DIAG_MARK_TXLOW     0xB7u   /* shutdown: TX driven low (RXD at the body) */
+/* The standby wait (emount.c, em_sleep_until_wake).  SLEEP is written when
+ * the wait starts, payload 1 if the body's TXD went low first (it finished
+ * its power-down), 0 if that wait timed out.  WAKE is written once the
+ * session that follows has reached 0x0A, payload the first init-class id the
+ * body sent after waking -- 0x0B for a standby wake, 0x01 for a fresh one.  A
+ * real power-off shows SLEEP and nothing after it. */
+#define DIAG_MARK_SLEEP     0xB8u
+#define DIAG_MARK_WAKE      0xB9u
 /* NO BODY.  em_init blocks in a bare `while (!chip_select)` loop, so a boot on
  * a bench supply or on the USB flasher writes page 0 and then waits forever --
  * which in the trail is indistinguishable from a camera that cut power before

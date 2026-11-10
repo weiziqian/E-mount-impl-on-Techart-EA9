@@ -105,9 +105,9 @@ HOSTTEST := $(OUT)/hosttest
 
 all: $(TARGET).bin
 ifeq ($(BUILD),debug)
-	@grep -q BTPA $(TARGET).bin \
-	  && echo "  verified: shutdown = bus off + TX low + PA23 (BTPA marker)" \
-	  || { echo "  FAIL: no BTPA marker in the image"; exit 1; }
+	@grep -q SLPW $(TARGET).bin \
+	  && echo "  verified: shutdown = bus off + TX low + standby wait (SLPW marker)" \
+	  || { echo "  FAIL: no SLPW marker in the image"; exit 1; }
 	@grep -q DRY0 $(TARGET).bin \
 	  && echo "  verified: motor drive ENABLED (DRY0 marker)" \
 	  || { echo "  FAIL: no DRY0 marker in the image"; exit 1; }
@@ -115,7 +115,7 @@ else
 	@# The release image is checked for the OPPOSITE of the debug image: the
 	@# marker page is written by the trail, so its absence says the trail
 	@# really is gone from the binary and not merely quiet at runtime.
-	@if grep -q BTPA $(TARGET).bin || grep -q DRY0 $(TARGET).bin; then \
+	@if grep -q SLPW $(TARGET).bin || grep -q DRY0 $(TARGET).bin; then \
 	    echo "  FAIL: build-marker strings still in the image -- the trail is compiled in"; \
 	    exit 1; \
 	 fi

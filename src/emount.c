@@ -209,6 +209,12 @@ volatile uint8_t  em_shutdown_acked;
 volatile uint32_t em_t_shutdown;
 volatile uint32_t em_t_revived;
 volatile uint8_t  em_ignored_after_shutdown;
+volatile uint8_t  em_m16_pl0;
+volatile uint16_t em_sleep_n;
+volatile uint16_t em_wake_n;
+volatile uint32_t em_t_wake;
+volatile uint8_t  em_wake_first_id;
+static volatile uint8_t g_woke;     /* woken, WAKE mark not yet written */
 static void (*g_park)(void);
 static void (*g_powerdown)(void);
 static uint8_t g_shutdown_enabled = 1;
@@ -538,7 +544,11 @@ static void em_send_id(uint8_t id)
 	 *
 	 * This is the reversible version of the stock's UART disable: the same
 	 * silence from the body's point of view, but a lens that can still hear
-	 * and can still be woken. */
+	 * and can still be woken.
+	 *
+	 * Only reached with no power-down handler (the host tests).  The
+	 * firmware's handler ends in em_sleep_until_wake, which clears the flag
+	 * itself before the body's short wake init -- 0x0B first, no 0x01. */
 	if (em_shutdown_acked) {
 		if (id != EM_ID_SESSION) {
 			em_ignored_after_shutdown++;
@@ -585,8 +595,8 @@ static void em_send_id(uint8_t id)
 	}
 
 	/* Message 0x0C: the template answers 01, and the switch to 1.5 Mbaud
-	 * follows the reply.  Nothing switches back: the bus is disabled at
-	 * shutdown and the next boot starts at 750. */
+	 * follows the reply.  Nothing switches back: a standby wake keeps the
+	 * speed (em_sleep_until_wake), and a real power-off reboots at 750. */
 	if (id == EM_ID_BAUD) {
 		em_transmit(frame, p->len);
 		em_baud_switch();
@@ -1280,7 +1290,15 @@ static void on_cs_edge(int level)
 		g_file_pending = 1;
 	}
 
+	/* Message 0x16's pl[0], for the tally: 01 or 03 by the body's state. */
+	if (rx[3] == EM_CLASS_INIT && rx[5] == EM_ID_SHUTDOWN && n >= 10) {
+		em_m16_pl0 = rx[6];
+	}
+
 	if (rx[3] == EM_CLASS_INIT) {
+		if (g_woke && !em_wake_first_id) {
+			em_wake_first_id = rx[5];
+		}
 		em_last_id      = rx[5];
 		g_reply_id      = rx[5];
 		g_reply_pending = 1;
@@ -2192,6 +2210,10 @@ void em_poll(void)
 		if (id == 0x0A) {
 			em_handshake_done = 1;
 			em_t_handshake    = millis();
+			if (g_woke) {
+				g_woke = 0;
+				diag_tally_mark(DIAG_MARK_WAKE, em_wake_first_id);
+			}
 		}
 	}
 
@@ -2210,4 +2232,105 @@ void em_poll(void)
 	em_pump_status();
 
 	g_in_poll = 0;
+}
+
+/* THE STANDBY WAIT (emount.h).  Entered from the power-down handler, after the
+ * 0x16 reply, with our UART off and PA00 driven low. */
+
+/* The body drives its TXD low within one 5 ms poll of seeing our RXD low
+ * (msg_0x16.md, power-off step 6).  Past this it is not coming, and the wait
+ * goes on regardless: what matters is the chip select. */
+#define EM_SLEEP_RX_LOW_MS  200u
+
+/* Everything that belongs to one session and not to the lens.  What the long
+ * init told the body -- capabilities, identity, the 0x08 request's aperture
+ * bit, the speed -- stays, because the short init does not ask again.  The
+ * position state stays too: the helicoid has not moved. */
+static void em_session_reset(void)
+{
+	__disable_irq();
+	g_reply_pending  = 0;
+	g_file_pending   = 0;
+	g_status_due     = 0;
+	em_focus_pending = 0;
+	g_query_n        = 0;
+	g_event_n        = 0;
+	g_ans_n          = 0;
+	g_row_req[0]     = 0;
+	g_row_req[1]     = 0;
+	g_row_next[0]    = 0;
+	g_row_next[1]    = 0;
+	g_t_prev_vd      = 0;    /* the gap across the standby is not a frame */
+	__enable_irq();
+	em_set_scan_state(0);
+}
+
+/* The wake pin handshake, from the moment the body's chip select is seen high.
+ * Returns 0 if the body never brought it down again -- a glitch on an idle
+ * line rather than a body -- and the caller goes back to waiting. */
+static uint8_t em_wake_handshake(void)
+{
+	uint32_t t;
+
+	PORT->Group[0].OUTSET.reg = (1u << EM_PIN_LENS_CS);
+	em_uart_resume();                 /* our TX, the body's RXD, idles high */
+
+	for (t = 0; t < EM_0C_WAIT_US; t++) {
+		if (!em_pin_level(EM_PIN_BODY_CS)) {
+			delay_us(EM_0C_READY_US);
+			PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_LENS_CS);
+			return 1;
+		}
+		delay_us(1);
+	}
+
+	/* Not a wake: put the line back the way the body left it. */
+	em_uart_disable();
+	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_TX);
+	PORT->Group[0].DIRSET.reg = (1u << EM_PIN_TX);
+	PORT->Group[0].PINCFG[EM_PIN_TX].reg &= ~(uint8_t)PORT_PINCFG_PMUXEN;
+	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_LENS_CS);
+	return 0;
+}
+
+void em_sleep_until_wake(void)
+{
+	uint32_t t0;
+	uint8_t  rx_low = 0;
+
+	em_eic_pause();
+	em_handshake_done = 0;
+	g_status_due      = 0;
+	count16(&em_sleep_n);
+
+	t0 = millis();
+	while ((uint32_t)(millis() - t0) < EM_SLEEP_RX_LOW_MS) {
+		if (!em_pin_level(EM_PIN_RX)) {
+			rx_low = 1;
+			break;
+		}
+	}
+	diag_tally_mark(DIAG_MARK_SLEEP, rx_low);
+
+	/* Standby, or the last microseconds before the power goes.  A RISING
+	 * edge, not a level: after a glitch that never fell the line may still
+	 * be high, and its eventual fall must not read as a wake.  The low half
+	 * is a short spin; the wait for the rise is real sleep -- an a9 II keeps
+	 * the lens powered through a camera power-off (dump_wakeup.bin), so this
+	 * wait can last as long as the camera stays off. */
+	do {
+		while (em_pin_level(EM_PIN_BODY_CS)) {
+		}
+		em_eic_sleep_until_cs_high();
+	} while (!em_wake_handshake());
+
+	em_session_reset();
+	em_wake_first_id  = 0;
+	g_woke            = 1;
+	count16(&em_wake_n);
+	em_t_wake         = millis();
+	em_t_last_frame   = em_t_wake;   /* or the main loop reads the standby
+	                                    as the bus going quiet */
+	em_shutdown_acked = 0;
+	em_eic_resume();
 }
