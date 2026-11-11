@@ -235,6 +235,7 @@ volatile uint16_t em_aperture_req;
 volatile uint16_t em_m03_aperture;
 volatile uint16_t em_m03_n;
 volatile uint8_t  em_focus_mf;
+static uint8_t    g_mf_run;      /* consecutive 0x81 frames, to EM_MF_FRAMES */
 volatile uint16_t em_mf_edges;
 volatile uint8_t  em_m08[EM_M08_LEN];
 volatile uint8_t  em_m0a[EM_M0A_LEN];
@@ -1287,12 +1288,17 @@ static void em_frame_in(const uint8_t *rx, uint16_t n)
 			if (rx[end - 1] == EM_FRAME_END
 			    && rx[end - 3] == (uint8_t)sum
 			    && rx[end - 2] == (uint8_t)(sum >> 8)) {
-				uint8_t mf = (rx[9] == EM04_MODE_MF);
-
-				if (mf && !em_focus_mf) {
+				/* Manual focus only after EM_MF_FRAMES
+				 * consecutive 0x81 frames; the first other
+				 * frame leaves it at once (the stock's 0x5308). */
+				if (rx[9] != EM04_MODE_MF) {
+					g_mf_run    = 0;
+					em_focus_mf = 0;
+				} else if (g_mf_run < EM_MF_FRAMES
+				           && ++g_mf_run == EM_MF_FRAMES) {
+					em_focus_mf = 1;
 					count16(&em_mf_edges);
 				}
-				em_focus_mf = mf;
 			}
 		}
 		if (end >= EM04_REC_START + 3u) {

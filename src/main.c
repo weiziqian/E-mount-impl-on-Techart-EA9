@@ -1635,8 +1635,8 @@ static void focus_drive(const struct em_focus_cmd *c)
  * moves once to the lower clamp, 4144, the infinity end.  Edge-triggered, so
  * it moves once per entry, and leaving manual focus re-arms it.
  *
- * What is NOT the stock's is the gate.  The stock waits for eleven
- * consecutive 0x81 frames; this waits instead until the focus path is idle --
+ * The gate is the stock's eleven consecutive 0x81 frames (EM_MF_FRAMES,
+ * counted in emount.c), and on top of that the focus path must be idle --
  * no leg running (focus_exec is blocking, so the main loop only gets here
  * between legs) and no instruction waiting -- so the return can never fight
  * an instruction the body has already issued.  A corrupted frame is excluded

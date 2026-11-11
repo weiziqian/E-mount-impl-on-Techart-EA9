@@ -478,9 +478,13 @@ extern volatile uint16_t em_m03_aperture;
 extern volatile uint16_t em_m03_n;
 
 /* Message 0x04 pl[3], the focus control mode: 0x83 the body drives focus,
- * 0x81 manual focus (autofocus.md 3.5).  em_focus_mf follows the latest 0x04
- * whose checksum verifies; em_mf_edges counts its 0 -> 1 transitions. */
+ * 0x81 manual focus (autofocus.md 3.5).  em_focus_mf goes to 1 after
+ * EM_MF_FRAMES consecutive 0x81 frames and back to 0 on the first frame that
+ * is not 0x81, as the stock's per-frame handler 0x5308 does (servo.md 10);
+ * only frames whose checksum verifies count either way.  em_mf_edges counts
+ * its 0 -> 1 transitions. */
 #define EM04_MODE_MF 0x81u
+#define EM_MF_FRAMES 11u
 extern volatile uint8_t  em_focus_mf;
 extern volatile uint16_t em_mf_edges;
 

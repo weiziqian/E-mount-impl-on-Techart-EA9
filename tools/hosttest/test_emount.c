@@ -2537,17 +2537,25 @@ int main(void)
 			0x80, 0x01, 0x55,
 		};
 		uint16_t edges = em_mf_edges, s;
+		unsigned k;
 
 		host_pad_to = 32;
+		for (k = 1; k < EM_MF_FRAMES; k++) {
+			host_body_frame(m04, sizeof(m04)); em_poll();
+		}
+		if (em_focus_mf || em_mf_edges != edges) {
+			fail("manual focus after only %u 0x81 frames",
+			     EM_MF_FRAMES - 1u);
+		}
 		host_body_frame(m04, sizeof(m04)); em_poll();
 		if (!em_focus_mf || em_mf_edges != edges + 1) {
-			fail("0x04 pl[3] = 0x81 (a captured a9 II frame) did not "
-			     "read as manual focus: mf=%u edges +%u",
+			fail("%u 0x81 frames (a captured a9 II frame) did not "
+			     "read as manual focus: mf=%u edges +%u", EM_MF_FRAMES,
 			     em_focus_mf, (unsigned)(em_mf_edges - edges));
 		}
 		host_body_frame(m04, sizeof(m04)); em_poll();
 		if (em_mf_edges != edges + 1) {
-			fail("a second 0x81 frame counted as a new entry into MF");
+			fail("a further 0x81 frame counted as a new entry into MF");
 		}
 
 		/* 0x83 with its checksum fixed: back to AF. */
@@ -2559,10 +2567,35 @@ int main(void)
 			fail("0x04 pl[3] = 0x83 did not leave manual focus");
 		}
 
-		/* 0x81 with the 0x83 checksum: corrupted, must be ignored. */
+		/* An 0x83 inside a run restarts the count. */
+		{
+			uint8_t af[22];
+
+			memcpy(af, m04, sizeof(af));
+			m04[9] = 0x81;
+			s = checksum(m04, sizeof(m04));
+			m04[19] = (uint8_t)s; m04[20] = (uint8_t)(s >> 8);
+			for (k = 1; k < EM_MF_FRAMES; k++) {
+				host_body_frame(m04, sizeof(m04)); em_poll();
+			}
+			host_body_frame(af, sizeof(af)); em_poll();
+			host_body_frame(m04, sizeof(m04)); em_poll();
+			if (em_focus_mf || em_mf_edges != edges + 1) {
+				fail("an 0x83 frame did not restart the 0x81 count");
+			}
+			host_body_frame(af, sizeof(af)); em_poll();
+		}
+
+		/* 0x81 with the 0x83 checksum: corrupted, must be ignored --
+		 * neither counted toward MF nor restarting the count. */
+		m04[9] = 0x83;
+		s = checksum(m04, sizeof(m04));
+		m04[19] = (uint8_t)s; m04[20] = (uint8_t)(s >> 8);
 		m04[9] = 0x81;
 		host_fix_checksum = 0;
-		host_body_frame(m04, sizeof(m04)); em_poll();
+		for (k = 0; k < EM_MF_FRAMES; k++) {
+			host_body_frame(m04, sizeof(m04)); em_poll();
+		}
 		host_fix_checksum = 1;
 		if (em_focus_mf || em_mf_edges != edges + 1) {
 			fail("a 0x04 with a bad checksum changed the focus mode");
