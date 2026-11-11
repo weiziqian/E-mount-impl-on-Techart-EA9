@@ -1,35 +1,12 @@
 #include "board.h"
 #include "diag.h"
-
-#define GUARD_LO     0x00010000u      /* never touch anything below this */
-#define GUARD_HI     0x00020000u      /* flash end on the SAMD21E17A     */
-#define NVM_CMDEX    0xA500u
-#define NVM_CMD_ER   0x02u
-#define NVM_CMD_WP   0x04u
-#define NVM_CMD_PBC  0x44u
+#include "nvm.h"
 
 /* Above anything the linker allocates (bss ends well below this), and not
  * cleared by startup -- so it survives a warm reset but not a power cycle. */
 #define NOINIT_MAGIC_ADDR   0x20003FF0u
 #define NOINIT_COUNT_ADDR   0x20003FF4u
 #define NOINIT_MAGIC        0x424F4F54u     /* "BOOT" */
-
-static void nvm_wait(void)
-{
-	while (!(NVMCTRL->INTFLAG.reg & NVMCTRL_INTFLAG_READY)) {
-	}
-}
-
-static void nvm_cmd(uint32_t byte_addr, uint32_t cmd)
-{
-	if (byte_addr < GUARD_LO || byte_addr >= GUARD_HI) {
-		return;                       /* BOOTPROT is NONE; the guard is ours */
-	}
-	nvm_wait();
-	NVMCTRL->ADDR.reg  = byte_addr / 2;
-	NVMCTRL->CTRLA.reg = (uint16_t)(NVM_CMDEX | cmd);
-	nvm_wait();
-}
 
 uint32_t diag_src_id(void)
 {
@@ -52,13 +29,7 @@ uint32_t diag_page_capacity(void)
  */
 static void tally_write(uint32_t slot, uint32_t value)
 {
-	volatile uint32_t *slots = (volatile uint32_t *)DIAG_TALLY_BASE;
-	uint32_t page_addr = DIAG_TALLY_BASE
-	                     + (slot / (DIAG_PAGE_SIZE / 4)) * DIAG_PAGE_SIZE;
-
-	nvm_cmd(page_addr, NVM_CMD_PBC);
-	slots[slot] = value;
-	nvm_cmd(page_addr, NVM_CMD_WP);
+	nvm_log_write(DIAG_TALLY_BASE + slot * 4u, &value, 1);
 }
 
 static uint8_t g_tally_boot;
@@ -90,7 +61,7 @@ uint32_t diag_boot_tally(uint32_t rcause)
 
 	/* A different build -- or a blank row -- starts the tally over. */
 	if (slots[0] != stamp) {
-		nvm_cmd(DIAG_TALLY_BASE, NVM_CMD_ER);
+		nvm_log_erase_row(DIAG_TALLY_BASE);
 		tally_write(0, stamp);
 	}
 
@@ -105,7 +76,7 @@ uint32_t diag_boot_tally(uint32_t rcause)
 		}
 	}
 	if (k == DIAG_TALLY_SLOTS) {
-		nvm_cmd(DIAG_TALLY_BASE, NVM_CMD_ER);
+		nvm_log_erase_row(DIAG_TALLY_BASE);
 		tally_write(0, stamp);
 		boots = 0;
 	}
@@ -139,22 +110,15 @@ uint32_t diag_begin(uint32_t boot_index)
 	 * other slot still holds the boot before this one. */
 	g_slot_base = DIAG_BASE + (boot_index % DIAG_SLOTS) * DIAG_SLOT_SIZE;
 	for (n = 0; n < DIAG_ROWS; n++) {
-		nvm_cmd(g_slot_base + n * DIAG_ROW_SIZE, NVM_CMD_ER);
+		nvm_log_erase_row(g_slot_base + n * DIAG_ROW_SIZE);
 	}
 	return *count;
 }
 
 void diag_page(uint32_t page, const uint32_t *w, uint32_t words)
 {
-	uint32_t addr = g_slot_base + page * DIAG_PAGE_SIZE;
-	uint32_t i;
-
 	if (page >= DIAG_PAGES || words > DIAG_PAGE_SIZE / 4) {
 		return;
 	}
-	nvm_cmd(addr, NVM_CMD_PBC);
-	for (i = 0; i < words; i++) {
-		((volatile uint32_t *)addr)[i] = w[i];
-	}
-	nvm_cmd(addr, NVM_CMD_WP);
+	nvm_log_write(g_slot_base + page * DIAG_PAGE_SIZE, w, words);
 }

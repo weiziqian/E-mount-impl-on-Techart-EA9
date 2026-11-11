@@ -2792,6 +2792,47 @@ int main(void)
 		}
 	}
 
+	/* --- message 0x10 held for the boot reset (em_hold_ready) -------- */
+	/* While held nothing is answered -- no "not ready" -- and exactly one
+	 * "ready" goes out on release, however many were asked. */
+	{
+		int before;
+
+		em_hold_ready();
+		em_reset_wanted = 0;
+		before = sent_n;
+		len = make_request(req, 0x02, 0x80, EM_ID_READY, 0, 0);
+		host_body_frame(req, len);
+		em_poll();
+		if (sent_n != before || !em_reset_wanted) {
+			fail("0x10 hold: answered while held (%d), or the reset "
+			     "was not asked for", sent_n - before);
+		}
+		len = make_request(req, 0x02, 0x81, EM_ID_READY, 0, 0);
+		host_body_frame(req, len);
+		em_poll();
+		if (sent_n != before) {
+			fail("0x10 hold: a repeated 0x10 was answered while held");
+		}
+		em_set_ready();
+		em_poll();
+		if (sent_n != before + 1 || sent[before][6] != 0x00) {
+			fail("0x10 hold: \"ready\" not sent on release");
+		} else {
+			check_frame(before, EM_ID_READY, "0x10 ready");
+		}
+		em_poll();
+		if (sent_n != before + 1) {
+			fail("0x10 hold: \"ready\" sent twice");
+		}
+		len = make_request(req, 0x02, 0x82, EM_ID_READY, 0, 0);
+		host_body_frame(req, len);
+		em_poll();
+		if (sent_n != before + 2 || sent[before + 1][6] != 0x00) {
+			fail("0x10 hold: not answered \"ready\" once released");
+		}
+	}
+
 	/* A full transmit log makes every `sent[before + 1]` read a stale
 	 * frame, so it must be an error, not a silent truncation. */
 	if (sent_overflow) {

@@ -31,4 +31,11 @@ int32_t  abs_encoder_position(void);
 void    abs_encoder_track_reset(void);
 int32_t abs_encoder_track(void);
 
+/* Start the running total at `pos` instead of 0. */
+void    abs_encoder_track_set(int32_t pos);
+
+/* `to - from` between two raw readings, the short way round the 14-bit
+ * circle: in [-8192, 8191]. */
+int32_t abs_encoder_delta(uint16_t to, uint16_t from);
+
 #endif

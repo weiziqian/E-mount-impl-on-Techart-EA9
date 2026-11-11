@@ -16,14 +16,18 @@
 #   | debug   | -O1 -DDEBUG    | compiled IN  -- diag.c + trail.c    |
 #   | release | -O2 -DEA9_NO_LOG -DNDEBUG | compiled OUT -- not built at all |
 #
-# Why release writes NOTHING to flash: every trail page is an erase/program
+# Why release writes NO LOG to flash: every trail page is an erase/program
 # cycle on a part with a finite number of them.  A bench session's worth is
 # nothing; a camera used for years is not.  So release does not "disable
 # logging at runtime" -- diag.c and trail.c are not in SRCS, the headers
-# replace their interface with inline no-ops (see src/diag.h), and the `all`
-# rule then CHECKS that no diag_*/trail_* symbol survived.  Nothing else in
-# the image writes flash: clock.c and startup_samd21.c touch NVMCTRL only for
-# wait states and the MANW errata bit, both reads-modify-writes of CTRLB.
+# replace their interface with inline no-ops (see src/diag.h), nvm.c drops its
+# nvm_log_* writers, and the `all` rule then CHECKS that no diag_*/trail_*/
+# nvm_log_* symbol survived.
+#
+# Release DOES write configuration (cfg.c, through nvm_cfg_*), confined to its
+# own region at 0x1C000 and written only when a value changes (src/nvm.h).
+# All flash erase/program goes through nvm.c; clock.c and startup_samd21.c
+# touch NVMCTRL only for wait states and the MANW errata bit.
 #
 # Each configuration has its OWN object directory.  Sharing one is how a
 # build system starts handing you the wrong image while reporting success --
@@ -93,7 +97,7 @@ SRCS := src/startup_samd21.c src/system_samd21.c src/board.c \
         src/clock.c src/delay.c \
         src/emount.c src/emount_packets.c src/optical_file.c \
         src/em_uart.c src/em_eic.c \
-        $(LOGSRCS) \
+        src/nvm.c src/cfg.c $(LOGSRCS) \
         src/motor.c src/abs_encoder.c src/servo.c src/focus_map.c \
         src/focus_dist.c \
         src/vdd.c \
@@ -121,14 +125,15 @@ else
 	 fi
 	@echo "  verified: no build-marker page (the trail is compiled out)"
 	@# The load-bearing check.  Every flash erase and program in this
-	@# firmware goes through diag.c; if no diag_* or trail_* symbol was
-	@# linked, the image has no instruction that can write flash.
-	@if $(TOOLCHAIN)nm $(TARGET).elf | grep -qE ' (diag_|trail_)'; then \
-	    echo "  FAIL: diag/trail symbols linked into a release image:"; \
-	    $(TOOLCHAIN)nm $(TARGET).elf | grep -E ' (diag_|trail_)'; \
+	@# firmware goes through nvm.c, whose log writers are nvm_log_*; if no
+	@# diag_*, trail_* or nvm_log_* symbol was linked, the image can write
+	@# only the configuration region.
+	@if $(TOOLCHAIN)nm $(TARGET).elf | grep -qE ' (diag_|trail_|nvm_log_)'; then \
+	    echo "  FAIL: log symbols linked into a release image:"; \
+	    $(TOOLCHAIN)nm $(TARGET).elf | grep -E ' (diag_|trail_|nvm_log_)'; \
 	    exit 1; \
 	 fi
-	@echo "  verified: no diag_*/trail_* symbol -- the image cannot write flash"
+	@echo "  verified: no diag_*/trail_*/nvm_log_* symbol -- the image writes no log"
 endif
 	@echo "  source id: $$(cat src/*.c src/*.h | md5sum | cut -c1-6)"
 

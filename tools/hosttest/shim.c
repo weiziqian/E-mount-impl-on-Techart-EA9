@@ -24,7 +24,7 @@ volatile uint16_t em_rx_status;
  * happened: the suite grew past 64 frames and three event-queue checks read
  * frames from thousands of lines earlier.  Hence the room, and the overflow
  * counter the suite fails on. */
-#define MAX_SENT 256
+#define MAX_SENT 512
 uint8_t  sent[MAX_SENT][512];          /* 0x3B is 500 bytes */
 uint16_t sent_len[MAX_SENT];
 int      sent_cs_asserted[MAX_SENT];   /* was our chip select high? */

@@ -91,8 +91,20 @@ int32_t abs_encoder_position(void)
 
 void abs_encoder_track_reset(void)
 {
-	g_track      = 0;
+	abs_encoder_track_set(0);
+}
+
+void abs_encoder_track_set(int32_t pos)
+{
+	g_track      = pos;
 	g_track_last = abs_encoder_raw();
+}
+
+int32_t abs_encoder_delta(uint16_t to, uint16_t from)
+{
+	int32_t d = (int32_t)((to - from) & (ENC_COUNTS - 1));
+
+	return d >= ENC_COUNTS / 2 ? d - ENC_COUNTS : d;
 }
 
 int32_t abs_encoder_track(void)

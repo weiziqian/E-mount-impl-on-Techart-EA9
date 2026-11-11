@@ -531,8 +531,8 @@ def decode_trail(blob, label):
                       f"t={w[3]} ms")
                 print(f"         handshake answered t={hs} ms, homing started "
                       f"t={started} ms ({started - hs:+d} ms after it)")
-                print(f"         drive {drive} ms (cap 300) + settle {settle} "
-                      f"ms (cap 500) = {drive + settle} ms")
+                print(f"         drive {drive} ms + settle/brake {settle} "
+                      f"ms = {drive + settle} ms")
             else:
                 print(f"page {p:2d}  {tag}: step {w[15]}, commanded {delta:+d} "
                       f"counts ({delta / 4:+.0f} protocol units) at "
@@ -548,6 +548,13 @@ def decode_trail(blob, label):
                   f"in {w[12] & 0xFFFF} ms")
             print(f"         encoder {enc_b} -> {enc_a}   "
                   f"({enc_a - enc_b:+d} counts)")
+            if w[14] >> 31:
+                # The reset's word: the raw stop it read, and what it stored
+                # as HOME (0xffff: cut short, nothing stored).
+                found, stored = (w[14] >> 16) & 0x3FFF, w[14] & 0xFFFF
+                print(f"         reset: stop read at raw {found}, stored "
+                      + ("nothing (cut short)" if stored == 0xFFFF
+                         else f"HOME = {stored}"))
             print(f"         bus still alive: rx={w[10]} tx={w[11]} "
                   f"handshake={'yes' if w[12] else 'no'}")
             continue

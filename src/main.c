@@ -42,6 +42,7 @@
 #include "emount.h"
 #include "motor.h"
 #include "abs_encoder.h"
+#include "cfg.h"
 #include "servo.h"
 #include "focus_map.h"
 #include "focus_dist.h"
@@ -252,68 +253,43 @@ static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
 
 #define HOME_DUTY       800         /* 31.25%, stock 0x5e00 */
 
-/* The three waits homing used to sit through, all of them now bounds rather
- * than durations (NOTES.md 112).  Together they were 4.8 s of every boot; two
- * of the three were copied from a stock code path that turns out never to run
- * (servo.md 10), and the third was a bench-era constant nobody had measured.
+/* THE RESET's constants (motor_reset).  The still rule is the old homing's,
+ * unchanged: after HOME_MIN_MS, under HOME_STILL_COUNTS of movement for
+ * HOME_STILL_MS.
  *
- * HOME_DELAY_MS -- how long after the HANDSHAKE homing may start.  It used to
- *   be `millis() >= 4000`, measured from boot, which in every dump was the
- *   binding constraint: af6's homing page is stamped 4821 ms and homing is
- *   800 ms long, so the loop had been sitting at that gate with the handshake
- *   long since done.  Nothing was ever measured to justify 4000.
- *
- *   It is 0 because no mechanism was found by which a margin would help.  The
- *   real hazard -- the body current-limiting before it has accepted the lens
- *   (NOTES.md 29) -- is what `em_handshake_done` guards, and that guard stays.
- *   If a camera run says otherwise, this is the one line to raise: 500, then
- *   1500, with the homing page's supply and encoder figures as the evidence.
- *
- * HOME_MS / HOME_SETTLE_MS -- now CAPS.  The drive stops early once the
- *   encoder has been still for HOME_STILL_MS, which is the definition of
- *   "against the stop"; the settle does the same.  Of the eight distinct
- *   homing pages in dumps/af1..af6, six moved under 60 counts -- the boot
- *   started already parked at infinity, where our own shutdown left it, so
- *   the drive was a stall against the stop from the first millisecond.  The
- *   other two moved 1201 and 5269 counts, about 45 ms and 200 ms of travel
- *   at this duty, so they still finish well inside the 300 ms cap and simply
- *   stop hammering the stop once they get there.
- *
- * Why an early exit cannot mistake stiction for the end stop: at 800 the duty
- * is above every breakaway this mechanism has ever shown (170-536, one spot
- * >=1280), so breakaway at this duty is immediate or never -- and at the spot
- * where it is never, the full 300 ms does not free it either.  The early exit
- * therefore removes waiting, not a retry (NOTES.md 96-103 for the breakaway
- * distribution). */
-#define HOME_DELAY_MS       0     /* after em_t_handshake, not after boot */
-#if HOME_DELAY_MS > 0
-#define HOME_GATE_OPEN()    ((uint32_t)(millis() - em_t_handshake) \
-                             >= HOME_DELAY_MS)
-#else
-/* Zero margin: the handshake IS the gate, and the compiler is spared a
- * comparison it would rightly point out is always true. */
-#define HOME_GATE_OPEN()    1
-#endif
-#define HOME_MS             300   /* cap on the drive   */
-#define HOME_MIN_MS         40    /* ...but never less than this          */
-#define HOME_SETTLE_MS      500   /* cap on the settle  */
-#define HOME_SETTLE_MIN_MS  20    /* ...but never less than this          */
-#define HOME_STILL_MS       40    /* still for this long = it has stopped */
+ * Why the still rule cannot mistake stiction for the end stop: at 800 the
+ * duty is above every breakaway this mechanism has ever shown (170-536, one
+ * spot >=1280), so breakaway at this duty is immediate or never (NOTES.md
+ * 96-103 for the breakaway distribution). */
+#define HOME_MIN_MS         40
+#define HOME_STILL_MS       40
 /* Encoder noise is 3-5 counts peak-to-peak with sigma ~0.8 (NOTES.md 97).  6
  * is clear of that and still nothing at all as movement: at this duty the
- * mechanism covers ~27 counts per millisecond, so 6 counts is a quarter of a
- * millisecond of it.  Erring high is the safe direction too -- a threshold
- * the noise can cross merely resets the timer, and the loop falls back to the
- * fixed length it had before. */
+ * mechanism covers ~27 counts per millisecond. */
 #define HOME_STILL_COUNTS   6
-/* Trace sample spacing.  It used to be HOME_MS / SERVO_TRACE_N = 12 ms, which
- * spread 24 samples over the whole fixed-length pulse.  Now that the pulse
- * usually ends at 40 ms that would leave three points and nothing to read, so
- * the trace is packed into the first 48 ms instead -- which is where the
- * early exit makes its decision, and therefore where a wrong one would show.
- * A long drive is still covered by the encoder pair and the drive length on
- * the MOTR page. */
+/* Trace sample spacing: 24 samples over the first 48 ms of the drive, which
+ * is where the still rule makes its decision. */
 #define HOME_TRACE_MS       2
+
+#define RST_TIMEOUT_MS      2000  /* cap on the drive                     */
+/* The drop rule: once two consecutive samples RST_SAMPLE_MS apart have each
+ * fallen by more than RST_DROP_COUNTS, the first sample that does not fall at
+ * all is the stop.  At ~27 counts/ms a full-speed sample falls ~54. */
+#define RST_SAMPLE_MS       2
+#define RST_DROP_COUNTS     40
+/* The brake: up to RST_BRAKE_MS, over early once RST_BRAKE_STILL_N
+ * consecutive samples RST_BRAKE_SAMPLE_MS apart each moved under
+ * RST_BRAKE_STILL_COUNTS. */
+#define RST_BRAKE_MS        200
+#define RST_BRAKE_SAMPLE_MS 5
+#define RST_BRAKE_STILL_N   4
+#define RST_BRAKE_STILL_COUNTS 4
+/* The shutdown reset aims this far past the known stop, so the servo's
+ * profile is still slowing it down when it gets there. */
+#define RST_PARK_MARGIN     80
+/* 1: a boot with a stored HOME skips the reset and takes HOME as the stop.
+ * The shutdown reset still runs every time, and keeps HOME current. */
+#define RST_SKIP_IF_KNOWN   1
 
 /* 800 = 31.25%: the stock's own homing duty.  It is the value the stock's own
  * (unreachable, servo.md 10) homing block uses, and this project's hardware
@@ -440,18 +416,20 @@ static const struct servo_cfg STOCK = {
 static uint16_t g_home_trace[SERVO_TRACE_N];
 static uint8_t  g_home_trace_n;
 
-/* Set once homing has run.  Until then abs_encoder_track() is measured from
- * wherever the mechanism happened to be at boot, so zero is not infinity and
- * parking to it would drive somewhere arbitrary. */
+/* Set once the infinity stop is known (a reset, or a stored HOME).  Until then
+ * abs_encoder_track() is measured from wherever the mechanism happened to be
+ * at boot, so zero is not infinity. */
 static int      g_homed;
 
-/* Set for the length of motor_home().  The position is not known then, but
- * where the mechanism is GOING is: infinity, track 0.  So the body is told
- * exactly that -- at 0, and moving toward it while the drive runs -- rather
- * than the template's stale position marked at rest.  Six boots in eight
- * start parked there already (NOTES.md 112.2), so it is usually literally
- * true, and the value does not jump when homing ends. */
-static uint8_t  g_homing;
+/* The infinity stop, as a raw encoder reading: what the last reset found, or
+ * the stored HOME on a boot that skipped it.  Track position 0 is here. */
+static uint16_t g_home_raw;
+static uint8_t  g_home_known;
+
+/* Set for the length of motor_reset(); a shutdown that arrives meanwhile sets
+ * g_rst_cut, which stops it without storing anything. */
+static uint8_t  g_resetting;
+static volatile uint8_t g_rst_cut;
 
 /* Which page the next park writes.  A flash page cannot be rewritten between
  * erases -- programming only clears bits -- so two parks writing the same page
@@ -460,8 +438,7 @@ static uint8_t  g_homing;
  * in 60 ms, a speed never measured.
  *
  * So only the FIRST park records anything.  Every park still moves: each
- * standby begins with a 0x16, and the lens parks for each one (PARK_ATTEMPTS,
- * which used to stop the motion after two, is gone with that). */
+ * standby begins with a 0x16, and the lens parks for each one. */
 static unsigned g_park_n;
 
 static uint32_t g_boot;
@@ -521,10 +498,9 @@ static void pump(int32_t pos)
 	 * during the only interval where it is changing is giving the body's
 	 * focus loop nothing to work with.
 	 *
-	 * Guarded on g_homed: before homing, zero is not infinity, so the
-	 * mapping has no anchor and the value would be meaningless.  During
-	 * homing the callers pass 0, the destination (see g_homing). */
-	if (g_homed || g_homing) {
+	 * Guarded on g_homed: before the first reset, zero is not infinity,
+	 * so the mapping has no anchor and the value would be meaningless. */
+	if (g_homed) {
 		focus_report_at(pos);
 	}
 	em_poll();
@@ -566,48 +542,149 @@ static uint8_t home_still_for(struct home_still *st, uint32_t ms)
 	return (uint32_t)(millis() - st->t) >= ms;
 }
 
-/* Step 0: home to the infinity end with the stock's own constants.
- *
- * Open loop on purpose -- the drive itself is a replay of 0x5e00, not an
- * improvement on it.  What is NOT the stock's is the timing: the stock's block
- * runs for a flat 300 + 500 ms, and this one stops as soon as the encoder says
- * the mechanism is against the stop.  It is also not something the stock does
- * at all, since that block is unreachable in every shipped image (servo.md 10)
- * -- we home because we want a known zero, and it parks at power-off instead.
- */
-/* A focus instruction that arrived during homing waits in emount.c's slot
- * until homing ends; homing never takes it.  Until then the lens reports
- * itself as moving: at rest with no event would read as a move that ended
- * short of its target without a 1D 00.  Moving, then at rest WITH the event
- * once the instruction has run, is an ordinary -- if slow -- move.  The
- * direction and target stay homing's (toward 0): the instruction has not been
- * converted, and before the zero is set it cannot be. */
-static uint8_t home_cmd_waiting(void)
+/* The reset's end-of-travel test: the still rule or the drop rule. */
+struct rst_end {
+	struct home_still still;
+	uint32_t t0, t_sample;
+	int32_t  prev;
+	uint8_t  drops;       /* consecutive samples that fell, up to 2 */
+};
+
+static void rst_end_init(struct rst_end *e)
 {
-	return em_peek_focus_op() != EM_OP_NONE;
+	home_still_init(&e->still);
+	e->t0 = e->t_sample = millis();
+	e->prev  = abs_encoder_track();
+	e->drops = 0;
 }
 
-static void motor_home(void)
+static uint8_t rst_end_hit(struct rst_end *e)
 {
-	uint32_t w[16];
+	uint32_t now = millis();
+
+	if ((uint32_t)(now - e->t_sample) >= RST_SAMPLE_MS) {
+		int32_t pos = abs_encoder_track();
+		int32_t d   = pos - e->prev;
+
+		e->t_sample = now;
+		e->prev     = pos;
+		if (d < -RST_DROP_COUNTS) {
+			if (e->drops < 2) {
+				e->drops++;
+			}
+		} else if (e->drops >= 2) {
+			if (d >= 0) {
+				return 1;
+			}
+		} else {
+			e->drops = 0;
+		}
+	}
+	return (uint32_t)(now - e->t0) >= HOME_MIN_MS
+	       && home_still_for(&e->still, HOME_STILL_MS);
+}
+
+/* The servo's abort hook during the reset's approach. */
+static struct rst_end *g_rst_end;
+
+static uint8_t rst_abort(void)
+{
+	return g_rst_cut || rst_end_hit(g_rst_end);
+}
+
+/* The reset's approach to an expected stop: the old park's constants, at the
+ * homing duty, with the reset's timeout and end test. */
+static const struct servo_cfg RST_APPROACH = {
+	.stop_ms    = 30,
+	.v_cruise   = 25000,
+	.ff_div     = 40,
+	.ff_offset  = 134,
+	.tau_ms     = 26,
+	.kp_div     = 50,
+	.v_arrive     = 900,
+	.arrive_steps = 2,
+	.boost_up   = 12,
+	.boost_down = 8,
+	.boost_max  = 800,
+	.duty_floor = 200,
+	.duty_max   = PARK_DUTY,
+	.tolerance     = 32,
+	.settle_counts = 80,
+	.noise      = 8,
+	.stall_ms   = 300,
+	.timeout_ms = RST_TIMEOUT_MS,
+	.pump       = pump,
+	.abort      = rst_abort,
+};
+
+/* Store a found stop as HOME and return the HOME now in force.  No old value,
+ * or a new one at or below it, replaces it; a new one above it moves it 30% of
+ * the way: new x 0.3 + old x 0.7.  A result within [-4, +2] of the old value
+ * is not written at all -- that is encoder noise and brake creep, and every
+ * write is an erase cycle -- and the old value stays in force. */
+#define RST_STORE_BAND_LO   (-4)
+#define RST_STORE_BAND_HI   2
+
+static uint16_t rst_store(uint16_t raw)
+{
+	uint32_t old;
+
+	if (cfg_read(CFG_TYPE_HOME, &old) && old < ENC_COUNTS) {
+		int32_t d = abs_encoder_delta(raw, (uint16_t)old);
+
+		if (d > 0) {
+			d   = (d * 3 + 5) / 10;
+			raw = (uint16_t)((old + (uint32_t)d) & (ENC_COUNTS - 1));
+		}
+		if (d >= RST_STORE_BAND_LO && d <= RST_STORE_BAND_HI) {
+			return (uint16_t)old;
+		}
+	}
+	cfg_write(CFG_TYPE_HOME, raw);
+	return raw;
+}
+
+/* THE RESET (user's definition, 2026-11-11): drive to the infinity end stop,
+ * brake there, take the raw reading as the stop, store it, and make it track
+ * position 0.
+ *
+ *   drive   toward infinity, never above HOME_DUTY -- no boost.  Given an
+ *           expected stop (`expect`, a raw reading; negative for none) it
+ *           approaches it with the servo's decelerating profile; without one,
+ *           or when that approach ends without meeting the stop, at a
+ *           constant HOME_DUTY.  Ends on the still rule, the drop rule
+ *           (RST_* above), or RST_TIMEOUT_MS.
+ *   brake   RST_BRAKE_MS at most, over early once it is still.
+ *   store   rst_store().
+ *
+ * Returns the HOME now in force (rst_store), or -1 if a shutdown cut it short
+ * (nothing stored, nothing changed).  `step` and `pages` are for the trail: the MOTR/TRAC pages
+ * are written only when `pages` is set. */
+static int32_t motor_reset(int32_t expect, uint32_t step, uint8_t pages)
+{
+	struct rst_end      end;
+	struct servo_result r;
 	uint16_t idle_lo, idle_hi, load_lo, load_hi;
-	int32_t  before, after;
-	uint32_t t0, drive_ms, settle_ms;
-	struct home_still still;
-	unsigned i;
+	uint16_t raw_min, stored = 0xFFFFu;
+	int32_t  before, after, delta = 0;
+	uint32_t t0, t_start, drive_ms, brake_ms;
+	uint8_t  found = 0, approached = 0, constant = 0;
+	unsigned i = 0;
 
-	g_homing = 1;
+	g_home_trace_n = 0;
+	g_resetting = 1;
+	g_rst_cut   = 0;
+	g_moving      = 1;          /* toward infinity */
+	g_move_target = 0;
+	g_move_dir    = -1;
 
-	/* The idle supply, with the bus served throughout.  This was
-	 * vdd_read_burst(20): twenty milliseconds with no em_poll, longer than
-	 * a frame, starting on the first frame after the handshake -- so the
-	 * body's first one or two status pairs went out late or not at all.
-	 * Same reading, same window, same place: right before the drive, in
-	 * the supply state the drive runs in. */
+	/* The idle supply, with the bus served throughout.  Boot only: it is
+	 * 20 ms of evidence, and at shutdown the body is waiting on the 0x16
+	 * acknowledgement. */
 	t0 = millis();
 	idle_lo = 0xFFFF;
 	idle_hi = 0;
-	do {
+	while (step == 0 && (uint32_t)(millis() - t0) < 20u) {
 		uint16_t v = vdd_read_mv();
 
 		if (v < idle_lo) {
@@ -616,155 +693,156 @@ static void motor_home(void)
 		if (v > idle_hi) {
 			idle_hi = v;
 		}
-		g_moving = home_cmd_waiting();
-		pump(0);
-	} while ((uint32_t)(millis() - t0) < 20u);
+		pump(abs_encoder_track());
+	}
+	if (idle_lo > idle_hi) {
+		idle_lo = 0;            /* not sampled */
+	}
 	before = abs_encoder_track();
-
 	vdd_track_reset();
-	g_moving      = 1;          /* toward track 0, infinity */
-	g_move_target = 0;
-	g_move_dir    = -1;
-	if (!STOCK.dry) {
+	t_start = millis();
+
+	if (expect >= 0) {
+		delta = abs_encoder_delta((uint16_t)expect, abs_encoder_raw());
+	}
+	/* Only toward infinity: already below the expected stop, the
+	 * constant drive goes the right way and the servo would not. */
+	if (delta < 0 && !g_rst_cut) {
+		g_rst_end = &end;
+		rst_end_init(&end);
+		servo_move_rel(delta, &RST_APPROACH, &r);
+		approached = 1;
+		/* Aborted by the end test, or stalled against the stop: found.
+		 * Anything else -- arrived without meeting it, or a servo guard
+		 * (runaway, wrong way) -- carries on at constant duty, which
+		 * ends on the end test within ~80 ms if it is already there. */
+		found = (r.outcome == SERVO_ABORTED && !g_rst_cut)
+		        || r.outcome == SERVO_STALL;
+		if (found || g_rst_cut) {
+			goto brake;
+		}
+	}
+	constant = 1;
+
+	if (!STOCK.dry && !g_rst_cut) {
 		motor_attach_pins();
 		motor_drive(-HOME_DUTY);
 	}
 	t0 = millis();
-	i  = 0;
-	home_still_init(&still);
-	while ((uint32_t)(millis() - t0) < HOME_MS) {
-		/* 0, not a reading: before the zero is set a reading means
-		 * nothing, and 0 is where this is going (g_homing). */
-		pump(0);
+	rst_end_init(&end);
+	while (!g_rst_cut && (uint32_t)(millis() - t_start) < RST_TIMEOUT_MS) {
+		pump(abs_encoder_track());
 		if (i < SERVO_TRACE_N
 		    && (uint32_t)(millis() - t0) >= i * HOME_TRACE_MS) {
 			g_home_trace[i++] = abs_encoder_raw();
 		}
-		/* Against the stop -- either it started there or it has arrived.
-		 * Either way there is nothing left for the remaining
-		 * milliseconds to do except heat the coils. */
-		if ((uint32_t)(millis() - t0) >= HOME_MIN_MS
-		    && home_still_for(&still, HOME_STILL_MS)) {
+		if (rst_end_hit(&end)) {
+			found = 1;
 			break;
 		}
 	}
-	drive_ms = millis() - t0;
 	g_home_trace_n = (uint8_t)i;
+
+brake:
+	drive_ms = millis() - t_start;
 	if (!STOCK.dry) {
-		/* Brake into the stop rather than releasing: the settle that
-		 * follows sets the zero the whole focus map is anchored on, and
-		 * a coasting mechanism creeps during it. */
 		motor_drive(0);
 		motor_brake();
 	}
 	vdd_track_result(&load_lo, &load_hi);
 
 	t0 = millis();
-	home_still_init(&still);
-	while ((uint32_t)(millis() - t0) < HOME_SETTLE_MS) {
-		/* Settling: at 0, at rest -- unless the body is waiting. */
-		g_moving = home_cmd_waiting();
-		pump(0);                /* still pre-homing; see above */
-		if ((uint32_t)(millis() - t0) >= HOME_SETTLE_MIN_MS
-		    && home_still_for(&still, HOME_STILL_MS)) {
-			break;
+	{
+		uint32_t t_s  = t0;
+		uint16_t prev = abs_encoder_raw();
+		uint8_t  n    = 0;
+
+		while (!g_rst_cut && (uint32_t)(millis() - t0) < RST_BRAKE_MS) {
+			pump(abs_encoder_track());
+			if ((uint32_t)(millis() - t_s) >= RST_BRAKE_SAMPLE_MS) {
+				uint16_t now = abs_encoder_raw();
+				int32_t  d   = abs_encoder_delta(now, prev);
+
+				t_s  = millis();
+				prev = now;
+				n = (d < RST_BRAKE_STILL_COUNTS
+				     && d > -RST_BRAKE_STILL_COUNTS) ? n + 1 : 0;
+				if (n >= RST_BRAKE_STILL_N) {
+					break;
+				}
+			}
 		}
 	}
-	settle_ms = millis() - t0;
-	after = abs_encoder_track();
+	brake_ms = millis() - t0;
+	raw_min  = abs_encoder_raw();
+	after    = abs_encoder_track();
 
-	for (i = 0; i < 16; i++) {
-		w[i] = 0;
+	if (!g_rst_cut) {
+		stored       = rst_store(raw_min);
+		g_home_raw   = stored;
+		g_home_known = 1;
+		/* The stop is now track position 0. */
+		abs_encoder_track_set(abs_encoder_delta(abs_encoder_raw(), stored));
+		g_homed = 1;
 	}
-	w[0]  = EM_DIAG_MAGIC;
-	w[1]  = EM_DIAG_FORMAT;
-	w[2]  = TAG_MOTR;
-	w[3]  = millis();
-	/* Homing commands no displacement, so this word is free -- and the boot
-	 * timing is the thing a dump has never been able to answer: when the
-	 * handshake finished, and how much of what followed was waiting.  The
-	 * handshake time is 16-bit, as the focus-history page's times already
-	 * are; a session is well under 65 s. */
-	w[4]  = ((uint32_t)settle_ms << 16) | (em_t_handshake & 0xFFFFu);
-	w[5]  = ((uint32_t)idle_hi << 16) | idle_lo;
-	w[6]  = ((uint32_t)load_hi << 16) | load_lo;
-	w[7]  = ((uint32_t)HOME_DUTY << 16) | HOME_DUTY;
-	w[8]  = (uint32_t)before;
-	w[9]  = (uint32_t)after;
-	w[10] = em_frames_rx;
-	w[11] = em_frames_tx;
-	/* The drive's ACTUAL length, not HOME_MS.  It used to report the cap,
-	 * which was true only because the loop always ran to it. */
-	w[12] = (0u << 16) | (drive_ms & 0xFFFFu);   /* outcome "OK" */
-	w[13] = (g_flash_boots << 16) | (g_boot & 0xFFFFu);
-	w[14] = PM->RCAUSE.reg;
-	w[15] = 0;
-	diag_page(MOTOR_PAGE0, w, 16);
 
-	{
-		uint32_t t[16];
+	if (pages) {
+		uint32_t w[16];
+		uint32_t oc = g_rst_cut ? SERVO_ABORTED
+		              : found   ? SERVO_OK : SERVO_TIMEOUT;
 
 		for (i = 0; i < 16; i++) {
-			t[i] = 0;
+			w[i] = 0;
 		}
-		t[0] = EM_DIAG_MAGIC;
-		t[1] = EM_DIAG_FORMAT;
-		t[2] = 0x54524143u;
-		t[3] = ((uint32_t)g_home_trace_n << 16) | 0u;
-		for (i = 0; i < g_home_trace_n && 4 + i / 2 < 16; i++) {
-			t[4 + i / 2] |= (uint32_t)g_home_trace[i] << (16 * (i % 2));
+		w[0]  = EM_DIAG_MAGIC;
+		w[1]  = EM_DIAG_FORMAT;
+		w[2]  = TAG_MOTR;
+		w[3]  = millis();
+		/* Step 0, the boot reset, commands no displacement, so this word
+		 * carries the brake length and the handshake time instead. */
+		w[4]  = step == 0
+		        ? ((uint32_t)brake_ms << 16) | (em_t_handshake & 0xFFFFu)
+		        : (uint32_t)delta;
+		w[5]  = ((uint32_t)idle_hi << 16) | idle_lo;
+		w[6]  = ((uint32_t)load_hi << 16) | load_lo;
+		w[7]  = approached
+		        ? ((uint32_t)r.duty_peak << 16) | r.duty_first
+		        : ((uint32_t)HOME_DUTY << 16) | HOME_DUTY;
+		w[8]  = (uint32_t)before;
+		w[9]  = (uint32_t)after;
+		w[10] = em_frames_rx;
+		w[11] = em_frames_tx;
+		w[12] = (oc << 16) | (drive_ms & 0xFFFFu);
+		w[13] = (g_flash_boots << 16) | (g_boot & 0xFFFFu);
+		/* Bit 31 marks the reset's word (older pages had RCAUSE here). */
+		w[14] = (1u << 31) | ((uint32_t)raw_min << 16) | stored;
+		w[15] = step;
+		diag_page(MOTOR_PAGE0 + step, w, 16);
+
+		if (approached && !constant) {
+			trace_page(TRACE_PAGE0 + step, step, &r);
+		} else {
+			uint32_t t[16];
+
+			for (i = 0; i < 16; i++) {
+				t[i] = 0;
+			}
+			t[0] = EM_DIAG_MAGIC;
+			t[1] = EM_DIAG_FORMAT;
+			t[2] = 0x54524143u;
+			t[3] = ((uint32_t)g_home_trace_n << 16) | step;
+			for (i = 0; i < g_home_trace_n && 4 + i / 2 < 16; i++) {
+				t[4 + i / 2] |= (uint32_t)g_home_trace[i]
+				                << (16 * (i % 2));
+			}
+			diag_page(TRACE_PAGE0 + step, t, 16);
 		}
-		diag_page(TRACE_PAGE0, t, 16);
 	}
 
-	/* Infinity is now zero. */
-	abs_encoder_track_reset();
-	g_homed  = 1;
-	g_homing = 0;
-	/* Homing's motion state ends with homing.  A waiting instruction is
-	 * taken in the same pass of the main loop, with no em_poll between, so
-	 * no frame goes out at rest before it starts -- and one that turns out
-	 * to need no movement (inside the deadband, or a Stop) must not
-	 * inherit a "moving" nobody will ever clear. */
-	g_moving = 0;
+	g_moving    = 0;
+	g_resetting = 0;
+	return g_rst_cut ? -1 : (int32_t)stored;
 }
-
-/* Park to infinity, called from the message 0x16 handler before the
- * acknowledgement goes out (emount.c).  The stock does the same thing with its
- * own stored park position.
- *
- * Bounded on purpose.  The body is waiting for the acknowledgement, so this gets one
- * attempt at a short timeout and whatever happens, happens -- emount.c sends
- * the acknowledgement regardless.  A lens left mid-travel is a much smaller
- * problem than a camera that will not switch off.
- *
- * Infinity is track position 0, where homing left the mechanism against the
- * stop.  Moving back to 0 stops `tolerance` counts short of the stop rather
- * than driving into it. */
-/* The park keeps the stock homing duty.  It runs at shutdown, with the body
- * waiting on the acknowledgement, and it is not the thing under test. */
-static const struct servo_cfg PARK = {
-	.stop_ms    = 30,
-	.v_cruise   = 25000,
-	.ff_div     = 40,
-	.ff_offset  = 134,
-	.tau_ms     = 26,
-	.kp_div     = 50,
-	.v_arrive     = 900,      /* looser: the body is waiting */
-	.arrive_steps = 2,
-	.boost_up   = 12,
-	.boost_down = 8,
-	.boost_max  = 800,
-	.duty_floor = 200,
-	.duty_max   = PARK_DUTY,
-	.tolerance     = 32,          /* looser than a move: near enough, and the
-	                                body is waiting on the acknowledgement */
-	.settle_counts = 80,
-	.noise      = 8,
-	.stall_ms   = 300,
-	.timeout_ms = 1200,
-	.pump       = pump,
-};
 
 /* After the 0x16 acknowledgement: what the body is waiting for.
  *
@@ -820,55 +898,39 @@ static void powerdown_signal(void)
 	em_sleep_until_wake();
 }
 
-static void park_to_infinity(void)
+/* The shutdown reset, called from the message 0x16 handler before the
+ * acknowledgement goes out (emount.c).  With a known stop -- this session's,
+ * or the stored HOME if the boot reset never finished -- it aims
+ * RST_PARK_MARGIN past it, so a far start is slowed by the servo's profile
+ * before it reaches the stop instead of arriving at full speed.
+ *
+ * A 0x16 that arrives DURING a reset (from the reset's own pump) stops the
+ * motor where it is and cuts that reset short; nothing is stored. */
+static void shutdown_reset(void)
 {
+	int32_t  expect = -1;
+	uint32_t v;
 
-	struct servo_result r;
-	uint32_t w[16];
-	int32_t  here;
-	unsigned i;
-
-	if (!g_homed) {
-		return;
-	}
-	here = abs_encoder_track();
-	if (here > -PARK.tolerance && here < PARK.tolerance) {
-		/* Already there -- the session's pages are still owed. */
-		if (g_park_n == 0) {
-			trail_fhist(FHIST_PAGE);
-			focus_hist_page(FOCUS_LAST_PAGE);
-			norm_page();
+	if (g_resetting) {
+		g_rst_cut = 1;
+		if (!STOCK.dry) {
+			motor_drive(0);
+			motor_brake();
 		}
-		g_park_n++;
 		return;
 	}
-
-	servo_move_rel(-here, &PARK, &r);
-
-	for (i = 0; i < 16; i++) {
-		w[i] = 0;
+	if (g_home_known) {
+		expect = g_home_raw;
+	} else if (cfg_read(CFG_TYPE_HOME, &v) && v < ENC_COUNTS) {
+		expect = (int32_t)v;
 	}
-	w[0]  = EM_DIAG_MAGIC;
-	w[1]  = EM_DIAG_FORMAT;
-	w[2]  = TAG_MOTR;
-	w[3]  = millis();
-	w[4]  = (uint32_t)(-here);
-	w[5]  = 0;
-	w[6]  = 0;
-	w[7]  = ((uint32_t)r.duty_peak << 16) | r.duty_first;
-	w[8]  = (uint32_t)r.start;
-	w[9]  = (uint32_t)r.end;
-	w[10] = em_frames_rx;
-	w[11] = em_frames_tx;
-	w[12] = ((uint32_t)r.outcome << 16) | r.ms;
-	w[13] = (g_flash_boots << 16) | (g_boot & 0xFFFFu);
-	w[14] = PM->RCAUSE.reg;
-	w[15] = 2 + g_park_n;            /* step 2 = the first park attempt */
+	if (expect >= 0) {
+		expect = (expect - RST_PARK_MARGIN) & (ENC_COUNTS - 1);
+	}
+	motor_reset(expect, 2, g_park_n == 0);
 	if (g_park_n == 0) {
-		diag_page(MOTOR_PAGE0 + 2, w, 16);
 		trail_fhist(FHIST_PAGE);
 		focus_hist_page(FOCUS_LAST_PAGE);
-		trace_page(TRACE_PAGE0 + 2, 2, &r);
 		norm_page();
 	}
 	g_park_n++;
@@ -1623,7 +1685,7 @@ static void mf_return(void)
  * what that entry asks for.  Taking it as an edge would also run the return
  * AFTER an instruction that waited out homing -- undoing a position the body
  * chose while already in manual focus.  mf_service never runs during homing
- * (motor_home only pumps the bus), so this is the only place the two meet. */
+ * (motor_reset only pumps the bus), so this is the only place the two meet. */
 static void mf_after_homing(void)
 {
 	g_mf_prev       = em_focus_mf;
@@ -1802,7 +1864,7 @@ int main(void)
 	trail_chk(18);
 	build_marker_page(19);
 
-	em_set_park_handler(park_to_infinity);
+	em_set_park_handler(shutdown_reset);
 	em_set_powerdown_handler(powerdown_signal);
 
 	em_init();
@@ -1817,6 +1879,24 @@ int main(void)
 
 	abs_encoder_set_reference();
 	abs_encoder_track_reset();
+
+	/* The boot reset runs when the body first asks 0x10, and 0x10 waits for
+	 * it (em_hold_ready).  With RST_SKIP_IF_KNOWN, a stored HOME is taken
+	 * as the stop instead and nothing moves. */
+	{
+		uint32_t v;
+
+		if (RST_SKIP_IF_KNOWN && cfg_read(CFG_TYPE_HOME, &v)
+		    && v < ENC_COUNTS) {
+			g_home_raw   = (uint16_t)v;
+			g_home_known = 1;
+			abs_encoder_track_set(abs_encoder_delta(abs_encoder_raw(),
+			                                        g_home_raw));
+			g_homed = 1;
+		} else {
+			em_hold_ready();
+		}
+	}
 
 	for (;;) {
 		em_poll();
@@ -1937,16 +2017,16 @@ int main(void)
 			quiet = 0;      /* it came back; that was a hiccup */
 		}
 
-		/* Home once, then serve whatever focus targets arrive.
-		 *
-		 * The gate is the HANDSHAKE plus HOME_DELAY_MS, not a wall
-		 * clock: `millis() >= 4000` held the mechanism still for four
-		 * seconds of every boot and guarded nothing (NOTES.md 112). */
-		if (!g_aborted && em_handshake_done && step == 0
-		    && HOME_GATE_OPEN()) {
-			motor_home();
+		/* Reset once, on the body's first 0x10, then serve whatever
+		 * focus targets arrive.  A reset cut short by a shutdown is
+		 * run again after the wake: 0x10 is still held. */
+		if (!g_aborted && !g_homed && em_reset_wanted) {
+			motor_reset(-1, 0, 1);
+		}
+		if (g_homed && step == 0) {
 			mf_after_homing();
 			focus_report();
+			em_set_ready();
 			step = 1;
 		}
 		if (step == 1) {

@@ -566,6 +566,20 @@ static void em_baud_switch(void)
 	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_LENS_CS);
 }
 
+static uint8_t          g_ready = 1;
+static uint8_t          g_m10_owed;
+volatile uint8_t        em_reset_wanted;
+
+void em_hold_ready(void)
+{
+	g_ready = 0;
+}
+
+void em_set_ready(void)
+{
+	g_ready = 1;
+}
+
 static void em_send_id(uint8_t id)
 {
 	const struct ea9_packet *p = find_packet(id);
@@ -624,6 +638,18 @@ static void em_send_id(uint8_t id)
 			}
 			em_transmit(echo, n);
 		}
+		return;
+	}
+
+	/* Message 0x10: ready, or not yet (em_hold_ready, emount.h). */
+	if (id == EM_ID_READY) {
+		if (!g_ready) {
+			g_m10_owed      = 1;
+			em_reset_wanted = 1;
+			return;
+		}
+		em_msg_10[6] = 0x00u;
+		em_transmit(em_msg_10, EA9_LEN_10);
 		return;
 	}
 
@@ -2332,6 +2358,11 @@ void em_poll(void)
 				diag_tally_mark(DIAG_MARK_WAKE, em_wake_first_id);
 			}
 		}
+	}
+
+	if (g_m10_owed && g_ready) {
+		g_m10_owed = 0;
+		em_send_id(EM_ID_READY);
 	}
 
 	if (g_file_pending) {

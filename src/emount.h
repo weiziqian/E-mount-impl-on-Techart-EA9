@@ -58,6 +58,10 @@ void em_poll(void);
  * lens must actually switch after answering 01 (protocol docs/msg_0x0C.md). */
 #define EM_ID_BAUD       0x0Cu
 
+/* "Are you ready?"  Reply pl[0] bit 0 set means NOT ready and the body keeps
+ * waiting in this step (msg_0x10.md). */
+#define EM_ID_READY      0x10u
+
 /* The chip-select handshake that follows the 0x0C reply (emount.c,
  * em_baud_switch).  Each wait on the body's CS gives up after
  * EM_0C_WAIT_US.  An a9 II takes ~0.13 ms, but an A7 IV only re-checks our CS
@@ -138,6 +142,24 @@ void em_sleep_until_wake(void);
  * cuts the motor supply as soon as it has it.  A park that stalls or times out must not stop
  * the acknowledgement, so the caller sends it either way. */
 void em_set_park_handler(void (*park)(void));
+
+/* THE BOOT RESET GATE (message 0x10).  The lens is ready by default.  The
+ * firmware calls em_hold_ready() at boot when it has a reset to do; then:
+ *
+ *   a 0x10           while held is NOT answered; the first sets
+ *                    em_reset_wanted, the firmware's signal to start the reset
+ *   em_set_ready()   releases the hold, and one "ready" goes out from the
+ *                    next em_poll
+ *
+ * No "not ready" (pl[0] = 01) is ever sent.  Answering 01 at once and "ready"
+ * unasked later is what the A7 IV's code accepts (0x3b1c4c sub-state 0x1a
+ * takes every reply), but on the a9 II it left the boot stuck (2026-11-11).
+ *
+ * After that every 0x10 -- a standby wake's short init included -- is
+ * answered ready at once. */
+void em_hold_ready(void);
+void em_set_ready(void);
+extern volatile uint8_t em_reset_wanted;
 
 /* Called AFTER the acknowledgement has gone out.  The stock does three more
  * things at this point -- disable the bus, sync to the frame pulse twice,
