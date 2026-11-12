@@ -380,6 +380,11 @@ struct servo_cfg {
 	uint16_t reverse_brake_ms;
 	int32_t  reverse_brake_above;
 
+	/* How the move leaves the coils: braked (0, every ordinary move) or
+	 * floating (1, the shutdown park -- the body cuts the motor supply
+	 * next, and nothing is left to hold). */
+	uint8_t  end_release;
+
 	/* Dry run: the whole loop, with no coil ever energised.  Kept as the
 	 * control it has always been. */
 	uint8_t  dry;

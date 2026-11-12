@@ -516,9 +516,14 @@ void servo_move_rel(int32_t delta, const struct servo_cfg *cfg,
 	if (!cfg->dry) {
 		/* Brake, do not release.  Releasing floats the bridge and the
 		 * mechanism coasts; braked, it holds below the
-		 * rate at which it falls under its own weight. */
+		 * rate at which it falls under its own weight.  Only a move
+		 * that asks for it (end_release) is left floating. */
 		motor_drive(0);
-		motor_brake();
+		if (cfg->end_release) {
+			motor_release();
+		} else {
+			motor_brake();
+		}
 	}
 
 	s_v_exit     = v_meas;

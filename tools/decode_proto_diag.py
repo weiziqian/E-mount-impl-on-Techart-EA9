@@ -531,8 +531,8 @@ def decode_trail(blob, label):
                       f"t={w[3]} ms")
                 print(f"         handshake answered t={hs} ms, homing started "
                       f"t={started} ms ({started - hs:+d} ms after it)")
-                print(f"         drive {drive} ms + settle/brake {settle} "
-                      f"ms = {drive + settle} ms")
+                print(f"         drive {drive} ms + settle {settle} ms = "
+                      f"{drive + settle} ms")
             else:
                 print(f"page {p:2d}  {tag}: step {w[15]}, commanded {delta:+d} "
                       f"counts ({delta / 4:+.0f} protocol units) at "
@@ -549,12 +549,18 @@ def decode_trail(blob, label):
             print(f"         encoder {enc_b} -> {enc_a}   "
                   f"({enc_a - enc_b:+d} counts)")
             if w[14] >> 31:
-                # The reset's word: the raw stop it read, and what it stored
-                # as HOME (0xffff: cut short, nothing stored).
-                found, stored = (w[14] >> 16) & 0x3FFF, w[14] & 0xFFFF
-                print(f"         reset: stop read at raw {found}, stored "
-                      + ("nothing (cut short)" if stored == 0xFFFF
-                         else f"HOME = {stored}"))
+                # The reset's word: the raw reading it started from and the
+                # one it settled at; w[9] is the track position at the drive's
+                # end, so the settle's spring-back is the difference.  w[12]
+                # bits 24-31 say how the drive ended.
+                found, begun = (w[14] >> 16) & 0x3FFF, w[14] & 0x3FFF
+                why = ("timeout", "still", "stop", "reversed")
+                r = w[12] >> 24
+                drive_end = begun + (enc_a - enc_b)
+                print(f"         reset: raw {begun} -> drive end {drive_end} "
+                      f"-> settled {found} ({found - drive_end:+d} in the "
+                      f"settle), drive ended on "
+                      f"{why[r] if r < len(why) else r}")
             print(f"         bus still alive: rx={w[10]} tx={w[11]} "
                   f"handshake={'yes' if w[12] else 'no'}")
             continue
