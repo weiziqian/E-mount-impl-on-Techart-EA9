@@ -187,10 +187,12 @@ void em_set_focus_position(int32_t pos, int32_t target);
 void em_set_forecast_model(uint32_t v_cap_ups, uint32_t v_sat_ups,
                            uint16_t tau_ms);
 
-/* Message 0x34, the timed move: how far a move may be planned per
- * millisecond of the body's time limit, in protocol units per second
- * (emount.c, timed_move34). */
-void em_set_move34_speed(uint32_t ups);
+/* The same bound over any time: how far focus can get toward a target `left`
+ * protocol units away within t_ms, at full duty from the speed latched at the
+ * last frame sync (from rest when moving away), up to the speed cap.  Signed
+ * as `left`, never past it.  Optimistic by construction. */
+int32_t em_reach(int32_t left, uint32_t t_ms);
+
 
 /* The focus motor, for message 0x06 payload[0..1]: 0 idle, +1 running toward
  * higher positions, -1 toward lower. */
@@ -593,6 +595,15 @@ struct em_focus_cmd {
 	uint8_t  silent;        /* MOVE: no completion event -- a message 0x34
 	                         * move, answered by its own reply             */
 };
+
+/* Message 0x34, the timed move (emount.c, timed_move34).  The handler gets
+ * the request decoded as a Move -- EM_OP_NONE when it names none -- and its
+ * payload, pl[4] being the milliseconds to the body's deadline.  `to` comes in
+ * holding where the lens is already going.  It returns 1 with `to` set to
+ * move there, in position units; 0, leaving `to` alone, to stay.  Every 0x34
+ * reaches it.  It runs inside em_poll, so a running leg may be under it. */
+void em_set_move34_handler(uint8_t (*plan)(const struct em_focus_cmd *c,
+                                           const uint8_t *pl, uint16_t *to));
 
 /* Consume the pending instruction.  Returns 0 if none is pending. */
 uint8_t em_take_focus_cmd(struct em_focus_cmd *out);

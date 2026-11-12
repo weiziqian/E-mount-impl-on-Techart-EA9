@@ -100,13 +100,18 @@
  * decides whether message 0x28 reports the aperture. */
 #define M08_PAGE        17u
 
+/* The message 0x34 log, four records a page (m34_pages).  Taken from the
+ * focus list's tail: the last moves of a session have their own page. */
+static const uint8_t  M34_PAGE[] = { 5, 6, 7, 16 };
+
 /* NO TWO WRITERS MAY SHARE A PAGE.  A flash page cannot be rewritten between
  * erases, so a collision leaves the bitwise AND of both records -- readable,
  * plausible and wrong (NOTES.md 35).  The focus list draws on pages the
  * start-up and shut-down records used to own, so it is worth stating what is
  * left where:
  *
- *   0,1,2,4..7,16     focus moves 6..13   (were BOOT, INIT, IDLG, SNAP, QUIET)
+ *   0,1,2,4           focus moves 6..9    (were BOOT, INIT, IDLG, SNAP, QUIET)
+ *   5,6,7,16          the message 0x34 log (were focus moves 10..13)
  *   17                the body's message 0x08 request
  *   3                 the id log, at the first quiet
  *   8..14             the transfer-window captures
@@ -123,8 +128,7 @@
  * (MOTOR_PAGE0) or the park records (MOTOR_PAGE0 + 2 + n): a flash page cannot
  * be rewritten between erases, so two writers sharing a page leave the bitwise
  * AND of both records, which is silent nonsense. */
-static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29,
-                                       0, 1, 2, 4, 5, 6, 7, 16 };
+static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29, 0, 1, 2, 4 };
 #define FOCUS_PAGES (sizeof(FOCUS_PAGE) / sizeof(FOCUS_PAGE[0]))
 
 /* The LAST few moves, written when the bus goes quiet.
@@ -160,6 +164,7 @@ static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29,
  * power cut never parks, and a run that parks may never go quiet, so both are
  * needed and the guard is what makes having both safe. */
 static uint8_t g_norm_written;
+static void m34_pages(void);
 
 static void norm_page(void)
 {
@@ -169,6 +174,7 @@ static void norm_page(void)
 	g_norm_written = 1;
 	trail_norm(NORM_PAGE);
 	trail_modes(MODE_PAGE);
+	m34_pages();
 	{
 		unsigned k;
 
@@ -231,6 +237,7 @@ static void quiet_idlog_page(void)
  *            it stalled after 401 of 1984 counts, which is what the floor does.
  */
 static void pump(int32_t pos);
+static void m34_deadline(void);
 static void focus_report_at(int32_t counts);
 static void forecast_model(const struct servo_cfg *cfg);
 static uint8_t focus_retarget(int32_t *target);
@@ -246,6 +253,9 @@ static void focus_hist_page(uint32_t page);
 static uint8_t g_moving;
 static int32_t g_move_target;
 static int8_t  g_move_dir;
+/* The running Move leg owes no 1D 00: it is a message 0x34 move, or its 0x04
+ * Move was taken over by one and has been answered already (focus_retarget). */
+static uint8_t g_leg_silent;
 static void focus_report(void);
 static void build_marker_page(uint32_t page);
 static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
@@ -506,6 +516,7 @@ static void pump(int32_t pos)
 		focus_report_at(pos);
 	}
 	em_poll();
+	m34_deadline();
 	/* Queries are answered on the next frame even mid-move, as Yongnuo
 	 * does; otherwise one asked during a leg waits for the leg to end.
 	 * Not guarded on g_homed: every answer is a conversion of the query's
@@ -1043,6 +1054,143 @@ static uint8_t focus_cmd_target(const struct em_focus_cmd *c, int32_t *out)
 	return 1;
 }
 
+/* MESSAGE 0x34's PLAN: where its move may go in the body's time limit
+ * (emount.c, timed_move34).
+ *
+ * OPTIMISTIC, on purpose.  The cut is the farthest this mechanism can get in
+ * the body's pl[4] milliseconds -- full duty from the speed it has now, up to
+ * the move's speed cap (em_reach, the bound message 0x06's forecast uses) --
+ * with no start-up time taken off and no stopping time kept back.  Only what
+ * lies beyond that is dropped.  Overshooting the deadline is accepted: the
+ * body keeps correcting, and a lens that waits until it could be sure of
+ * arriving in time never moves at all.  A first plan that kept the stopping
+ * time in hand did exactly that on an a9 II: 25 requests at 24-32 ms, none
+ * moved, and AF-C stopped following (2026-11-12).
+ *
+ * Returns 0 -- stay -- for no move, no time, or before homing, when a
+ * position means nothing.  Every request is logged (m34_log). */
+/* THE 0x34 LOG: the last M34_N requests, three words each, written with the
+ * normal-class tally (m34_pages):
+ *
+ *   [0]  pl[0..1] operand | pl[3] mode << 16 | pl[4] ms << 24
+ *   [1]  position on receipt | the reply's position << 16    (position units)
+ *   [2]  position at the deadline | R, counts << 16 | flags << 28
+ *
+ * R is the reach in the time, whatever the target asked.  Flags: M34_TOWARD,
+ * a leg already running toward the target; M34_MOVED; M34_SAMPLED, [2]'s
+ * position was read at the deadline -- clear when a later request came first;
+ * M34_UNHOMED.  The deadline position against the reply's says how far behind
+ * the plan the mechanism really was. */
+#define M34_N        15u
+#define M34_TOWARD   0x1u
+#define M34_MOVED    0x2u
+#define M34_SAMPLED  0x4u
+#define M34_UNHOMED  0x8u
+static uint32_t g_m34[M34_N][3];
+static uint32_t g_m34_n;          /* requests, all of them */
+static uint16_t g_m34_moved;      /* ... that moved */
+static uint8_t  g_m34_wait;       /* the newest awaits its deadline sample */
+static uint32_t g_m34_due;        /* millis() of that deadline */
+
+static void m34_log(const uint8_t *pl, int32_t here, uint16_t to,
+                    int32_t reach, uint32_t flags)
+{
+	uint32_t *r = g_m34[g_m34_n % M34_N];
+
+	r[0] = (uint32_t)pl[0] | ((uint32_t)pl[1] << 8)
+	       | ((uint32_t)pl[3] << 16) | ((uint32_t)pl[4] << 24);
+	r[1] = (uint32_t)focus_counts_to_em06(here) | ((uint32_t)to << 16);
+	r[2] = ((uint32_t)reach << 16) | (flags << 28);
+	g_m34_n++;
+	if ((flags & M34_MOVED) && g_m34_moved != 0xFFFFu) {
+		g_m34_moved++;
+	}
+	g_m34_wait = 1;
+	g_m34_due  = millis() + pl[4];
+}
+
+/* The newest request's position at its deadline; called wherever em_poll is. */
+static void m34_deadline(void)
+{
+	if (g_m34_wait && (int32_t)(millis() - g_m34_due) >= 0) {
+		g_m34_wait = 0;
+		g_m34[(g_m34_n - 1u) % M34_N][2] |=
+		        (uint32_t)focus_counts_to_em06(abs_encoder_track())
+		        | ((uint32_t)M34_SAMPLED << 28);
+	}
+}
+
+/* The log, oldest first, four records a page.  w[3]: requests | moved << 16 |
+ * page index << 28.  Page 0 is written even with no request, so a session
+ * that saw none says so. */
+static void m34_pages(void)
+{
+	uint32_t n     = g_m34_n < M34_N ? g_m34_n : M34_N;
+	uint32_t first = g_m34_n - n;
+	unsigned p, k, i;
+
+	for (p = 0; p < sizeof(M34_PAGE) && (p == 0 || p * 4u < n); p++) {
+		uint32_t w[16];
+
+		for (i = 0; i < 16; i++) {
+			w[i] = 0;
+		}
+		w[0] = EM_DIAG_MAGIC;
+		w[1] = EM_DIAG_FORMAT;
+		w[2] = TAG_M034;
+		w[3] = (g_m34_n > 0xFFFFu ? 0xFFFFu : g_m34_n)
+		       | ((uint32_t)(g_m34_moved & 0xFFFu) << 16)
+		       | ((uint32_t)p << 28);
+		for (k = 0; k < 4u && p * 4u + k < n; k++) {
+			const uint32_t *r = g_m34[(first + p * 4u + k) % M34_N];
+
+			for (i = 0; i < 3; i++) {
+				w[4 + 3 * k + i] = r[i];
+			}
+		}
+		diag_page(M34_PAGE[p], w, 16);
+	}
+}
+
+static uint8_t focus_plan34(const struct em_focus_cmd *c, const uint8_t *pl,
+                            uint16_t *to)
+{
+	int32_t  here = abs_encoder_track();
+	int32_t  want, from, d, reach;
+	uint32_t flags = g_homed ? 0u : M34_UNHOMED;
+
+	/* A newer request ends the last one's wait: its deadline would be
+	 * sampled under this one's move. */
+	g_m34_wait = 0;
+	if (!g_homed || !focus_cmd_target(c, &want)) {
+		m34_log(pl, here, *to, 0, flags);
+		return 0;
+	}
+	from = focus_counts_to_em06(here);
+	d    = (int32_t)focus_counts_to_em06(want) - from;
+	if (g_moving && (g_move_target - here) * d > 0) {
+		flags |= M34_TOWARD;
+	} else if (!g_moving) {
+		forecast_model(&STOCK);     /* the move this will run */
+	}
+	/* The reach, protocol units, unbounded by the target. */
+	reach = em_reach(d < 0 ? -0x7FFF : 0x7FFF, pl[4]);
+	reach = reach < 0 ? -reach : reach;
+	if (reach == 0 || d == 0) {
+		m34_log(pl, here, *to, 0, flags);
+		return 0;
+	}
+	if (d > reach) {
+		d = reach;
+	} else if (d < -reach) {
+		d = -reach;
+	}
+	*to = (uint16_t)(from + d);
+	reach *= FOCUS_COUNTS_PER_UNIT;
+	m34_log(pl, here, *to, reach > 0xFFF ? 0xFFF : reach, flags | M34_MOVED);
+	return 1;
+}
+
 /* End the running leg and hand `c` forward -- or, for a Stop, report it from
  * the leg it stopped. */
 static void focus_cut(const struct em_focus_cmd *c)
@@ -1214,6 +1362,15 @@ static uint8_t focus_retarget(int32_t *target)
 		return 0;
 	}
 
+	/* Taken over by a message 0x34 move: the 0x04 Move it replaces is
+	 * answered NOW, and the rest of the leg owes nothing -- as Yongnuo,
+	 * whose motor reports the replaced job superseded at once and the
+	 * 0x34 job to no one (msg_0x34.md).  Taken over by a 0x04 Move, the
+	 * leg is that Move's, and answers it when it ends. */
+	if (c.silent && !g_leg_silent) {
+		em_post_event(EM_REC_MOVE, 0x00u);
+	}
+	g_leg_silent  = c.silent;
 	g_last_target = c.target;
 	g_move_target = want;
 	*target = want;
@@ -1659,6 +1816,7 @@ static void focus_exec(const struct em_focus_cmd *c)
 	if (!focus_cmd_target(c, &want)) {
 		return;
 	}
+	g_leg_silent = c->silent;
 	outcome = focus_run(want, c->target, &STOCK);
 
 	if (outcome == SERVO_ABORTED) {
@@ -1670,8 +1828,9 @@ static void focus_exec(const struct em_focus_cmd *c)
 		if (g_abort_by_stop) {
 			em_post_event(EM_REC_STOP, 0x01u);
 		}
-	} else if (!c->silent) {
-		/* A 0x34 move is answered by its own reply, not by 1D 00. */
+	} else if (!g_leg_silent) {
+		/* A 0x34 move is answered by its own reply, not by 1D 00;
+		 * the leg's last instruction decides (focus_retarget). */
 		em_post_event(EM_REC_MOVE, 0x00u);
 	}
 }
@@ -1772,10 +1931,7 @@ int main(void)
 	em_set_powerdown_handler(powerdown_signal);
 
 	em_init();
-	/* Message 0x34's timed moves: planned at three quarters of a normal
-	 * move's cruise speed, as Yongnuo plans at ~3/4 of its top speed. */
-	em_set_move34_speed((uint32_t)STOCK.v_cruise * 3u / 4u
-	                    / FOCUS_COUNTS_PER_UNIT);
+	em_set_move34_handler(focus_plan34);
 	/* The nearest distance the full extension reaches, at the declared
 	 * focal length -- the same model as the subject distance. */
 	em_set_min_focus(focus_distance_code(FOCUS_TRAVEL_COUNTS, em_focal_mm10));
@@ -1790,6 +1946,7 @@ int main(void)
 
 	for (;;) {
 		em_poll();
+		m34_deadline();
 
 		/* If the handshake has not completed by two seconds it is not
 		 * going to.  The motor pages are then free -- no motor step can

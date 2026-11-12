@@ -225,6 +225,28 @@ static void check_frame(int i, uint8_t id, const char *what)
 	}
 }
 
+/* A stand-in for main.c's 0x34 planner: records what it was given, goes to
+ * 5101, or stays for no move or no time. */
+static struct em_focus_cmd plan34_cmd;
+static uint8_t  plan34_ms;
+static unsigned plan34_n;
+
+static uint16_t plan34_to;
+
+static uint8_t plan34(const struct em_focus_cmd *c, const uint8_t *pl,
+                      uint16_t *to)
+{
+	plan34_cmd = *c;
+	plan34_ms  = pl[4];
+	plan34_to  = *to;
+	plan34_n++;
+	if (c->op == EM_OP_NONE || pl[4] == 0) {
+		return 0;
+	}
+	*to = 5101;
+	return 1;
+}
+
 int main(void)
 {
 	static const uint8_t HANDSHAKE[] = { 0x01, 0x07, 0x0C, 0x0B, 0x08,
@@ -415,23 +437,25 @@ int main(void)
 	}
 
 	/* --- message 0x34: the timed move ---------------------------------
-	 * A 32-byte frame of its own: pl[0..1] target, pl[3] mode, pl[4] ms to
-	 * the deadline.  Reply pl[0] 00, pl[1..2] where the lens now goes; the
-	 * move is capped at 4687 units/s x (ms - 13), and it is SILENT. */
+	 * A 32-byte frame of its own: pl[0..1] operand, pl[3] mode, pl[4] ms to
+	 * the deadline.  The mode decodes as a 0x04 Move's; the planner (main.c)
+	 * picks the position.  Reply pl[0] 00, pl[1..2] where the lens now goes:
+	 * the plan, or -- staying -- the running target.  The move is SILENT. */
 	{
 		struct {
-			uint16_t t; uint8_t mode, ms; uint16_t want; int moves;
+			uint16_t v; uint8_t mode, ms; uint8_t op; uint16_t want; int moves;
 		} cs[] = {
-			{ 5050, 0, 40, 5050, 1 },   /* 27 ms -> 126 units: reached   */
-			{ 5600, 0, 40, 5126, 1 },   /* far: capped at +126            */
-			{ 4500, 0, 10, 4954, 1 },   /* 10 ms (not > 13) -> 46 units   */
-			{ 0x7FFF, 0, 40, 5000, 0 }, /* no target: stays               */
-			{ 0x0700, 3, 40, 5000, 0 }, /* mode 3 outside travel: stays   */
-			{ 5040, 3, 40, 5040, 1 },   /* mode 3 inside travel: position */
-			{ 5000, 0, 40, 5000, 0 },   /* already there                  */
+			{ 5050, 0x00, 40, EM_OP_MOVE,         5101, 1 },
+			{ 0x0300, 0x03, 40, EM_OP_MOVE_DIST,  5101, 1 },
+			{ 0xFFFD, 0x04, 40, EM_OP_MOVE_REL,   5101, 1 },
+			{ 0x0002, 0x06, 50, EM_OP_MOVE_DEFOCUS, 5101, 1 },
+			{ 0x7FFF, 0x00, 40, EM_OP_NONE,       5020, 0 }, /* no target  */
+			{ 5050, 0x02, 40, EM_OP_NONE,         5020, 0 }, /* unsupported */
+			{ 5050, 0x00, 0,  EM_OP_MOVE,         5020, 0 }, /* plan stays  */
 		};
 		unsigned k;
 
+		em_set_move34_handler(plan34);
 		for (k = 0; k < sizeof(cs) / sizeof(cs[0]); k++) {
 			uint8_t f[32];
 			uint16_t sum = 0, i;
@@ -439,11 +463,12 @@ int main(void)
 			struct em_focus_cmd cmd;
 
 			(void)em_take_focus_cmd(&cmd);      /* nothing pending */
-			em_set_focus_position(5000, 5000);
+			em_set_focus_position(5000, 5020);
+			plan34_n = 0;
 			memset(f, 0, sizeof(f));
 			f[0] = 0xF0; f[1] = 32; f[3] = 0x02; f[4] = (uint8_t)(0x60 + k);
 			f[5] = 0x34;
-			f[6] = (uint8_t)cs[k].t; f[7] = (uint8_t)(cs[k].t >> 8);
+			f[6] = (uint8_t)cs[k].v; f[7] = (uint8_t)(cs[k].v >> 8);
 			f[9] = cs[k].mode; f[10] = cs[k].ms;
 			for (i = 1; i <= 32 - 4; i++) {
 				sum += f[i];
@@ -471,6 +496,15 @@ int main(void)
 					break;
 				}
 			}
+			if (plan34_n != 1 || plan34_cmd.op != cs[k].op
+			    || plan34_ms != cs[k].ms || plan34_to != 5020
+			    || (cs[k].op == EM_OP_NONE ? 0
+			        : cs[k].op <= EM_OP_MOVE_DIST
+			        ? plan34_cmd.target != cs[k].v
+			        : plan34_cmd.delta != (int16_t)cs[k].v)) {
+				fail("0x34 case %u: planner got n %u op %u ms %u to %u", k,
+				     plan34_n, plan34_cmd.op, plan34_ms, plan34_to);
+			}
 			if (em_take_focus_cmd(&cmd) != (uint8_t)cs[k].moves) {
 				fail("0x34 case %u: move %s", k,
 				     cs[k].moves ? "missing" : "queued");
@@ -481,6 +515,7 @@ int main(void)
 				     cmd.op, cmd.target, cmd.silent);
 			}
 		}
+		em_set_move34_handler(0);
 	}
 
 	/* --- message 0x2B: neither declared nor answered -----------------
@@ -496,7 +531,7 @@ int main(void)
 	 * declared without one stalls the handshake there.  These had none
 	 * and were withdrawn; they must not come back by accident. */
 	{
-		static const uint8_t gone[] = { 0x17, 0x1E, 0x29, 0x2A, 0x2B, 0x34 };
+		static const uint8_t gone[] = { 0x17, 0x1E, 0x29, 0x2A, 0x2B };
 		unsigned k;
 
 		for (k = 0; k < sizeof(gone); k++) {

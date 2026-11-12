@@ -393,60 +393,93 @@ static uint16_t clamp_travel(int32_t pos);
 static void focus_cmd_set(const struct em_focus_cmd *c);
 static void count16(volatile uint16_t *n);
 static uint16_t g_pos_now;        /* last reported position */
+static uint16_t g_pos_target;     /* where the running move is going */
 
-/* MESSAGE 0x34: move to a position within a time limit (msg_0x34.md), as
- * Yongnuo 50 DF does it (FUN_0801620c).  The body sends it from its release
- * sequence, as a frame of its own:
+/* A Move's operand and mode byte, as message 0x04 rec[1..2] / rec[4] and
+ * message 0x34 pl[0..1] / pl[3] both carry them -- the same mode numbering in
+ * both (autofocus.md 3.1, msg_0x34.md).  Leaves c->op EM_OP_NONE for anything
+ * that is not a move. */
+static void move_decode(uint16_t v, uint8_t mode, struct em_focus_cmd *c)
+{
+	switch (mode & 0x07u) {
+	case 0:
+		/* 0x7FFF is the body's NO-TARGET sentinel.
+		 *
+		 * The protocol leaves the reading open -- it lies far above
+		 * any lens's range, so a lens that clamps drives to its upper
+		 * limit either way (autofocus.md 3.1).  This device does not
+		 * clamp it: driving the helicoid to its close stop because the
+		 * body had nothing to ask for is a full-travel slam on every
+		 * idle frame that carries one, and an a9 II does send them. */
+		if (v == EM_NO_TARGET) {
+			c->op = EM_OP_NONE;
+			break;
+		}
+		c->op     = EM_OP_MOVE;
+		c->target = v;
+		break;
+	case 3:
+		c->op     = EM_OP_MOVE_DIST;
+		c->target = v;
+		break;
+	/* Modes 4 and 6: a zero delta is ignored, as Yongnuo does -- taken as
+	 * a move to here, it would stop a leg that is still running. */
+	case 4:
+		c->op    = v ? EM_OP_MOVE_REL : EM_OP_NONE;
+		c->delta = (int16_t)v;
+		break;
+	case 6:
+		c->op    = v ? EM_OP_MOVE_DEFOCUS : EM_OP_NONE;
+		c->delta = (int16_t)v;
+		break;
+	default:
+		c->op = EM_OP_NONE;     /* ignored, as specified */
+		break;
+	}
+}
+
+/* MESSAGE 0x34: move within a time limit (msg_0x34.md).  The body sends it
+ * from its release sequence, as a frame of its own:
  *
- *   pl[0..1]  target, position units
- *   pl[3]     bits 0-1 mode; other bits flags
+ *   pl[0..1]  operand
+ *   pl[3]     mode, bits 0-2, numbered as a 0x04 Move's: an A7 IV sends 00
+ *             (position), 03 (distance code) and 06 (defocus units)
  *   pl[4]     milliseconds to the body's deadline
  *
- * A target inside the travel is a position whatever the mode.  The move is
- * capped at what fits the time: Yongnuo takes pl[4] less 13 ms when it is
- * above 13, at 18 units per millisecond -- some three quarters of its top
- * speed.  Here the rate is set by the caller from this mechanism's cruise
- * speed (em_set_move34_speed).  A target outside the travel under a non-zero
- * mode is a distance code or a table value that Yongnuo converts; this does
- * not, and stays where it is.  The body's no-target 0x7FFF never moves it.
- * The move is SILENT: the reply is its answer, so no 1D event follows.
+ * The operand is decoded as a 0x04 Move's is; the move handler (main.c)
+ * resolves it and cuts it to what the mechanism can finish in the time.  The
+ * move is SILENT: the reply is its answer, so no 1D event follows.
  *
- * Returns the position the lens is now going to -- the reply's pl[1..2]. */
-static uint32_t g_move34_ups = 4687u;   /* 0.75 x 25 counts/ms, in units/s */
+ * Returns the position the lens is now going to -- the reply's pl[1..2].
+ * When it does not move -- an unsupported mode, no target, no time -- that is
+ * where it was already going, a running move's target or where it stands:
+ * still true, and the A7 IV only logs it. */
+static uint8_t (*g_move34)(const struct em_focus_cmd *c, const uint8_t *pl,
+                           uint16_t *to);
 
-void em_set_move34_speed(uint32_t ups)
+void em_set_move34_handler(uint8_t (*plan)(const struct em_focus_cmd *c,
+                                           const uint8_t *pl, uint16_t *to))
 {
-	g_move34_ups = ups;
+	g_move34 = plan;
 }
 
 static uint16_t timed_move34(void)
 {
-	uint16_t t    = (uint16_t)g_req[6] | ((uint16_t)g_req[7] << 8);
-	uint8_t  mode = g_req[9];
-	uint32_t ms   = g_req[10] > 13u ? g_req[10] - 13u : g_req[10];
-	int32_t  here = g_pos_now;
-	int32_t  step = (int32_t)(g_move34_ups * ms / 1000u);
-	int32_t  to;
+	const uint8_t *pl = &g_req[EM_HEADER_LEN];
 	struct em_focus_cmd c = { 0 };
+	uint16_t to = g_pos_target;
 
-	if (t == EM_NO_TARGET
-	    || ((mode & 0x07u) && clamp_travel(t) != t)) {
-		return (uint16_t)here;
-	}
-	to = clamp_travel(t);
-	if (to - here > step) {
-		to = here + step;
-	} else if (here - to > step) {
-		to = here - step;
-	}
-	if (to != here) {
-		c.op     = EM_OP_MOVE;
-		c.target = (uint16_t)to;
-		c.silent = 1;
-		focus_cmd_set(&c);
-	}
+	move_decode((uint16_t)pl[0] | ((uint16_t)pl[1] << 8), pl[3], &c);
 	count16(&em_move34_n);
-	return (uint16_t)to;
+	if (!g_move34 || !g_move34(&c, pl, &to)) {
+		return g_pos_target;
+	}
+	c.op     = EM_OP_MOVE;
+	c.target = to;
+	c.delta  = 0;
+	c.silent = 1;
+	focus_cmd_set(&c);
+	return to;
 }
 
 static const struct ea9_packet *find_packet(uint8_t id)
@@ -978,45 +1011,7 @@ static void em_parse_records(const uint8_t *rx, uint16_t end)
 			}
 
 			count16(&em_move_mode_n[r[4] & 0x07u]);
-			switch (r[4] & 0x07u) {
-			case 0:
-				/* 0x7FFF is the body's NO-TARGET sentinel.
-				 *
-				 * The protocol leaves the reading open -- it
-				 * lies far above any lens's range, so a lens
-				 * that clamps drives to its upper limit either
-				 * way (autofocus.md 3.1).  This device does not
-				 * clamp it: driving the helicoid to its close
-				 * stop because the body had nothing to ask for
-				 * is a full-travel slam on every idle frame
-				 * that carries one, and an a9 II does send
-				 * them. */
-				if (v == EM_NO_TARGET) {
-					c.op = EM_OP_NONE;
-					break;
-				}
-				c.op     = EM_OP_MOVE;
-				c.target = v;
-				break;
-			case 3:
-				c.op     = EM_OP_MOVE_DIST;
-				c.target = v;
-				break;
-			/* Modes 4 and 6: a zero delta is ignored, as
-			 * Yongnuo does -- taken as a move to here, it
-			 * would stop a leg that is still running. */
-			case 4:
-				c.op    = v ? EM_OP_MOVE_REL : EM_OP_NONE;
-				c.delta = (int16_t)v;
-				break;
-			case 6:
-				c.op    = v ? EM_OP_MOVE_DEFOCUS : EM_OP_NONE;
-				c.delta = (int16_t)v;
-				break;
-			default:
-				c.op = EM_OP_NONE;     /* ignored, as specified */
-				break;
-			}
+			move_decode(v, r[4], &c);
 			if (c.op != EM_OP_NONE) {
 				focus_cmd_set(&c);
 			}
@@ -1567,7 +1562,6 @@ void em_set_motor(int8_t dir)
  * iteration nor a blocking step that skipped some eighths moves them.  The
  * body expects the frame-sync instant (msg_0x06.md): it files these points by
  * frame and lines them up with the exposure. */
-static uint16_t g_pos_target;     /* where the running move is going */
 static uint8_t  g_pos_set;        /* a position has been reported */
 #define SUB_N 8
 static uint16_t g_sub[SUB_N + 1];   /* L[8] in [0] once latched, L[1..8] */
@@ -1844,14 +1838,27 @@ void em_set_focus_position(int32_t pos, int32_t target)
  * near the target it reports the target early rather than late, and it never
  * passes the target.  Moving away from the target: 0 -- no forecast past
  * where it is. */
+/* The two pieces above: the distance, units x 256, from speed u (units/ms x
+ * 256) in t ms. */
+static uint32_t reach_q8(uint32_t u, uint32_t t)
+{
+	uint32_t tau = g_fc_tau_ms;
+	uint32_t cap = g_fc_cap_q8, sat = g_fc_sat_q8;
+
+	if (u >= cap || u >= sat) {
+		return u * t;
+	}
+	if ((sat - u) * t <= (cap - u) * tau) {
+		return u * t + (sat - u) * t * t / (2u * tau);
+	}
+	return cap * t - (cap - u) * (cap - u) * tau / (2u * (sat - u));
+}
+
 static int32_t forecast06(int32_t left, int8_t m)
 {
 	int32_t  dir  = left > 0 ? 1 : left < 0 ? -1 : 0;
 	uint32_t room = (uint32_t)(left * dir) << 8;     /* x 256 */
-	uint32_t t    = (uint32_t)em_frame_period_ms * EM06_FORECAST_FRAMES;
-	uint32_t tau  = g_fc_tau_ms;
-	uint32_t cap  = g_fc_cap_q8, sat = g_fc_sat_q8;
-	uint32_t u, x;
+	uint32_t x;
 
 	/* Moving away: driven away, or still travelling away -- in the last
 	 * eighth or over the last frame (a reversal coasting the old way). */
@@ -1859,15 +1866,23 @@ static int32_t forecast06(int32_t left, int8_t m)
 	    || (int32_t)g_frame_disp * dir < 0) {
 		return 0;
 	}
-	u = (uint32_t)(g_v0_q8 * dir);
-
-	if (u >= cap || u >= sat) {
-		x = u * t;
-	} else if ((sat - u) * t <= (cap - u) * tau) {
-		x = u * t + (sat - u) * t * t / (2u * tau);
-	} else {
-		x = cap * t - (cap - u) * (cap - u) * tau / (2u * (sat - u));
+	x = reach_q8((uint32_t)(g_v0_q8 * dir),
+	             (uint32_t)em_frame_period_ms * EM06_FORECAST_FRAMES);
+	if (x > room) {
+		x = room;
 	}
+	return dir * (int32_t)((x + 255u) >> 8);
+}
+
+int32_t em_reach(int32_t left, uint32_t t_ms)
+{
+	int32_t  dir  = left > 0 ? 1 : left < 0 ? -1 : 0;
+	uint32_t room = (uint32_t)(left * dir) << 8;
+	uint32_t x;
+
+	/* Moving away, it starts from rest -- still the bound, as the reversal
+	 * is not modelled. */
+	x = reach_q8(g_v0_q8 * dir > 0 ? (uint32_t)(g_v0_q8 * dir) : 0u, t_ms);
 	if (x > room) {
 		x = room;
 	}

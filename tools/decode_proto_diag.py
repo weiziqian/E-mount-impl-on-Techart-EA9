@@ -62,6 +62,7 @@ TAGS = {0x424F4F54: "BOOT  app is executing",
         0x464C5354: "FLST  the LAST focus moves, written when the bus went quiet",
         0x4E4F524D: "NORM  normal-class traffic, by frame length",
         0x3830304D: "M008  the body's message 0x08 request, raw",
+        0x3433304D: "M034  the message 0x34 log, oldest first",
         0x43484B21: "CHK!  build consistency",
         0x43415000: "CAP   raw bytes of one receive window",
         0x4D4F5452: "MOTR  supply and encoder around one drive step",
@@ -386,6 +387,35 @@ def decode_trail(blob, label):
             print(f"           speed in position units  x{sp}")
             print(f"           speed in defocus units   x{sd}  <- times the scale")
             print(f"         using the defocus scale: {mv[6] + sd} of {sum(mv) + sp + sd}")
+            continue
+        if w[2] == 0x3433304D:
+            # Three words a record: operand | mode << 16 | ms << 24; position
+            # on receipt | reply << 16; position at the deadline | R << 16 |
+            # flags << 28.  Positions in protocol units, R in counts.
+            total, moved, idx = w[3] & 0xFFFF, (w[3] >> 16) & 0xFFF, w[3] >> 28
+            n = min(total, 15) - 4 * idx
+            if idx == 0:
+                print(f"page {p:2d}  {tag}")
+                print(f"         {total} request(s), {moved} moved"
+                      + ("" if total <= 15 else "; the last 15 follow"))
+            else:
+                print(f"page {p:2d}  M034  (continued)")
+            mname = {0: "pos", 3: "dist", 4: "rel", 6: "defocus"}
+            for k in range(max(0, min(n, 4))):
+                a, b, c = w[4 + 3 * k:7 + 3 * k]
+                op, mode, ms = a & 0xFFFF, (a >> 16) & 0xFF, a >> 24
+                here, to = b & 0xFFFF, b >> 16
+                dl, reach, fl = c & 0xFFFF, (c >> 16) & 0xFFF, c >> 28
+                m = mname.get(mode & 7, "unsupported")
+                at = (f"deadline at {dl} ({dl - to:+d} from the reply)"
+                      if fl & 4 else "deadline not sampled")
+                print(f"         #{4 * idx + k + 1:<2d} pl[3]={mode:02x} {m:<11s}"
+                      f" operand {op:5d}  {ms:2d} ms   at {here} -> reply {to}"
+                      f" ({to - here:+d})"
+                      f"{'  R ' + str(reach) if fl & 2 else '  stayed'}"
+                      f"{'  toward' if fl & 1 else ''}"
+                      f"{'  UNHOMED' if fl & 8 else ''}")
+                print(f"             {at}")
             continue
         if w[2] == 0x46484953:
             ring_n, t04n = w[4] >> 16, w[4] & 0xFFFF

@@ -41,6 +41,7 @@
 #define TAG_FHIS        0x46484953u    /* focus history: targets + mode bytes */
 #define TAG_FAIL        0x4C494146u   /* "FAIL": the handshake did not complete */
 #define TAG_MODE        0x4D4F4445u   /* Move records by mode, Scan by speed unit */
+#define TAG_M034        0x3433304Du   /* "M034": the message 0x34 log */
 
 /* Boot identity, carried in every page that has room for it. */
 /* EA9_NO_LOG: the release build writes no flash at all, so these become
