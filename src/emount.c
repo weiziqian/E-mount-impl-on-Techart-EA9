@@ -218,6 +218,10 @@ volatile uint32_t em_frames_tx;
 volatile uint8_t  em_handshake_done;
 volatile uint8_t  em_last_id;
 volatile uint8_t  em_shutdown_acked;
+/* A 0x16 has arrived (set in the chip-select interrupt).  From then on no
+ * 0x05 or 0x06 goes out, even one already due, until a wake or a new session
+ * clears it with em_shutdown_acked. */
+static volatile uint8_t g_m16_seen;
 volatile uint32_t em_t_shutdown;
 volatile uint32_t em_t_revived;
 volatile uint8_t  em_ignored_after_shutdown;
@@ -229,7 +233,6 @@ volatile uint8_t  em_wake_first_id;
 static volatile uint8_t g_woke;     /* woken, WAKE mark not yet written */
 static void (*g_park)(void);
 static void (*g_powerdown)(void);
-static uint8_t g_shutdown_enabled = 1;
 static volatile uint8_t g_in_poll;
 volatile uint8_t  em_last_class;
 volatile uint16_t em_focus_target;
@@ -470,6 +473,11 @@ static void em_transmit(uint8_t *frame, uint16_t len)
 	uint16_t sum  = 0;
 	uint32_t low;
 
+	if (g_m16_seen && frame[3] == EM_CLASS_NORMAL
+	    && (frame[5] == 0x05u || frame[5] == 0x06u)) {
+		return;
+	}
+
 	frame[1]       = (uint8_t)len;
 	frame[2]       = (uint8_t)(len >> 8);      /* 0x3B is 500 bytes */
 	frame[len - 1] = EM_FRAME_END;
@@ -518,11 +526,6 @@ void em_set_park_handler(void (*park)(void))
 void em_set_powerdown_handler(void (*fn)(void))
 {
 	g_powerdown = fn;
-}
-
-void em_set_shutdown_enabled(uint8_t on)
-{
-	g_shutdown_enabled = on;
 }
 
 static void em_shutdown_ack(void)
@@ -610,9 +613,7 @@ static void em_send_id(uint8_t id)
 	uint8_t *frame;
 
 	if (id == EM_ID_SHUTDOWN) {
-		if (g_shutdown_enabled) {
-			em_shutdown_ack();
-		}
+		em_shutdown_ack();
 		return;
 	}
 
@@ -641,6 +642,7 @@ static void em_send_id(uint8_t id)
 			return;
 		}
 		em_shutdown_acked = 0;
+		g_m16_seen        = 0;
 		em_t_revived      = millis();
 	}
 
@@ -1361,6 +1363,9 @@ static void em_frame_in(const uint8_t *rx, uint16_t n)
 	/* Message 0x16's pl[0], for the tally: 01 or 03 by the body's state. */
 	if (rx[3] == EM_CLASS_INIT && rx[5] == EM_ID_SHUTDOWN && n >= 10) {
 		em_m16_pl0 = rx[6];
+	}
+	if (rx[3] == EM_CLASS_INIT && rx[5] == EM_ID_SHUTDOWN) {
+		g_m16_seen = 1;
 	}
 
 	if (rx[3] == EM_CLASS_INIT) {
@@ -2516,5 +2521,6 @@ void em_sleep_until_wake(void)
 	em_t_last_frame   = em_t_wake;   /* or the main loop reads the standby
 	                                    as the bus going quiet */
 	em_shutdown_acked = 0;
+	g_m16_seen        = 0;
 	em_eic_resume();
 }

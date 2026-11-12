@@ -168,17 +168,6 @@ extern volatile uint8_t em_reset_wanted;
  * and then calls em_sleep_until_wake. */
 void em_set_powerdown_handler(void (*fn)(void));
 
-/* Turn the whole message-0x16 shutdown path off, so the responder behaves the
- * way it did before any of it existed: 0x16 is treated as an id with nothing
- * to send, exactly like the 72 ids the stock jump table ignores.
- *
- * This exists as a CONTROL.  The boot count went from one per mount to three
- * at the build that added PA23 and the power-down tail, and every attempt to
- * explain the startup failure from the receiver side has failed.  Holding
- * everything else constant and removing only the shutdown work is the way to
- * find out whether it is responsible (NOTES.md §45). */
-void em_set_shutdown_enabled(uint8_t on);
-
 /* Status frames only, no reply dispatch.  This is what a nested em_poll()
  * becomes: the park runs inside em_poll, and its servo loop pumps em_poll
  * again, which would otherwise re-enter the reply path and park recursively. */
