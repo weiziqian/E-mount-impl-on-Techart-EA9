@@ -28,14 +28,14 @@
  *    included, so that failure mode is not in reach.
  *
  * 2. NO DEFERRED-CALL TIMER.  The stock 10 us / 100 us / 300 us gaps come from
- *    TC4 one-shots.  They are busy waits here, which costs at most 410 us of a
- *    16.6 ms frame and removes a timer, an interrupt and a callback slot.
+ *    TC4 one-shots.  The gaps here are busy waits, which removes a timer, an
+ *    interrupt and a callback slot.
  *
  * 3. BLOCKING TRANSMIT instead of DMA -- see em_uart.c.
  *
- * The frame gaps ARE reproduced, because they are the part a body can notice:
- * chip select stays asserted for 100 us after the last bit, matching the
- * 0x5188 -> 0x5280 path, and message 0x06 follows 0x05 by 300 us.
+ * The chip-select timing around a frame is the part a body can notice, and is
+ * set from native lenses rather than copied: EM_CS_HOLD_US after the last
+ * bit, and at least EM_CS_LOW_MIN_US low between any two of our frames.
  */
 #include "board.h"
 #include "clock.h"
@@ -55,12 +55,24 @@
 #define EM_FRAME_END      0x55u
 #define EM_HEADER_LEN     6        /* start, u16 length, class, seq, id */
 
-/* Recovered timings.  EM_CS_HOLD_US is 0x5188's defer(100, 0x5281): the
- * transmit-complete callback waits 100 us before 0x5280 drops the line.
- * EM_STATUS_GAP_US is 0x5280's defer(300, msg06_sender).  EM_LEAD_US is the
- * defer(10, msg05_sender) the main loop issues after the frame sync. */
-#define EM_CS_HOLD_US     100u
-#define EM_STATUS_GAP_US  300u
+/* Our chip select around a frame.
+ *
+ * EM_CS_HOLD_US: high this long after the last bit has left (em_uart_send
+ * returns on TXC).  The stock holds 100 us (0x5188's defer(100, 0x5281));
+ * native lenses on the A6000 drop it 14-57 us after their last RXD edge, the
+ * Viltrox adapter after ~3.
+ *
+ * EM_CS_LOW_MIN_US: low at least this long between two of our frames,
+ * whatever sends them -- the status pair, queued replies sent back to back,
+ * a reply followed by the status pair.  Native lenses on the A6000 stay low
+ * 470-620 us between frames at the shortest (one gap of 120-150 us per
+ * capture).  This replaces the stock's 300 us between 0x05 and 0x06
+ * (0x5280's defer(300, msg06_sender)), which covered only that pair.
+ *
+ * EM_LEAD_US is the defer(10, msg05_sender) the stock's main loop issues
+ * after the frame sync. */
+#define EM_CS_HOLD_US     20u
+#define EM_CS_LOW_MIN_US  500u
 #define EM_LEAD_US        10u
 
 /* Frame offsets into the message 0x06 packet that carry the focus position:
@@ -451,9 +463,12 @@ static const struct ea9_packet *find_packet(uint8_t id)
  * edited freely -- six of the seventeen stored checksums are stale in every
  * shipped image and the adapter still works (CLAUDE.md, "Checksum -- SOLVED").
  */
+static uint32_t g_cs_low_us;      /* micros() when our chip select last fell */
+
 static void em_transmit(uint8_t *frame, uint16_t len)
 {
-	uint16_t sum = 0;
+	uint16_t sum  = 0;
+	uint32_t low;
 
 	frame[1]       = (uint8_t)len;
 	frame[2]       = (uint8_t)(len >> 8);      /* 0x3B is 500 bytes */
@@ -467,11 +482,19 @@ static void em_transmit(uint8_t *frame, uint16_t len)
 	frame[len - 3] = (uint8_t)(sum & 0xFFu);
 	frame[len - 2] = (uint8_t)(sum >> 8);
 
+	/* The frame is ready; wait out what is left of the low time.  Time
+	 * spent building it, and in interrupts, already counts. */
+	low = micros() - g_cs_low_us;
+	if (low < EM_CS_LOW_MIN_US) {
+		delay_us(EM_CS_LOW_MIN_US - low);
+	}
+
 	PORT->Group[0].OUTSET.reg = (1u << EM_PIN_LENS_CS);
 	em_uart_send(frame, len);
 
 	delay_us(EM_CS_HOLD_US);
 	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_LENS_CS);
+	g_cs_low_us = micros();
 
 	em_frames_tx++;
 }
@@ -2264,7 +2287,6 @@ void em_pump_status(void)
 	} else {
 		em_transmit(em_msg_05, EA9_LEN_05);
 	}
-	delay_us(EM_STATUS_GAP_US);
 
 	/* THE TAIL.  Message 0x06 is a 43-byte core plus zero or more tail
 	 * blocks starting at pl[39] = frame offset 0x2D, and the frame grows to

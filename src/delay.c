@@ -54,8 +54,8 @@ void delay_ms(uint32_t ms)
 }
 
 /* Microsecond delay, counted in SysTick cycles rather than in a calibrated
- * loop so it survives -O changes.  The protocol gaps it has to reproduce are
- * 10 us, 100 us and 300 us (emount.c), all far shorter than the 1 ms reload,
+ * loop so it survives -O changes.  The protocol gaps it times are at most
+ * 500 us (emount.c), all far shorter than the 1 ms reload,
  * but the wrap is handled anyway so a long call cannot silently return early.
  */
 void delay_us(uint32_t us)
