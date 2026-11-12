@@ -1,16 +1,21 @@
+Firmware 2.2 (12 November 2026)
+
+- 4th-generation bodies and newer are now supported!
+- Focus tracking now works during AF-C burst shooting.
+- Improved motor homing at start-up.
+
+Known limitations:
+- Only AF-C works; AF-S still misses focus.
+- AF is tuned for 50 mm lenses only.
+
+==== Previous versions ====
+
 Firmware 2.1 (10 November 2026)
 
 - Focus now returns to infinity when you switch to MF.
 - Proper support for the camera's sleep mode.
 - More reliable start-up and shutdown, and faster shutdown.
 - More robust communication with the camera.
-
-Known issues:
-- Does not yet work on 4th-gen bodies (A7m4, A7m5, A7C2, A7Cr, A7r4, etc.)
-- AF-S is still unusable: it misses focus.
-- AF tuning is for 50 mm lenses only.
-
-==== Previous versions ====
 
 Firmware 2.0 (4 November 2026)
 
