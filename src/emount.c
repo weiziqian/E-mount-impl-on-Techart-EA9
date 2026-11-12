@@ -1183,7 +1183,11 @@ static void em_frame_in(const uint8_t *rx, uint16_t n)
 			}
 			em_m0a_len = (uint8_t)k;
 		}
-		if (rx[1] >= 11u && rx[6] == 0xFFu && rx[7] == 0x7Fu) {
+		/* 00 00 asks for no fields at all -- the body sends it ahead of
+		 * 0x16 (msg_0x0A.md) -- so it chooses no length either: the
+		 * one in force stays. */
+		if (rx[1] >= 11u && rx[6] == 0x00u && rx[7] == 0x00u) {
+		} else if (rx[1] >= 11u && rx[6] == 0xFFu && rx[7] == 0x7Fu) {
 			em_status05_len = EA9_LEN_05;
 		} else if ((pl13 & 0xFEu) != 0x80u) {
 			em_status05_len = EM05_LEN_LONG;
