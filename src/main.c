@@ -261,6 +261,9 @@ static void build_marker_page(uint32_t page);
 static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
 
 #define HOME_DUTY       800         /* 31.25%, stock 0x5e00 */
+/* The reset's one boost, for a mechanism that does not break away at
+ * HOME_DUTY (motor_reset). */
+#define HOME_BOOST_DUTY 1120        /* 43.75% */
 
 /* THE RESET's constants (motor_reset, user's definition 2026-11-12).  The
  * drive runs at constant HOME_DUTY toward infinity until one of:
@@ -272,12 +275,18 @@ static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
  *             (it is moving), two consecutive samples RST_SAMPLE_MS apart
  *             that fall by RST_STOP_FALL or less: it has reached the stop.
  *   reversed  RST_WRONG_COUNTS above where it started: going the wrong way.
- *   timeout   RST_TIMEOUT_MS.
+ *   timeout   RST_TIMEOUT_MS, from the start of the drive.
  *
- * Why the still rule cannot mistake stiction for the end stop: at 800 the
- * duty is above every breakaway this mechanism has ever shown (170-536, one
- * spot >=1280), so breakaway at this duty is immediate or never (NOTES.md
- * 96-103 for the breakaway distribution). */
+ * THE BOOST (user's, 2026-11-12).  Still could also be stiction: 800 clears
+ * every breakaway this unit has shown (170-536, NOTES.md 96-103), but some
+ * mechanisms start harder, and then the reset ends without the motor having
+ * moved at all.  So the FIRST time the still rule fires while the position is
+ * still within HOME_STILL_COUNTS of where the drive started, it does not end
+ * the drive: the duty goes to HOME_BOOST_DUTY and the still window starts
+ * again.  Once it has moved RST_BACK_COUNTS, the duty goes back to HOME_DUTY.
+ * At most one boost per reset; still a second time is the end, as before.  A
+ * mechanism a few counts short of the stop moves more than HOME_STILL_COUNTS
+ * before it stops, so it is not pushed harder into it. */
 #define HOME_STILL_MS       40
 /* Encoder noise is 3-5 counts peak-to-peak with sigma ~0.8 (NOTES.md 97).  6
  * is clear of that and still nothing at all as movement: at this duty the
@@ -307,8 +316,8 @@ static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
 enum { RST_END_TIMEOUT, RST_END_STILL, RST_END_STOP, RST_END_REVERSED };
 
 /* The shutdown park stops this far short of the stop found at boot, so it
- * does not drive into it. */
-#define PARK_ABOVE_STOP     20
+ * does not drive into it.  Encoder counts: 8 protocol units. */
+#define PARK_ABOVE_STOP     32
 #define PARK_TIMEOUT_MS     1000
 
 /* 1280 = 50% of PER, the stock's own limiter.
@@ -569,7 +578,7 @@ static uint16_t motor_reset(void)
 	int32_t  start, prev;
 	int32_t  at_drive_end;
 	uint32_t t0, t_start, t_sample, drive_ms, settle_ms;
-	uint8_t  reason = RST_END_TIMEOUT, back = 0, flat = 0;
+	uint8_t  reason = RST_END_TIMEOUT, back = 0, flat = 0, boosted = 0;
 	unsigned i = 0;
 
 	g_home_trace_n = 0;
@@ -628,6 +637,9 @@ static uint16_t motor_reset(void)
 			}
 			if (pos <= start - RST_BACK_COUNTS) {
 				back = 1;
+				if (!STOCK.dry && !g_rst_cut) {
+					motor_drive(-HOME_DUTY);    /* moving: off any boost */
+				}
 			}
 			/* Counted only once it is moving; a real fall restarts it. */
 			if (back) {
@@ -640,6 +652,18 @@ static uint16_t motor_reset(void)
 			prev = pos;
 		}
 		if (home_still_for(&still, HOME_STILL_MS, HOME_STILL_COUNTS)) {
+			int32_t moved = abs_encoder_track() - start;
+
+			if (!boosted && moved < HOME_STILL_COUNTS
+			    && moved > -HOME_STILL_COUNTS) {
+				/* Not moved: stiction, perhaps, not the stop. */
+				boosted = 1;
+				if (!STOCK.dry && !g_rst_cut) {
+					motor_drive(-HOME_BOOST_DUTY);
+				}
+				home_still_init(&still);
+				continue;
+			}
 			reason = RST_END_STILL;
 			break;
 		}
@@ -694,7 +718,9 @@ static uint16_t motor_reset(void)
 		w[4]  = ((uint32_t)settle_ms << 16) | (em_t_handshake & 0xFFFFu);
 		w[5]  = ((uint32_t)idle_hi << 16) | idle_lo;
 		w[6]  = ((uint32_t)load_hi << 16) | load_lo;
-		w[7]  = ((uint32_t)HOME_DUTY << 16) | HOME_DUTY;
+		/* The peak is the boost's duty if it was used. */
+		w[7]  = ((uint32_t)(boosted ? HOME_BOOST_DUTY : HOME_DUTY) << 16)
+		        | HOME_DUTY;
 		w[8]  = (uint32_t)start;
 		w[9]  = (uint32_t)at_drive_end;   /* the settled reading: w[14] */
 		w[10] = em_frames_rx;
