@@ -10,6 +10,9 @@ NOTES.md
 __pycache__/
 *.pyc
 
+# Local macOS host-tool environment.
+.venv-macos/
+
 # Reverse-engineering scratch from the disassembly phase: the function
 # inventory, its boundary corrections, and a copy of TECHART's released 1.8.0
 # image.  Inputs to the analysis, not to the build.

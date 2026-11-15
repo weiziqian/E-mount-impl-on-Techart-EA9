@@ -92,7 +92,7 @@ Because you can run your own code on it, easily and safely:
   flashing always works.
 - **Flashing is plain USB HID**: three commands, no signature, no hash, no
   encryption, no CRC. `tools/ea9flash.py` in this repository implements it in
-  ~400 lines of dependency-free Python.
+  Python using the standard library on Linux and HIDAPI on macOS.
 - **There is a read command too** (`--dump`), so the device's flash can be read
   back. This project uses it to leave a diagnostic trail in spare flash pages and
   recover it after a camera session — effectively `printf` debugging on a device
@@ -250,6 +250,10 @@ against a real camera unless the note says otherwise.
 ---
 
 ## 4. How to use (Ubuntu)
+
+**macOS, including Apple Silicon:** run `./tools/install_macos.sh` from the
+repository directory, then follow the [macOS guide](docs/macos.md) to extract
+release firmware, back up, flash and verify the adapter.
 
 ### 4.1 Prerequisites
 

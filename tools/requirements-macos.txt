@@ -1,0 +1,4 @@
+# hidapi provides the native macOS transport (Python import name: hid).
+hidapi==0.15.0
+# Parse firmware resources in release EXEs without executing the updater.
+dnfile==0.18.0
