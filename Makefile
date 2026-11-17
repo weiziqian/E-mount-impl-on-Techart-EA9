@@ -97,7 +97,7 @@ SRCS := src/startup_samd21.c src/system_samd21.c src/board.c \
         src/clock.c src/delay.c \
         src/emount.c src/emount_packets.c src/optical_file.c \
         src/em_uart.c src/em_eic.c \
-        src/nvm.c src/cfg.c $(LOGSRCS) \
+        src/nvm.c src/cfg.c src/lens_cfg.c $(LOGSRCS) \
         src/motor.c src/abs_encoder.c src/servo.c src/focus_map.c \
         src/focus_dist.c \
         src/vdd.c \

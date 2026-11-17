@@ -46,6 +46,7 @@
 #include "em_uart.h"
 #include "em_eic.h"
 #include "optical_file.h"
+#include "lens_cfg.h"
 
 #define EM_CLASS_INIT     0x02u
 #define EM_CLASS_NORMAL   0x01u
@@ -103,9 +104,10 @@
 #define EM06_CYCLE        0x1D
 #define EM06_CYCLE_BIT    0x40u
 
-/* The current aperture, 256 x AV + 4096: message 0x05 payload[0..1] (fixed,
- * in the template -- there is no iris) and message 0x28 payload[9..10], which
- * follows it only when the body asks (set_28_aperture). */
+/* The current aperture, 256 x AV + 4096: message 0x05 payload[0..3], message
+ * 0x1B's reply payload[0..3], and messages 0x28 / 0x35 payload[9..10], which
+ * follow it only when the body asks (set_28_aperture).  From em_aperture_now
+ * by put_aperture_now. */
 #define EM05_AP_NOW_A     0x06
 #define EM28_AP_NOW       0x0F
 
@@ -115,6 +117,12 @@
 #define EM05_FOCAL        0x1E
 #define EM28_FOCAL        0x0A
 #define EM08_FOCAL_BCD    0x16
+
+/* The minimum aperture: message 0x05 payload[52] as a descriptor byte, and
+ * message 0x08 payload[2..3] as an aperture value.  Written once by
+ * put_aperture_min. */
+#define EM05_AP_MIN_DESC  0x3A
+#define EM08_AP_MIN       0x08
 
 /* Message 0x05 payload[4] = frame offset 10 is the APERTURE settle countdown.
  * Nothing writes it: this adapter has no iris, so its aperture is never in
@@ -247,6 +255,9 @@ volatile uint16_t em_move_mode_n[8];
 volatile uint16_t em_move34_n;
 volatile uint16_t em_scan_unit_n[2];
 volatile uint16_t em_aperture_req;
+uint16_t          em_aperture_now = EM_APERTURE_MAX;
+volatile uint8_t  em_restart_due;
+static uint8_t    g_m1b_open;    /* a 0x1B arrived; the next 0x0A ends the capture */
 volatile uint16_t em_m03_aperture;
 volatile uint16_t em_m03_n;
 volatile uint8_t  em_focus_mf;
@@ -261,6 +272,7 @@ volatile uint8_t  em_m08_len;
 volatile uint16_t em_m08_n;
 volatile uint8_t  em_m08_aperture_on;
 static void set_28_aperture(void);
+static void put_aperture_now(void);
 
 /* The pending instruction, and the query queue.  Both are written from the
  * chip-select interrupt and read from the main loop. */
@@ -1129,12 +1141,8 @@ static void em_frame_in(const uint8_t *rx, uint16_t n)
 		}
 	}
 
-	/* Message 0x1B, the aperture command: COUNTED, NOT OBEYED.
-	 *
-	 * Init-class, so it arrives here rather than on the per-frame path, and
-	 * it carries an aperture in payload[0..1].  This adapter has no iris, so
-	 * there is nothing to obey; the reply echoes the requester's own bytes
-	 * back through the stored fixups.
+	/* Message 0x1B, the aperture command: reported as reached, and used to
+	 * choose the lens entry (lens_cfg_request).  There is no iris to move.
 	 *
 	 * Counted because an a9 II sends exactly one per session, inside the
 	 * burst of init-class requests that follows a shutter press
@@ -1183,6 +1191,19 @@ static void em_frame_in(const uint8_t *rx, uint16_t n)
 		/* 00 00 asks for no fields at all -- the body sends it ahead of
 		 * 0x16 (msg_0x0A.md) -- so it chooses no length either: the
 		 * one in force stays. */
+		/* THE FIRST 0x0A AFTER A 0x1B ENDS THE CAPTURE.  The A7 IV
+		 * sends 00 00 at capture start, before 0x1B, and its usual
+		 * field mask at capture end (0x3b37e0 / 0x3b38d4), so the
+		 * payload is not what marks the end.  Back to wide open, and
+		 * if 0x1B chose another entry, the restart that loads it. */
+		if (g_m1b_open) {
+			g_m1b_open      = 0;
+			em_aperture_now = EM_APERTURE_MAX;
+			put_aperture_now();
+			if (lens_changed) {
+				em_restart_due = 1;
+			}
+		}
 		if (rx[1] >= 11u && rx[6] == 0x00u && rx[7] == 0x00u) {
 		} else if (rx[1] >= 11u && rx[6] == 0xFFu && rx[7] == 0x7Fu) {
 			em_status05_len = EA9_LEN_05;
@@ -1199,6 +1220,16 @@ static void em_frame_in(const uint8_t *rx, uint16_t n)
 		 * a body ever commands an aperture this device does not have,
 		 * which is the only reason the channel matters here. */
 		em_aperture_req = (uint16_t)rx[6] | ((uint16_t)rx[7] << 8);
+
+		/* ACCEPTED, AND AT REST AT ONCE: the reply and every frame
+		 * after it report the requested aperture -- the A7 IV takes
+		 * the reply's pl[0..1] as the current aperture, and the next
+		 * 0x05 would otherwise contradict it.  pl[4] = 0, pl[9] bit 0
+		 * set, from the template. */
+		em_aperture_now = em_aperture_req;
+		put_aperture_now();
+		lens_cfg_request(em_aperture_req);
+		g_m1b_open = 1;
 	}
 
 	/* Message 0x04's MODE BYTE, payload[10] = frame offset 16, on EVERY
@@ -2068,6 +2099,15 @@ uint16_t em_defocus_scale(void)
 /* Messages 0x28 and 0x35 pl[9..10] carry the current aperture only when the
  * body's 0x08 request asks for it (emount.h); otherwise zero.  Filling it
  * unasked made an a9 II re-meter after every exposure. */
+static void put_aperture_now(void)
+{
+	put16(em_msg_05, EM05_AP_NOW_A,     em_aperture_now);
+	put16(em_msg_05, EM05_AP_NOW_A + 2, em_aperture_now);
+	put16(em_msg_1B, EM05_AP_NOW_A,     em_aperture_now);
+	put16(em_msg_1B, EM05_AP_NOW_A + 2, em_aperture_now);
+	set_28_aperture();
+}
+
 static void set_28_aperture(void)
 {
 	uint16_t av = (uint16_t)em_msg_05[EM05_AP_NOW_A]
@@ -2126,7 +2166,7 @@ static uint8_t bcd2(uint16_t n)
 	return (uint8_t)(((n / 10u % 10u) << 4) | (n % 10u));
 }
 
-/* The focal length, from em_focal_mm10 -- the one word the updater patches --
+/* The focal length, from em_focal_mm10 -- set from the lens configuration --
  * into every message that carries it.  The templates hold zeros there. */
 static void put_focal(void)
 {
@@ -2143,11 +2183,18 @@ static void put_focal(void)
 	em_msg_08[EM08_FOCAL_BCD + 1] = bcd2(mm);
 }
 
+static void put_aperture_min(void)
+{
+	em_msg_05[EM05_AP_MIN_DESC] = EM_AV_DESC(em_aperture_min);
+	put16(em_msg_08, EM08_AP_MIN, em_aperture_min);
+}
+
 void em_init(void)
 {
 	/* Fixed content is in the templates (emount_packets.c); the focal
-	 * length is written here. */
+	 * length and the minimum aperture are written here. */
 	put_focal();
+	put_aperture_min();
 
 	/* protocol_init, 0x551c, replicated including the one non-obvious bit:
 	 * our chip select goes high FIRST and stays high across the whole

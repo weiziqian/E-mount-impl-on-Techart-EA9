@@ -45,6 +45,7 @@
 #include "servo.h"
 #include "focus_map.h"
 #include "focus_dist.h"
+#include "lens_cfg.h"
 #include "trail.h"
 #include "vdd.h"
 
@@ -156,6 +157,19 @@ static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29, 0, 1, 2, 4 };
  * inbound command lengths this body actually emits, and nothing else in the
  * trail answers it. */
 #define NORM_PAGE       31u
+
+/* THE LENS RESTART, after the 0x0A that ends a capture with a switch
+ * (emount.c).
+ * Save the new entry, then raise PA23 (XDETECT) so the body sees the lens
+ * removed and attaches it again from cold, loading it -- expected, not yet
+ * measured.  The flash writes stall the CPU for a few ms; nothing is owed
+ * the body between that 0x0A and the restart. */
+static void lens_restart(void)
+{
+	em_restart_due = 0;
+	lens_cfg_commit();
+	PORT->Group[0].OUTSET.reg = 1u << EM_PIN_XDETECT;
+}
 
 /* The normal-class histogram, at most once.
  *
@@ -1956,6 +1970,7 @@ int main(void)
 	em_set_park_handler(shutdown_park);
 	em_set_powerdown_handler(powerdown_signal);
 
+	lens_cfg_boot();
 	em_init();
 	em_set_move34_handler(focus_plan34);
 	/* The nearest distance the full extension reaches, at the declared
@@ -2126,6 +2141,12 @@ int main(void)
 			if (!g_aborted) {
 				mf_service();
 			}
+		}
+
+		/* LAST, and only when nothing above has work: a new lens entry
+		 * takes a restart, and that waits for everything else. */
+		if (em_restart_due) {
+			lens_restart();
 		}
 	}
 }

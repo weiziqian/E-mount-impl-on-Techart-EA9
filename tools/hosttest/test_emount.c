@@ -981,8 +981,9 @@ int main(void)
 		}
 		aperture_cmd(0x7B, 4800);          /* restore: 0x1B has been seen */
 
-		/* The aperture, fixed in the templates: message 0x05's pair,
-		 * and message 0x28's copy only when the body's 0x08 asked. */
+		/* The aperture 0x1B asked for, now current: message 0x05's
+		 * pair, and message 0x28's copy only when the body's 0x08
+		 * asked. */
 		{
 			uint16_t a = em_msg_05[6]
 			             | ((uint16_t)em_msg_05[7] << 8);
@@ -990,11 +991,11 @@ int main(void)
 			             | ((uint16_t)em_msg_05[9] << 8);
 			uint16_t got = em_msg_28[0x0F]
 			               | ((uint16_t)em_msg_28[0x10] << 8);
-			uint16_t want = em_m08_aperture_on ? AP_NOW : 0;
+			uint16_t want = em_m08_aperture_on ? 4800 : 0;
 
-			if (a != AP_NOW || b != AP_NOW) {
-				fail("message 0x05 aperture %u/%u, expected %u",
-				     a, b, AP_NOW);
+			if (a != 4800 || b != 4800) {
+				fail("message 0x05 aperture %u/%u, expected 4800",
+				     a, b);
 			}
 			if (got != want) {
 				fail("0x28 pl[9..10] is %u with the capability "
@@ -1023,39 +1024,29 @@ int main(void)
 			}
 		}
 
-		/* THE REPLY CARRIES OUR OWN APERTURE, NOT THE REQUESTER'S.
-		 *
-		 * The stock echoes; this device has no iris, so echoing an
-		 * aperture it cannot produce would contradict message 0x05
-		 * pl[0..1] in the same frame pair.  Ask for something we do not
-		 * have and the answer must still be what we do have. */
-		idx = aperture_cmd(0x73, 4864);          /* f/2.83, not ours */
+		/* THE REPLY REPORTS THE REQUESTED APERTURE AS REACHED, and
+		 * message 0x05 agrees with it. */
+		idx = aperture_cmd(0x73, 4864);          /* f/2.83 */
 		if (idx >= 0) {
 			const uint8_t *g = sent[idx];
 			uint16_t a = g[6] | ((uint16_t)g[7] << 8);
 			uint16_t b = g[8] | ((uint16_t)g[9] << 8);
 
-			if (a != AP_NOW || b != AP_NOW) {
-				fail("0x1B reply carried %u/%u -- it must report "
-				     "our own %u, not the request's 4864",
-				     a, b, AP_NOW);
+			if (a != 4864 || b != 4864) {
+				fail("0x1B reply carried %u/%u, expected the "
+				     "request's 4864", a, b);
 			}
 			check_frame(idx, EM_ID_APERTURE, "aperture reply");
 		}
-		/* And it must AGREE with message 0x05, which is the whole point
-		 * of not echoing. */
 		{
 			uint16_t m5 = em_msg_05[6]
 			              | ((uint16_t)em_msg_05[7] << 8);
 
-			if (m5 != AP_NOW) {
-				fail("message 0x05 says %u while 0x1B says %u",
-				     m5, AP_NOW);
+			if (m5 != 4864) {
+				fail("message 0x05 says %u while 0x1B says 4864",
+				     m5);
 			}
 		}
-		/* The request is RECORDED even though it is not obeyed: a body
-		 * that asks for an aperture we do not have is the one thing
-		 * worth knowing about this channel. */
 		if (em_aperture_req != 4864) {
 			fail("the commanded aperture was not recorded (%u)",
 			     em_aperture_req);
@@ -2206,18 +2197,18 @@ int main(void)
 			uint16_t got = em_msg_28[0x0F]
 			               | ((uint16_t)em_msg_28[0x10] << 8);
 
-			if (got != AP_NOW) {
+			if (got != em_aperture_now) {
 				fail("0x28 pl[9..10] is %u, expected the current "
-				     "aperture %u", got, AP_NOW);
+				     "aperture %u", got, em_aperture_now);
 			}
 		}
 		{
 			uint16_t got = em_msg_35[0x0F]
 			               | ((uint16_t)em_msg_35[0x10] << 8);
 
-			if (got != AP_NOW) {
+			if (got != em_aperture_now) {
 				fail("0x35 pl[9..10] is %u, expected the current "
-				     "aperture %u", got, AP_NOW);
+				     "aperture %u", got, em_aperture_now);
 			}
 		}
 		/* THE FIRST REQUEST IS THE ONE CAPTURED.  The body sends 0x08

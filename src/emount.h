@@ -351,16 +351,15 @@ extern volatile uint16_t em_stop_n;  /* how many Stop records have arrived */
  * II tagged 52 mm, so the body reads its focal length from a field we write and
  * both messages now agree.  Back to 50.0 mm.
  *
- * Only initialises em_focal_mm10 below; nothing else may use it.  The
- * messages get the focal length from that word at start-up (em_init), and
- * the distance conversions read it too. */
+ * The default only: lens_cfg.c's entry 0 is built from it, and
+ * em_focal_mm10 starts at it.  On the device em_focal_mm10 is then set from
+ * the lens configuration entry in use (lens_cfg_apply), before em_init copies
+ * it into the messages; the distance conversions read it too. */
 #define EM_FOCAL_MM10 500u
 
-/* The same value as a variable, for the code that computes with it.  Defined
- * in emount_packets.c, so no other file can fold it into an instruction: the
- * word in flash is the only copy, and the updater can patch it
- * (tools/win_updater). */
-extern const uint16_t em_focal_mm10;
+/* The focal length in use, for the messages and the code that computes with
+ * it.  Defined in emount_packets.c. */
+extern uint16_t em_focal_mm10;
 
 /* THE DEFOCUS SCALE: how many protocol position units one defocus unit is
  * worth.  Reported in message 0x06 payload[13..14], and used by everything
@@ -419,13 +418,29 @@ uint16_t em_defocus_scale(void);
  * four and checks every other byte against a stock literal. */
 #define EM_APERTURE_MAX  0x11C0u        /* f/1.8 -- 0x05 pl[44], pl[51]; 0x08 pl[0..1] */
 #define EM_APERTURE_MIN  0x11C0u        /* f/1.8 -- 0x05 pl[52]; 0x08 pl[2..3]          */
-#define EM_APERTURE_NOW  0x11C0u        /* f/1.8 -- 0x05 pl[0..3], 0x1B, 0x28 pl[9..10] */
+
+/* The minimum aperture in use: EM_APERTURE_MIN unless the lens configuration
+ * enables several focal lengths (lens_cfg.c).  em_init writes it into the
+ * messages, as em_focal_mm10. */
+extern uint16_t em_aperture_min;
+
+/* An aperture value (256 x AV + 4096) as message 0x05's descriptor byte: 1/8
+ * stop, 0x08 = f/1.0, rounded to nearest. */
+#define EM_AV_DESC(av) ((uint8_t)(((av) - 4096u + 16u) / 32u + 8u))
+#define EM_APERTURE_NOW  0x11C0u        /* f/1.8 -- the templates' 0x05 pl[0..3], 0x1B */
 
 /* The aperture the body last commanded on message 0x1B, and how many of those
  * frames have arrived (em_focus_n).  Recorded rather than obeyed: this device
  * has one aperture and cannot move it, so the only thing worth knowing is
  * whether a body ever asks for a different one. */
 extern volatile uint16_t em_aperture_req;
+
+/* The aperture reported as current: EM_APERTURE_MAX, then whatever 0x1B last
+ * asked for, until the first 0x0A after it ends the capture.  em_restart_due:
+ * that 0x0A found a new lens entry chosen; the main loop restarts the lens
+ * (main.c, lens_restart). */
+extern uint16_t em_aperture_now;
+extern volatile uint8_t em_restart_due;
 
 /* ------------------------------------------------------------------------
  * MESSAGE 0x08's REQUEST -- captured whole, and the capability bit in it.

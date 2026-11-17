@@ -8,6 +8,8 @@ static uint32_t cfg_addr(uint32_t type)
 	switch (type) {
 	case CFG_TYPE_HOME:
 		return NVM_CFG_BASE + 0u * NVM_ROW_SIZE;
+	case CFG_TYPE_LENS:
+		return NVM_CFG_BASE + 1u * NVM_ROW_SIZE;
 	default:
 		return 0;
 	}

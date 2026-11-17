@@ -319,3 +319,7 @@ void host_cs_edge(int level)
 	host_cs_pin = level;
 	if (cs_cb) cs_cb(level);
 }
+
+/* lens_cfg.c is not linked: no lens entry is ever chosen. */
+volatile uint8_t lens_changed;
+void lens_cfg_request(uint16_t av) { (void)av; }

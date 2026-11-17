@@ -18,8 +18,9 @@
  * Only what changes at run time (positions, status, events, 0x28 pl[9..10],
  * the 0x34 echo) is written by emount.c -- and the focal length, which
  * em_init writes from em_focal_mm10 into 0x05 pl[24..27], 0x08 pl[16..17]
- * (whole mm, BCD), 0x28 pl[4..7] and 0x35 pl[4..7], so that the one word in
- * flash is the only copy (tools/win_updater).  Message 0x0A has no template: the
+ * (whole mm, BCD), 0x28 pl[4..7] and 0x35 pl[4..7], and the minimum aperture,
+ * from em_aperture_min into 0x05 pl[52] and 0x08 pl[2..3].  Both words and
+ * the 0x3F name are set from the lens configuration before that (lens_cfg.c).  Message 0x0A has no template: the
  * reply is the body's request, echoed (em_send_id).
  *
  * Messages 0x32, 0x4C and 0x5A from the stock table are gone: none is in the
@@ -52,9 +53,6 @@
 #define EM_LO(v) ((uint8_t)((v) & 0xFFu))
 #define EM_HI(v) ((uint8_t)(((v) >> 8) & 0xFFu))
 
-/* An aperture value (256 x AV + 4096) as message 0x05's descriptor byte: 1/8
- * stop, 0x08 = f/1.0, rounded to nearest. */
-#define EM_AV_DESC(av) ((uint8_t)(((av) - 4096u + 16u) / 32u + 8u))
 
 /* An aperture value as message 0x08's nameplate f-number: F x 10 in BCD,
  * rounded to the nearest third of a stop on the marked series f/1.0 .. f/9
@@ -310,7 +308,8 @@ uint8_t em_msg_3F[EA9_LEN_3F] = {
 	/* +0x48 */ 0x04, 0x55,
 };
 
-const uint16_t em_focal_mm10 = EM_FOCAL_MM10;
+uint16_t em_focal_mm10 = EM_FOCAL_MM10;
+uint16_t em_aperture_min = EM_APERTURE_MIN;
 
 const struct ea9_packet ea9_packets[EA9_PACKET_COUNT] = {
 	{ 0x01, em_msg_01, EA9_LEN_01 },
