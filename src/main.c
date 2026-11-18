@@ -593,6 +593,8 @@ static uint16_t motor_reset(void)
 	int32_t  at_drive_end;
 	uint32_t t0, t_start, t_sample, drive_ms, settle_ms;
 	uint8_t  reason = RST_END_TIMEOUT, back = 0, flat = 0, boosted = 0;
+	uint8_t  hw1 = (lens_cfg_hw_version() == 1);
+	int32_t  lowest;
 	unsigned i = 0;
 
 	g_home_trace_n = 0;
@@ -622,6 +624,7 @@ static uint16_t motor_reset(void)
 	}
 	raw_start = abs_encoder_raw();
 	start     = prev = abs_encoder_track();
+	lowest    = start;
 	vdd_track_reset();
 
 	if (!STOCK.dry && !g_rst_cut) {
@@ -636,7 +639,14 @@ static uint16_t motor_reset(void)
 		if ((uint32_t)(now - t_start) >= RST_TIMEOUT_MS) {
 			break;
 		}
-		pump(abs_encoder_track());
+		{
+			int32_t pos = abs_encoder_track();
+
+			pump(pos);
+			if (pos < lowest) {
+				lowest = pos;
+			}
+		}
 		if (i < SERVO_TRACE_N
 		    && (uint32_t)(now - t_start) >= i * HOME_TRACE_MS) {
 			g_home_trace[i++] = abs_encoder_raw();
@@ -686,6 +696,9 @@ static uint16_t motor_reset(void)
 
 	drive_ms     = millis() - t_start;
 	at_drive_end = abs_encoder_track();
+	if (at_drive_end < lowest) {
+		lowest = at_drive_end;
+	}
 	/* Settle, floating.  A shutdown cut has already braked (shutdown_park)
 	 * and is left so. */
 	if (!g_rst_cut && !STOCK.dry) {
@@ -694,21 +707,38 @@ static uint16_t motor_reset(void)
 	}
 	vdd_track_result(&load_lo, &load_hi);
 
-	t0 = millis();
-	home_still_init(&still);
-	while (!g_rst_cut && (uint32_t)(millis() - t0) < RST_SETTLE_MS) {
-		pump(abs_encoder_track());
-		if (home_still_for(&still, RST_SETTLE_STILL_MS, RST_SETTLE_COUNTS)) {
-			break;
+	/* HARDWARE VERSION 1: no settle.  Version 1 has no margin at infinity
+	 * focus, so the stop must be the MINIMUM position: the lowest reading
+	 * of the drive above, not where the mechanism comes to rest.  If the
+	 * drive ended on readings that had started to rise, that is the one
+	 * before they rose. */
+	if (hw1) {
+		settle_ms = 0;
+		raw_end   = (uint16_t)((raw_start + (lowest - start))
+		                       & (ENC_COUNTS - 1));
+		if (!g_rst_cut) {
+			/* The lowest reading is now track position 0. */
+			abs_encoder_track_set(abs_encoder_track() - lowest);
+			g_homed = 1;
 		}
-	}
-	settle_ms = millis() - t0;
-	raw_end  = abs_encoder_raw();
+	} else {
+		t0 = millis();
+		home_still_init(&still);
+		while (!g_rst_cut && (uint32_t)(millis() - t0) < RST_SETTLE_MS) {
+			pump(abs_encoder_track());
+			if (home_still_for(&still, RST_SETTLE_STILL_MS,
+			                   RST_SETTLE_COUNTS)) {
+				break;
+			}
+		}
+		settle_ms = millis() - t0;
+		raw_end  = abs_encoder_raw();
 
-	if (!g_rst_cut) {
-		/* The stop is now track position 0. */
-		abs_encoder_track_set(0);
-		g_homed = 1;
+		if (!g_rst_cut) {
+			/* The stop is now track position 0. */
+			abs_encoder_track_set(0);
+			g_homed = 1;
+		}
 	}
 
 	if (g_reset_n++ == 0) {
@@ -812,6 +842,21 @@ static void powerdown_signal(void)
 	PORT->Group[0].DIRSET.reg = (1u << EM_PIN_TX);
 	PORT->Group[0].PINCFG[EM_PIN_TX].reg &= ~(uint8_t)PORT_PINCFG_PMUXEN;
 	diag_tally_mark(DIAG_MARK_TXLOW, 0);
+
+	/* HARDWARE VERSION 1: the shutdown from before standby (faeaf91) --
+	 * PA23 (XDETECT) high, so the body sees the lens removed and cuts the
+	 * power, and no standby wait.  No halt either, as then: the body cuts
+	 * power.
+	 *
+	 * Why: version 1 has no margin at infinity focus, so every wake from
+	 * standby should run the boot reset again, to be sure of taking the
+	 * minimum position each time (motor_reset).  The cost: the camera
+	 * cannot wake quickly from standby -- every wake is a cold start. */
+	if (lens_cfg_hw_version() == 1) {
+		PORT->Group[0].OUTSET.reg = 1u << EM_PIN_XDETECT;
+		diag_tally_mark(DIAG_MARK_PA23, 0);
+		return;
+	}
 
 	/* Returns only if the body wakes us from standby. */
 	em_sleep_until_wake();

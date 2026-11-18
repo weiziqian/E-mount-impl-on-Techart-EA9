@@ -152,7 +152,7 @@ uint32_t diag_boot_tally(uint32_t rcause);
 #define DIAG_MARK_BUSUP     0xB2u   /* em_init returned                 */
 #define DIAG_MARK_HANDSHAKE 0xB3u   /* message 0x0a answered            */
 #define DIAG_MARK_SHUTREQ   0xB4u   /* message 0x16 acknowledged; payload its pl[0] */
-#define DIAG_MARK_PA23      0xB5u   /* shutdown: PA23 driven high (no longer written) */
+#define DIAG_MARK_PA23      0xB5u   /* shutdown: PA23 driven high (hardware version 1) */
 #define DIAG_MARK_TXLOW     0xB7u   /* shutdown: TX driven low (RXD at the body) */
 /* The standby wait (emount.c, em_sleep_until_wake).  SLEEP is written when
  * the wait starts, payload 1 if the body's TXD went low first (it finished

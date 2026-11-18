@@ -17,7 +17,7 @@ namespace EA9Updater
     {
         // The version START declares to the bootloader (what ea9flash.py
         // --check reports afterwards).  Keep it in step with message 0x07.
-        public static readonly byte[] DeclaredVersion = { 2, 2, 0 };
+        public static readonly byte[] DeclaredVersion = { 2, 3, 0 };
 
         readonly byte[] image;
         readonly int cfgOffset;
