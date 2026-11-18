@@ -49,6 +49,19 @@ const volatile struct lens_cfg lens_cfg = {
 	},
 };
 
+/* The lowest set entry; 0 if none is (the updater never writes that). */
+static uint8_t first_set(void)
+{
+	uint8_t i;
+
+	for (i = 0; i < LENS_CFG_N; i++) {
+		if (lens_cfg.lens[i].focal_mm != 0) {
+			return i;
+		}
+	}
+	return 0;
+}
+
 uint8_t lens_cfg_hw_version(void)
 {
 	return lens_cfg.hw_version;
@@ -69,8 +82,8 @@ void lens_cfg_boot(void)
 	if (top != 0) {
 		if (!cfg_read(CFG_TYPE_LENS, &idx) || idx >= LENS_CFG_N
 		    || lens_cfg.lens[idx].focal_mm == 0) {
-			idx = 0;
-			lens_cfg_select(0);
+			idx = first_set();
+			lens_cfg_select((uint8_t)idx);
 		}
 	}
 	g_top      = top;

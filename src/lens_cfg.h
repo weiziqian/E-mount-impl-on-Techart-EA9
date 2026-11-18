@@ -11,8 +11,9 @@
  *           +0  focal_mm   u16, whole mm; 0 = entry not set
  *           +2  name[64]   ASCII, NUL-padded; at most 63 characters
  *
- * Entry 0 must always be set -- the updater enforces it; the firmware falls
- * back to it whenever another entry is not usable.
+ * At least one entry must be set -- the updater enforces it.  Entry 0 may be
+ * unset when several are (f/2.5 then selects nothing); the firmware falls
+ * back to the first set entry whenever the saved one is not usable.
  *
  * THE ENTRY IN USE is kept in flash as a cfg record (CFG_TYPE_LENS), whose
  * type tag and doubled value make a never-written or torn row read as "not
@@ -23,7 +24,7 @@
  *   the highest set entry 1..7 -> several focal lengths; the minimum
  *     aperture is that entry's selecting aperture, f/2.8 ... f/5.6
  *     (lens_cfg.c); then the saved entry -- none, > 7, or not set ->
- *     entry 0, and 0 is saved
+ *     the first set entry, searching up from 0, and that is saved
  *   entries 1..7 all unset -> one lens: entry 0, minimum aperture f/1.8,
  *     the same as the maximum
  */

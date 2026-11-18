@@ -22,7 +22,7 @@
 /* Raw 14-bit encoder reading at the infinity end stop. */
 #define CFG_TYPE_HOME   CFG_FOURCC('H', 'O', 'M', 'E')
 
-/* The lens configuration entry in use, 0..3 (lens_cfg.h). */
+/* The lens configuration entry in use, 0..7 (lens_cfg.h). */
 #define CFG_TYPE_LENS   CFG_FOURCC('L', 'E', 'N', 'S')
 
 /* 1 and *value set if a valid record exists, else 0. */
