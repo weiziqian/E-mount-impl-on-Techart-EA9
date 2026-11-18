@@ -1,97 +1,38 @@
-// Firmware.cs -- the embedded release image, its patch table, and the patch.
+// Firmware.cs -- the embedded release image and the lens configuration block
+// in it.
 //
-// locate.py builds the release image three times and records every place the
-// focal length and the lens name land in it (patchmap.json, spec.md section
-// 5).  The encodings below must stay identical to encode() in locate.py.
+// The firmware keeps its whole configuration in one struct that starts with
+// the "CfgAnchor" magic (src/lens_cfg.h).  The updater finds it by that magic
+// and overwrites it in place; nothing else in the image is touched.  spec.md
+// section 5.
 
 using System;
 using System.IO;
-using System.Linq;
 using System.Reflection;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Json;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace EA9Updater
 {
-    // Filled in by the JSON serializer, which the compiler cannot see.
-#pragma warning disable 0649
-    [DataContract]
-    sealed class PatchField
-    {
-        [DataMember(Name = "offset")] public int Offset;
-        [DataMember(Name = "kind")] public string Kind;
-        [DataMember(Name = "len")] public int Len;
-    }
-
-    [DataContract]
-    sealed class PatchDefaults
-    {
-        [DataMember(Name = "focal_mm")] public int FocalMm;
-        [DataMember(Name = "name")] public string Name;
-    }
-
-    [DataContract]
-    sealed class PatchMap
-    {
-        [DataMember(Name = "image_len")] public int ImageLen;
-        [DataMember(Name = "image_sha256")] public string ImageSha256;
-        [DataMember(Name = "default")] public PatchDefaults Default;
-        [DataMember(Name = "fields")] public PatchField[] Fields;
-    }
-#pragma warning restore 0649
-
     sealed class Firmware
     {
-        public const int FocalMinMm = 8;
-        public const int FocalMaxMm = 600;
-
         // The version START declares to the bootloader (what ea9flash.py
         // --check reports afterwards).  Keep it in step with message 0x07.
         public static readonly byte[] DeclaredVersion = { 2, 2, 0 };
 
         readonly byte[] image;
-        readonly PatchMap map;
+        readonly int cfgOffset;
 
-        public int NameMax { get; private set; }
-        public int DefaultFocalMm { get { return map.Default.FocalMm; } }
-        public string DefaultName { get { return map.Default.Name; } }
-
-        // Checks that the table belongs to this image and that every field
-        // still holds the default it was found with.  Throws if not.
-        public Firmware(byte[] image, string patchMapJson)
+        // Finds the configuration block and checks it looks like one.  Throws
+        // if not.
+        public Firmware(byte[] image)
         {
             this.image = image;
-            using (var s = new MemoryStream(Encoding.UTF8.GetBytes(patchMapJson))) {
-                map = (PatchMap)new DataContractJsonSerializer(typeof(PatchMap)).ReadObject(s);
-            }
-            if (map.Fields == null || map.Default == null) {
-                throw new InvalidDataException("patchmap.json is incomplete");
-            }
-            if (image.Length != map.ImageLen || Sha256(image) != map.ImageSha256.ToLowerInvariant()) {
-                throw new InvalidDataException(
-                    "the embedded firmware does not match patchmap.json -- they come from different builds");
-            }
-            NameMax = map.Fields.Where(f => f.Kind == "name").Select(f => f.Len).DefaultIfEmpty(0).Min();
-            if (NameMax == 0 || !map.Fields.Any(f => f.Kind == "u16le_mm10")) {
-                throw new InvalidDataException("patchmap.json lacks the focal or name fields");
-            }
-            foreach (var f in map.Fields) {
-                byte[] want = Encode(f, map.Default.FocalMm, map.Default.Name);
-                for (int i = 0; i < want.Length; i++) {
-                    if (image[f.Offset + i] != want[i]) {
-                        throw new InvalidDataException(string.Format(
-                            "the firmware does not hold the default at 0x{0:x}", f.Offset));
-                    }
-                }
-            }
+            cfgOffset = FindConfig(image);
         }
 
         public static Firmware LoadEmbedded()
         {
-            return new Firmware(Resource("firmware.bin"),
-                                Encoding.UTF8.GetString(Resource("patchmap.json")));
+            return new Firmware(Resource("firmware.bin"));
         }
 
         public static string LoadChangelog()
@@ -99,70 +40,56 @@ namespace EA9Updater
             return Encoding.UTF8.GetString(Resource("changelog.txt"));
         }
 
-        // Null if the name is acceptable, else why not.
-        public string CheckName(string name)
+        // A copy of the image with `cfg` written over the block.
+        public byte[] Patch(LensConfig cfg)
         {
-            if (name.Length == 0) {
-                return "Enter a lens name.";
-            }
-            if (name.Length > NameMax) {
-                return string.Format("The lens name can be at most {0} characters.", NameMax);
-            }
-            if (name.Any(c => c < 0x20 || c > 0x7E)) {
-                return "The lens name can only use English letters, digits, spaces and common symbols.";
-            }
-            return null;
-        }
-
-        // A copy of the image with the user's values written in.
-        public byte[] Patch(int focalMm, string name)
-        {
-            if (focalMm < FocalMinMm || focalMm > FocalMaxMm) {
-                throw new ArgumentOutOfRangeException("focalMm");
-            }
-            string why = CheckName(name);
-            if (why != null) {
-                throw new ArgumentException(why);
-            }
+            byte[] block = cfg.Encode();
             var outImage = (byte[])image.Clone();
-            foreach (var f in map.Fields) {
-                Encode(f, focalMm, name).CopyTo(outImage, f.Offset);
-            }
+            block.CopyTo(outImage, cfgOffset);
             return outImage;
         }
 
-        static byte[] Encode(PatchField f, int focalMm, string name)
+        // The offset of the one block whose magic, version and padding are
+        // right.  The magic must occur exactly once.
+        static int FindConfig(byte[] image)
         {
-            switch (f.Kind) {
-            case "u16le_mm10": {
-                int v = focalMm * 10;
-                return new[] { (byte)(v & 0xFF), (byte)(v >> 8) };
+            byte[] m = LensConfig.Magic;
+            int found = -1;
+            for (int i = 0; i + m.Length <= image.Length; i++) {
+                int k = 0;
+                while (k < m.Length && image[i + k] == m[k]) {
+                    k++;
+                }
+                if (k < m.Length) {
+                    continue;
+                }
+                if (found >= 0) {
+                    throw new InvalidDataException("the firmware holds the configuration magic more than once");
+                }
+                found = i;
             }
-            case "bcd_mm":
-                return new[] { Bcd(focalMm / 100), Bcd(focalMm) };
-            case "name": {
-                var b = new byte[f.Len];              // NUL-padded
-                Encoding.ASCII.GetBytes(name).CopyTo(b, 0);
-                return b;
+            if (found < 0) {
+                throw new InvalidDataException("the firmware has no lens configuration block");
             }
-            default:
-                throw new InvalidDataException("unknown patch field kind: " + f.Kind);
+            if (found + LensConfig.Size > image.Length) {
+                throw new InvalidDataException("the lens configuration block runs past the end of the firmware");
             }
+            byte hw = image[found + 10];
+            if (Array.IndexOf(LensConfig.HwVersions, (int)hw) < 0 || image[found + 11] != 0) {
+                throw new InvalidDataException(string.Format(
+                    "the lens configuration block at 0x{0:x} has an unexpected header", found));
+            }
+            for (int i = 0; i < LensConfig.SlotCount; i++) {
+                int name = found + LensConfig.HeaderSize + i * LensConfig.SlotSize + 2;
+                if (image[name + LensConfig.NameField - 1] != 0) {
+                    throw new InvalidDataException(string.Format(
+                        "the lens configuration block at 0x{0:x} has an unterminated name", found));
+                }
+            }
+            return found;
         }
 
-        static byte Bcd(int n)
-        {
-            return (byte)(((n / 10 % 10) << 4) | (n % 10));
-        }
-
-        static string Sha256(byte[] b)
-        {
-            using (var h = SHA256.Create()) {
-                return string.Concat(h.ComputeHash(b).Select(x => x.ToString("x2")));
-            }
-        }
-
-        static byte[] Resource(string name)
+        public static byte[] Resource(string name)
         {
             using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name)) {
                 if (s == null) {

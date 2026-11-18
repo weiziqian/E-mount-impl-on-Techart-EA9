@@ -5,14 +5,17 @@
 #
 # <ver> is Firmware.DeclaredVersion in src/Firmware.cs.
 #
-# locate.py builds the RELEASE image (make release) and finds the focal and
-# name fields; the image and the table it writes are what the exe embeds.
+# The image embedded is the RELEASE build (make release); cfgblock.py checks
+# that it holds exactly one lens configuration block before it is copied in.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 dotnet=${DOTNET:-$(command -v dotnet || echo "$HOME/.dotnet/dotnet")}
 
 mkdir -p "$here/firmware"
-python3 -I "$here/locate.py" -o "$here/firmware/patchmap.json" --bin "$here/firmware/ea9.bin"
+repo=$(cd "$here/../.." && pwd)
+make -C "$repo" release
+rm -f "$here/firmware/patchmap.json"
+python3 -I "$here/cfgblock.py" "$repo/build/ea9-rebuild-release.bin" --out "$here/firmware/ea9.bin"
 "$dotnet" build "$here/EA9Updater.csproj" -c Release -nologo -v quiet -o "$here/out"
 # The shipped name.  Windows file names cannot hold ':', so it is dropped here
 # (the window title has it).

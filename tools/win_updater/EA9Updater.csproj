@@ -27,22 +27,20 @@
   <ItemGroup>
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
-    <Reference Include="System.Runtime.Serialization" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
   </ItemGroup>
 
-  <!-- The firmware, its patch table and the change log go INTO the exe.
-       firmware/ is written by build.sh (locate.py); both files must come
-       from the same run, which Firmware.cs checks by SHA-256. -->
+  <!-- The firmware and the change log go INTO the exe.  firmware/ is
+       written by build.sh: the release image, checked by cfgblock.py. -->
   <ItemGroup>
     <EmbeddedResource Include="firmware\ea9.bin" LogicalName="firmware.bin" />
-    <EmbeddedResource Include="firmware\patchmap.json" LogicalName="patchmap.json" />
     <EmbeddedResource Include="changelog.txt" LogicalName="changelog.txt" />
+    <EmbeddedResource Include="assets\hw_version.jpg" LogicalName="hw_version.jpg" />
   </ItemGroup>
 
   <Target Name="CheckFirmware" BeforeTargets="BeforeBuild">
-    <Error Condition="!Exists('firmware\ea9.bin') Or !Exists('firmware\patchmap.json')"
-           Text="firmware/ea9.bin or firmware/patchmap.json is missing -- run build.sh, which builds the release image and locates the patch fields first." />
+    <Error Condition="!Exists('firmware\ea9.bin')"
+           Text="firmware/ea9.bin is missing -- run build.sh, which builds the release image and checks it first." />
   </Target>
 
 </Project>

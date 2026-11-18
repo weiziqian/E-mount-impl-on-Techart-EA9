@@ -29,7 +29,7 @@ A small Windows GUI program: the user plugs in USB, clicks one button, and the f
 - The `.bin` firmware is built from source by `build.sh` (release configuration) and compiled into the exe as an embedded resource (EmbeddedResource). The generated `firmware/` directory is not committed.
 - The user does not need to, and cannot, choose an external .bin file.
 - The version declared in START is also stored in the project, next to the firmware. The user does not enter it.
-- The embedded image is the release build, together with its `patchmap.json` (section 5).
+- The embedded image is the release build (section 5.4).
 
 ## 4. UI
 
@@ -37,10 +37,26 @@ Top to bottom:
 
 1. **Release notes**: multi-line, read-only text box showing the change log.
    - The change log is a separate file in the repo, e.g. `changelog.txt`, also embedded in the exe at build time.
-2. **Focal length**: integer input, in mm, default `50`, range 8–600 (section 5.4).
-3. **Lens name**: input box, default `TECHART LM-EA9`, at most 63 ASCII characters. Display only.
+2. **Adapter version** (the hardware version): drop-down, choices `2` and `1`, default `2`. A "How to choose?" link next to it opens a help page (`src/HelpPage.cs`):
+   - a picture telling the two apart (`assets/hw_version.jpg`, embedded): version 1 has a single continuous metal spring strip, version 2 a separate triangular block;
+   - **What is the difference**: version 1 has less room past infinity, so to focus at infinity it must retract to its end stop; version 2 need not, which is easier on the mechanism;
+   - **How to choose**: version 2, unless the adapter is version 1 hardware and cannot focus at infinity.
+3. **Focal length**: radio buttons, **Multiple Lenses** (default) or **Single Lens**, and a "How to choose?" link that opens a help page (`src/HelpPage.cs`):
+   - **Single Lens**: for one lens; the aperture is fixed while shooting, so it cannot be changed by mistake;
+   - **Multiple Lenses**: enter each lens in the row of the aperture chosen for it; to change lenses, set that aperture and press the shutter, and the adapter restarts with that lens; then set the aperture back to its widest. Only the inputs of the chosen mode are shown:
+   - **Single**: a focal length box (default `50`) and a lens name box (default `Community EA9 Adapter`).
+   - **Multiple**: a table with one row per slot:
+
+     | Column | Content |
+     |---|---|
+     | Slot | `1` … `8`, read-only (slot 1 is entry index 0) |
+     | Aperture | `f2.5`, `f2.8`, `f3.2`, `f3.5`, `f4.0`, `f4.5`, `f5.0`, `f5.6`, read-only: the aperture that selects the slot on the camera |
+     | Focal Length (mm) | input, empty by default, digits only |
+     | Lens Name | input, empty by default; disabled (grey) while the slot's focal length is empty or 0 |
+
+   Input rules are in section 5.3.
 4. **Adapter**: connection state and bootloader version (see "Adapter detection" below).
-5. **Write button**: starts writing the firmware.
+5. **Write button**: checks the configuration (section 5.3), shows it in a confirmation dialog, then writes the firmware.
    - Enabled only while an adapter that answered CHECK is connected.
    - A progress bar shows write progress.
 6. **When writing finishes**: a dialog tells the user to **unplug the USB**.
@@ -62,59 +78,50 @@ If writing fails, the next poll checks the adapter again.
 
 The bootloader version is the triplet the bootloader recorded at the last START, i.e. what the last updater declared. It is **not** the firmware version the camera shows (message 0x07). This updater declares `Firmware.DeclaredVersion` (2.2.0) in START. There is no UI to change it.
 
-## 5. Patching focal length and lens name
+## 5. The lens configuration
 
-### 5.1 Firmware side (the only source change)
+### 5.1 Firmware side
 
-- The focal length lives in one word, `extern const uint16_t em_focal_mm10`, defined in `src/emount_packets.c` from the `EM_FOCAL_MM10` macro. Nothing else uses the macro. The packet templates hold zeros where the focal length goes, and `em_init` (`put_focal` in `src/emount.c`) writes it from that word into 0x05 pl[24..27], 0x08 pl[16..17] (BCD), 0x28 pl[4..7] and 0x35 pl[4..7]. The code that computes with it (`src/main.c`) reads the same word. Because the value is in another file, the compiler cannot fold it into instructions; the word in flash is the only copy. This only holds without LTO, and `locate.py` fails if it stops holding.
-- The lens name stays in the `em_msg_3F` template. It is initialised data, so it is plain bytes in the image.
+The firmware keeps its whole configuration in one struct, `struct lens_cfg` in `src/lens_cfg.h` (`src/lens_cfg.c` holds the default). It starts with a magic, so the updater finds it by searching the image and overwrites it in place. Nothing else in the image is patched, and no addresses are looked up at build time.
 
-### 5.2 Release step: `locate.py`
+Layout (540 bytes, little-endian):
 
-`tools/win_updater/locate.py -o patchmap.json` builds the release image three times:
-
-| Build | Source | Focal | Name |
-|---|---|---|---|
-| A | the repo as it is: **this is the image that ships** | 50 | `TECHART LM-EA9` |
-| B | temporary copy | 137 | `Z` × 63 |
-| C | temporary copy | 85 | `Summicron-M 35mm f/2 ASPH` |
-
-B and C are built in a scratch copy of `src/` and the `Makefile`; the repo is never edited.
-
-1. A and B must have the same length. Every byte that differs must be one of: focal u16 LE (mm × 10), focal BCD (whole mm), or the 63-byte name field. Anything else stops the script.
-2. The number of locations must match the current source: 1 × u16, 0 × BCD, 1 × name. A different count means the source changed and must be looked at.
-3. A is patched to B's and C's values with the table, and each result must equal the real build **byte for byte**.
-4. It writes `patchmap.json`: image length, image SHA-256, defaults, and the list of `{offset, kind, len}`.
-
-Currently found (file offsets in `build/ea9-rebuild-release.bin`):
-
-| Offset | Kind | Where |
+| Offset | Field | Content |
 |---|---|---|
-| 0x04278 | u16le_mm10 | `em_focal_mm10` |
-| 0x04f7b | name (63 B) | 0x3F pl[1..63] |
+| +0 | `magic[10]` | `"CfgAnchor"` + NUL |
+| +10 | `hw_version` | 1 or 2 |
+| +11 | `pad` | 0 |
+| +12 | `lens[8]` | 66 bytes each: `focal_mm` u16 (0 = slot not set), `name[64]` ASCII, NUL-padded, at most 63 characters |
 
-The offsets move with every rebuild; always use the `patchmap.json` produced for the image being embedded.
+At boot the firmware reads the block (`lens_cfg_boot`):
+- If any slot 1..7 is set, it is a multiple-focal-length lens: on the camera, setting the aperture of a slot (f/2.5 … f/5.6) and taking a picture switches to that slot. If the saved slot is missing or not set, the firmware uses the first set slot, searching up from slot 0. So slot 0 may be empty when several slots are set.
+- If only slot 0 is set, it is a single lens at f/1.8.
 
-### 5.3 What the updater does
+### 5.2 What the updater does
 
-1. Check that the embedded image's length and SHA-256 match `patchmap.json`. Otherwise refuse to start.
-2. For each field, write the encoding of the user's values (same as `encode()` in `locate.py`):
-   - `u16le_mm10`: focal mm × 10, 2 bytes little-endian
-   - `bcd_mm`: two BCD bytes, `bcd(mm / 100)`, `bcd(mm % 100)` (50 → `00 50`, 135 → `01 35`)
-   - `name`: ASCII, NUL-padded to 63 bytes
-3. Write the patched image to the device.
+1. At start-up, find the magic in the embedded image. It must occur exactly once, the block must fit in the image, `hw_version` must be 1 or 2, `pad` 0 and every name NUL-terminated. Otherwise the updater says it is damaged and refuses to write.
+2. When **Write** is clicked, build the block from the form (5.3). If that fails, a dialog says why and nothing is written.
+3. Copy the image, write the 540-byte block over the old one, and write that copy to the device.
 
-No checksum needs fixing: the firmware recomputes frame checksums on every send (`transmit()` in `src/emount.c`), and the image has no CRC or signature.
+No checksum needs fixing: the firmware recomputes frame checksums on every send, and the image has no CRC or signature.
 
-### 5.4 Input rules
+### 5.3 Input rules and normalisation
 
-- **Focal length**: integer mm, default 50, minimum 8, maximum 600.
-- **Lens name**: printable ASCII (0x20–0x7E), 1–63 characters, default `TECHART LM-EA9`. It only affects what the camera displays.
+Applied in this order (`LensConfig.FromForm` in `src/LensConfig.cs`):
 
-### 5.5 Release
+1. **Single Lens** is slot 0; slots 1..7 are written as unset.
+2. A slot whose focal length is empty or 0 is written as `focal_mm = 0` with an empty name, whatever its name box holds.
+3. A set focal length must be 8–600 mm.
+4. A slot with a focal length but an empty name gets the name `Community EA9 Adapter`.
+5. A name is printable ASCII (0x20–0x7E), at most 63 characters; leading and trailing spaces are trimmed.
+6. **Multiple Lenses** with exactly one slot set: that slot is moved to slot 0 (the firmware then treats it as a single lens).
+7. **Multiple Lenses** with two or more slots set: they stay where they are; slot 1 (f2.5) may be empty.
+8. No slot set, in either mode: error, "No lens is configured".
 
-- **Releases are built with the release configuration only.** `locate.py` runs `make release` itself and embeds nothing else. Never ship a debug build: it writes a diagnostic trail to flash.
-- Embed exactly the `build/ea9-rebuild-release.bin` and `patchmap.json` from the same `locate.py` run.
+### 5.4 Release
+
+- **Releases are built with the release configuration only.** `build.sh` runs `make release` and embeds that image. Never ship a debug build: it writes a diagnostic trail to flash.
+- `cfgblock.py` checks the image before it is embedded: the magic occurs exactly once and the block parses. It prints the default block, and `pack()` in it is the reference encoding that `LensConfig.Encode()` must match.
 
 ## 6. Building
 
@@ -122,8 +129,8 @@ No checksum needs fixing: the firmware recomputes frame checksums on every send 
 tools/win_updater/build.sh        # -> tools/win_updater/out/Community EA9 Firmware Updater v<ver>.exe
 ```
 
-1. `locate.py` runs `make release`, finds the patch fields, and writes `firmware/ea9.bin` + `firmware/patchmap.json` from the same run.
-2. `dotnet build -c Release` compiles the exe with both files and `changelog.txt` embedded. The build fails if `firmware/` is missing.
+1. `make release` builds the firmware; `cfgblock.py` checks it and copies it to `firmware/ea9.bin`.
+2. `dotnet build -c Release` compiles the exe with `firmware/ea9.bin` and `changelog.txt` embedded. The build fails if the image is missing.
 
 Needs the ARM toolchain and ASF4 (README section 4) and the .NET SDK (8.x; `DOTNET=` overrides the path). The output is one file, `Community EA9 Firmware Updater v<ver>.exe` (`<ver>` = `Firmware.DeclaredVersion`); there is no `.exe.config`.
 
@@ -133,7 +140,10 @@ Source layout:
 |---|---|
 | `src/Hid.cs` | Windows HID via P/Invoke; overlapped I/O with timeouts |
 | `src/Flasher.cs` | the bootloader protocol, mirroring `tools/ea9flash.py` |
-| `src/Firmware.cs` | embedded resources, `patchmap.json` checks, the patch |
+| `src/Firmware.cs` | embedded resources, finding and checking the configuration block, the patch |
+| `src/LensConfig.cs` | the configuration block: form → normalised slots → 540 bytes |
+| `src/HelpPage.cs`, `assets/hw_version.jpg` | the "How to choose?" help pages |
+| `cfgblock.py` | release check of the image; reference encoding |
 | `src/MainForm.cs` | the window, laid out in code |
 | `changelog.txt` | the release notes shown in the window |
 
