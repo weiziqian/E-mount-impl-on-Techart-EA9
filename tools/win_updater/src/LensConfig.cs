@@ -70,7 +70,7 @@ namespace EA9Updater
         {
             error = null;
             if (!HwVersions.Contains(hwVersion)) {
-                error = "Choose a hardware version.";
+                error = S.ChooseHwVersion;
                 return null;
             }
             if (single ? entries.Count != 1 : entries.Count != SlotCount) {
@@ -82,31 +82,29 @@ namespace EA9Updater
                 slots[i] = new LensSlot { FocalMm = 0, Name = "" };
             }
             for (int i = 0; i < entries.Count; i++) {
-                string where = single ? "" : string.Format(" in slot {0}", i + 1);
+                string where = single ? "" : string.Format(S.InSlot, i + 1);
                 string ft = (entries[i].Focal ?? "").Trim();
                 if (ft.Length == 0) {
                     continue;
                 }
                 int mm;
                 if (!int.TryParse(ft, out mm) || mm < 0) {
-                    error = "The focal length" + where + " must be a whole number of millimetres.";
+                    error = string.Format(S.FocalWhole, where);
                     return null;
                 }
                 if (mm == 0) {
                     continue;
                 }
                 if (mm < FocalMinMm || mm > FocalMaxMm) {
-                    error = string.Format("The focal length{0} must be from {1} to {2} mm.",
-                                          where, FocalMinMm, FocalMaxMm);
+                    error = string.Format(S.FocalRange, where, FocalMinMm, FocalMaxMm);
                     return null;
                 }
                 string name = (entries[i].Name ?? "").Trim();
                 if (name.Length == 0) {
                     name = DefaultName;
                 }
-                string why = CheckName(name);
-                if (why != null) {
-                    error = why.Replace("The lens name", "The lens name" + where);
+                error = CheckName(name, where);
+                if (error != null) {
                     return null;
                 }
                 slots[i].FocalMm = mm;
@@ -116,8 +114,8 @@ namespace EA9Updater
             var set = Enumerable.Range(0, SlotCount).Where(i => slots[i].FocalMm != 0).ToList();
             if (set.Count == 0) {
                 error = single
-                    ? "No lens is configured: enter a focal length."
-                    : "No lens is configured: enter the focal length of at least one slot.";
+                    ? S.NoLensSingle
+                    : S.NoLensMultiple;
                 return null;
             }
             // With several set, slot 0 may be empty: the firmware falls back
@@ -129,14 +127,14 @@ namespace EA9Updater
             return new LensConfig(hwVersion, slots);
         }
 
-        // Null if the name is acceptable, else why not.
-        public static string CheckName(string name)
+        // Null if the name is acceptable, else why not.  where: S.InSlot or "".
+        public static string CheckName(string name, string where)
         {
             if (name.Length > NameMax) {
-                return string.Format("The lens name can be at most {0} characters.", NameMax);
+                return string.Format(S.NameTooLong, where, NameMax);
             }
             if (name.Any(c => c < 0x20 || c > 0x7E)) {
-                return "The lens name can only use English letters, digits, spaces and common symbols.";
+                return string.Format(S.NameAscii, where);
             }
             return null;
         }
@@ -160,14 +158,14 @@ namespace EA9Updater
         public string Describe()
         {
             var sb = new StringBuilder();
-            sb.AppendFormat("Adapter version: {0}\n", HwVersion);
+            sb.AppendFormat(S.DescAdapter + "\n", HwVersion);
             var set = Slots.Where(s => s.FocalMm != 0).ToList();
             if (set.Count == 1) {
-                sb.AppendFormat("Single lens: {0} mm, \"{1}\"\n", Slots[0].FocalMm, Slots[0].Name);
+                sb.AppendFormat(S.DescSingle + "\n", Slots[0].FocalMm, Slots[0].Name);
             } else {
                 for (int i = 0; i < SlotCount; i++) {
                     if (Slots[i].FocalMm != 0) {
-                        sb.AppendFormat("Slot {0} ({1}): {2} mm, \"{3}\"\n",
+                        sb.AppendFormat(S.DescSlot + "\n",
                                         i + 1, SlotAperture[i], Slots[i].FocalMm, Slots[i].Name);
                     }
                 }

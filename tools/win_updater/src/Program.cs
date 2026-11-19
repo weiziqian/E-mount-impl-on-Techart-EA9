@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Windows.Forms;
 
 namespace EA9Updater
@@ -10,6 +11,9 @@ namespace EA9Updater
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            // Chinese on a Chinese Windows (simplified or traditional),
+            // English everywhere else.
+            S.Zh = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh";
             Application.Run(new MainForm());
         }
     }

@@ -11,6 +11,20 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 dotnet=${DOTNET:-$(command -v dotnet || echo "$HOME/.dotnet/dotnet")}
 
+# Text with Chinese in it must be UTF-8, or the window shows mojibake.
+# Strings.cs must also carry the BOM, so no editor can take it for GBK.
+python3 -I - "$here/src/Strings.cs" "$here/changelog.txt" "$here/changelog.zh.txt" <<'PY'
+import sys
+for p in sys.argv[1:]:
+    b = open(p, 'rb').read()
+    try:
+        b.decode('utf-8')
+    except UnicodeDecodeError as e:
+        sys.exit('%s is not valid UTF-8: %s' % (p, e))
+    if p.endswith('Strings.cs') and not b.startswith(b'\xef\xbb\xbf'):
+        sys.exit('%s must be saved as UTF-8 with a BOM' % p)
+PY
+
 mkdir -p "$here/firmware"
 repo=$(cd "$here/../.." && pwd)
 make -C "$repo" release

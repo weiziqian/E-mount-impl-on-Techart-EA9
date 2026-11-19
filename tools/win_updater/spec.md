@@ -33,6 +33,8 @@ A small Windows GUI program: the user plugs in USB, clicks one button, and the f
 
 ## 4. UI
 
+**Language.** English and Chinese, from `src/Strings.cs`. At start the window is Chinese if the Windows display language is Chinese (`zh`, simplified or traditional), English otherwise; the choice is not remembered. A drop-down at the top right (English / 中文) switches at once and keeps what the user typed. The change log follows it (`changelog.txt` / `changelog.zh.txt`). Errors from the HID and firmware layers stay in English. Lens names stay ASCII (5.3), so the Chinese hint reads "镜头名称只允许输入英文字母、数字和符号".
+
 Top to bottom:
 
 1. **Release notes**: multi-line, read-only text box showing the change log.
@@ -145,7 +147,8 @@ Source layout:
 | `src/HelpPage.cs`, `assets/hw_version.jpg` | the "How to choose?" help pages |
 | `cfgblock.py` | release check of the image; reference encoding |
 | `src/MainForm.cs` | the window, laid out in code |
-| `changelog.txt` | the release notes shown in the window |
+| `src/Strings.cs` | every text in the window, English and Chinese; UTF-8 with BOM |
+| `changelog.txt`, `changelog.zh.txt` | the release notes shown in the window, English and Chinese |
 
 ## 7. Open questions
 

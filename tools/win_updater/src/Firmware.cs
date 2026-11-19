@@ -35,9 +35,10 @@ namespace EA9Updater
             return new Firmware(Resource("firmware.bin"));
         }
 
+        // The release notes in the current language (S.Zh).
         public static string LoadChangelog()
         {
-            return Encoding.UTF8.GetString(Resource("changelog.txt"));
+            return Encoding.UTF8.GetString(Resource(S.Zh ? "changelog.zh.txt" : "changelog.txt"));
         }
 
         // A copy of the image with `cfg` written over the block.

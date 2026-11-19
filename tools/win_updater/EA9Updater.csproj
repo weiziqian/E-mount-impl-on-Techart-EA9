@@ -35,6 +35,9 @@
   <ItemGroup>
     <EmbeddedResource Include="firmware\ea9.bin" LogicalName="firmware.bin" />
     <EmbeddedResource Include="changelog.txt" LogicalName="changelog.txt" />
+    <!-- WithCulture: without it MSBuild reads ".zh." as a culture and puts
+         the file in a zh\ satellite assembly instead of the exe. -->
+    <EmbeddedResource Include="changelog.zh.txt" LogicalName="changelog.zh.txt" WithCulture="false" />
     <EmbeddedResource Include="assets\hw_version.jpg" LogicalName="hw_version.jpg" />
   </ItemGroup>
 

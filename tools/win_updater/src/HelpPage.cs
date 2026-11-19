@@ -15,28 +15,17 @@ namespace EA9Updater
         // How to tell the two adapter versions apart, and which to choose.
         public static HelpPage AdapterVersion()
         {
-            return new HelpPage("Adapter Version", "hw_version.jpg",
-                "What is the difference",
-                "Version 1 has less room past infinity than version 2. To focus at infinity, " +
-                "version 1 has to retract all the way to its end stop. On version 2 the firmware " +
-                "does not need to, which is easier on the mechanism and gives it a longer life.",
-                "How to choose",
-                "Only if your adapter is version 1 hardware (see the picture) " +
-                "and it cannot focus at infinity, try version 1.");
+            return new HelpPage(S.HelpAdapterTitle, "hw_version.jpg",
+                S.HelpDifference, S.HelpDifferenceText,
+                S.HelpHowToChoose, S.HelpAdapterChoose);
         }
 
         // Single Lens or Multiple Lenses.
         public static HelpPage FocalLength()
         {
-            return new HelpPage("Focal Length", null,
-                "Single Lens",
-                "Choose this if you only use one lens. The aperture is then fixed while you " +
-                "shoot, so it cannot be changed by mistake.",
-                "Multiple Lenses",
-                "Enter each lens's details in the row of the aperture you want to use for it. " +
-                "To change lenses, set the camera to that aperture and press the shutter: the " +
-                "adapter will restart and switch to that lens's details. Remember to set the " +
-                "aperture back to its widest value before you shoot again.");
+            return new HelpPage(S.HelpFocalTitle, null,
+                S.SingleLens, S.HelpSingleText,
+                S.MultipleLenses, S.HelpMultipleText);
         }
 
         // image: an embedded resource shown first, or null.  sections:
@@ -75,7 +64,7 @@ namespace EA9Updater
                         Margin = new Padding(0, 0, 0, 8),
                     });
                 } catch (Exception ex) {
-                    flow.Controls.Add(Para("(picture unavailable: " + ex.Message + ")"));
+                    flow.Controls.Add(Para(string.Format(S.PictureUnavailable, ex.Message)));
                 }
             }
 
@@ -84,7 +73,7 @@ namespace EA9Updater
                 flow.Controls.Add(Para(sections[i + 1]));
             }
 
-            var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true,
+            var ok = new Button { Text = S.Ok, DialogResult = DialogResult.OK, AutoSize = true,
                                   Padding = new Padding(12, 2, 12, 2),
                                   Anchor = AnchorStyles.Right, Margin = new Padding(0, 12, 0, 0) };
             var okRow = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft,

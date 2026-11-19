@@ -15,7 +15,15 @@ namespace EA9Updater
     sealed class MainForm : Form
     {
         readonly Firmware fw;
+        readonly ComboBox language;
+        readonly Label notesLabel;
         readonly TextBox notes;
+        readonly Label hwLabel;
+        readonly LinkLabel hwHelp;
+        readonly Label focalModeLabel;
+        readonly LinkLabel focalHelp;
+        readonly Label[] slotHeads = new Label[4];
+        readonly Label deviceLabel;
         readonly ComboBox hwVersion;
         readonly RadioButton multiRadio;
         readonly RadioButton singleRadio;
@@ -34,6 +42,10 @@ namespace EA9Updater
         bool busy;
         bool polling;
         bool deviceOk;      // the adapter on USB answered CHECK
+        // The adapter and status lines, kept as functions so a language
+        // switch can say the same thing again in the other language.
+        Func<string> deviceText = () => "";
+        Func<string> statusText = () => "";
         // The adapter's device path at the last poll, null if absent, or
         // NotPolled to force the next poll to act even if nothing changed.
         const string NotPolled = "?";
@@ -41,9 +53,6 @@ namespace EA9Updater
 
         public MainForm()
         {
-            Text = string.Format("Community EA9 Firmware Updater: v{0}.{1}.{2}",
-                                 Firmware.DeclaredVersion[0], Firmware.DeclaredVersion[1],
-                                 Firmware.DeclaredVersion[2]);
             Font = SystemFonts.MessageBoxFont;
             AutoScaleMode = AutoScaleMode.Font;
             StartPosition = FormStartPosition.CenterScreen;
@@ -73,10 +82,24 @@ namespace EA9Updater
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 8 button + bar
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 9 status
 
-            var notesLabel = new Label { Text = "Release notes", AutoSize = true,
-                                         Margin = new Padding(3, 0, 3, 3) };
+            notesLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
+                                     Margin = new Padding(3, 0, 3, 3) };
             t.Controls.Add(notesLabel, 0, 0);
-            t.SetColumnSpan(notesLabel, 2);
+            // The language box: not translated, each name in its own language.
+            language = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList,
+                                      Anchor = AnchorStyles.Right, Margin = new Padding(3, 0, 3, 3) };
+            language.Items.Add("English");
+            language.Items.Add("中文");
+            language.SelectedIndex = S.Zh ? 1 : 0;
+            // Wide enough for the longer name plus the drop-down button.
+            language.Width = new[] { "English", "中文" }
+                .Max(n => TextRenderer.MeasureText(n, Font).Width)
+                + SystemInformation.VerticalScrollBarWidth + 24;
+            language.SelectedIndexChanged += (s, e) => {
+                S.Zh = language.SelectedIndex == 1;
+                ApplyText();
+            };
+            t.Controls.Add(language, 1, 0);
 
             notes = new TextBox {
                 Multiline = true,
@@ -96,36 +119,39 @@ namespace EA9Updater
                 hwVersion.Items.Add(v.ToString());
             }
             hwVersion.SelectedIndex = 0;
-            var hwHelp = HelpLink(HelpPage.AdapterVersion);
+            hwHelp = HelpLink(HelpPage.AdapterVersion);
             var hwRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false,
                                               Anchor = AnchorStyles.Left, Margin = new Padding(0) };
             hwRow.Controls.Add(hwVersion);
             hwRow.Controls.Add(hwHelp);
-            t.Controls.Add(FieldLabel("Adapter version"), 0, 2);
+            hwLabel = FieldLabel();
+            t.Controls.Add(hwLabel, 0, 2);
             t.Controls.Add(hwRow, 1, 2);
 
-            multiRadio = new RadioButton { Text = "Multiple Lenses", AutoSize = true, Checked = true };
-            singleRadio = new RadioButton { Text = "Single Lens", AutoSize = true,
+            multiRadio = new RadioButton { AutoSize = true, Checked = true };
+            singleRadio = new RadioButton { AutoSize = true,
                                             Margin = new Padding(16, 3, 3, 3) };
             multiRadio.CheckedChanged += (s, e) => ShowLensMode();
             var modes = new FlowLayoutPanel { AutoSize = true, WrapContents = false,
                                               Anchor = AnchorStyles.Left, Margin = new Padding(0) };
             modes.Controls.Add(multiRadio);
             modes.Controls.Add(singleRadio);
-            modes.Controls.Add(HelpLink(HelpPage.FocalLength));
-            t.Controls.Add(FieldLabel("Focal length"), 0, 3);
+            focalHelp = HelpLink(HelpPage.FocalLength);
+            modes.Controls.Add(focalHelp);
+            focalModeLabel = FieldLabel();
+            t.Controls.Add(focalModeLabel, 0, 3);
             t.Controls.Add(modes, 1, 3);
 
             singleFocal = FocalBox();
             singleFocal.Text = LensConfig.DefaultSingleFocalMm.ToString();
-            singleFocalLabel = FieldLabel("Focal length (mm)");
+            singleFocalLabel = FieldLabel();
             t.Controls.Add(singleFocalLabel, 0, 4);
             t.Controls.Add(singleFocal, 1, 4);
 
             singleName = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right,
                                        MaxLength = LensConfig.NameMax,
                                        Text = LensConfig.DefaultName };
-            singleNameLabel = FieldLabel("Lens name");
+            singleNameLabel = FieldLabel();
             t.Controls.Add(singleNameLabel, 0, 5);
             t.Controls.Add(singleName, 1, 5);
 
@@ -135,10 +161,11 @@ namespace EA9Updater
 
             device = new Label { AutoSize = true, Anchor = AnchorStyles.Left,
                                  Margin = new Padding(3, 8, 3, 8) };
-            t.Controls.Add(FieldLabel("Adapter"), 0, 7);
+            deviceLabel = FieldLabel();
+            t.Controls.Add(deviceLabel, 0, 7);
             t.Controls.Add(device, 1, 7);
 
-            writeButton = new Button { Text = "Write firmware", AutoSize = true,
+            writeButton = new Button { AutoSize = true,
                                        Padding = new Padding(8, 2, 8, 2) };
             writeButton.Click += OnWrite;
             bar = new ProgressBar { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100 };
@@ -154,21 +181,48 @@ namespace EA9Updater
             ShowLensMode();
 
             try {
-                notes.Text = Firmware.LoadChangelog().Replace("\r\n", "\n").Replace("\n", "\r\n");
-            } catch (Exception ex) {
-                notes.Text = "(release notes unavailable: " + ex.Message + ")";
-            }
-            try {
                 fw = Firmware.LoadEmbedded();
                 // Writing stays off until a poll has found the adapter.
                 writeButton.Enabled = false;
-                device.Text = "Checking...";
-                Say("Looking for the adapter...");
+                SetDevice(() => S.Checking);
+                Say(() => S.LookingForAdapter);
             } catch (Exception ex) {
                 writeButton.Enabled = false;
                 SetInputsEnabled(false);
-                Say("This updater is damaged and cannot write: " + ex.Message, true);
+                Say(() => string.Format(S.Damaged, ex.Message), true);
             }
+            ApplyText();
+        }
+
+        // Every text in the window, in the current language (S.Zh).  Run at
+        // start and on a language switch; what the user typed is kept.
+        void ApplyText()
+        {
+            SuspendLayout();
+            Text = string.Format(S.Title, Firmware.DeclaredVersion[0], Firmware.DeclaredVersion[1],
+                                 Firmware.DeclaredVersion[2]);
+            notesLabel.Text = S.ReleaseNotes;
+            try {
+                notes.Text = Firmware.LoadChangelog().Replace("\r\n", "\n").Replace("\n", "\r\n");
+            } catch (Exception ex) {
+                notes.Text = string.Format(S.NotesUnavailable, ex.Message);
+            }
+            hwLabel.Text = S.AdapterVersion;
+            hwHelp.Text = focalHelp.Text = S.HowToChoose;
+            focalModeLabel.Text = S.FocalLength;
+            multiRadio.Text = S.MultipleLenses;
+            singleRadio.Text = S.SingleLens;
+            singleFocalLabel.Text = S.FocalLengthMm;
+            singleNameLabel.Text = S.LensName;
+            slotHeads[0].Text = S.ColSlot;
+            slotHeads[1].Text = S.ColAperture;
+            slotHeads[2].Text = S.ColFocal;
+            slotHeads[3].Text = S.ColName;
+            deviceLabel.Text = S.Adapter;
+            writeButton.Text = S.WriteFirmware;
+            device.Text = deviceText();
+            status.Text = statusText();
+            ResumeLayout(true);
         }
 
         // The multiple-focal-length table: slot, the aperture that selects
@@ -192,12 +246,12 @@ namespace EA9Updater
             for (int r = 0; r <= LensConfig.SlotCount; r++) {
                 g.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             }
-            string[] heads = { "Slot", "Aperture", "Focal Length (mm)", "Lens Name" };
-            for (int c = 0; c < heads.Length; c++) {
-                g.Controls.Add(new Label { Text = heads[c], AutoSize = true,
+            for (int c = 0; c < slotHeads.Length; c++) {
+                slotHeads[c] = new Label { AutoSize = true,
                                            Font = new Font(Font, FontStyle.Bold),
                                            Anchor = AnchorStyles.Left,
-                                           Margin = new Padding(6, 4, 6, 4) }, c, 0);
+                                           Margin = new Padding(6, 4, 6, 4) };
+                g.Controls.Add(slotHeads[c], c, 0);
             }
             for (int i = 0; i < LensConfig.SlotCount; i++) {
                 g.Controls.Add(CellLabel((i + 1).ToString()), 0, i + 1);
@@ -220,7 +274,7 @@ namespace EA9Updater
         // A "How to choose?" link that opens the page `page` makes.
         LinkLabel HelpLink(Func<HelpPage> page)
         {
-            var l = new LinkLabel { Text = "How to choose?", AutoSize = true,
+            var l = new LinkLabel { AutoSize = true,
                                     Anchor = AnchorStyles.Left, Margin = new Padding(12, 3, 3, 3) };
             l.LinkClicked += (s, e) => {
                 using (var d = page()) {
@@ -313,15 +367,22 @@ namespace EA9Updater
         }
 
         // The status line; problems the user must act on are shown in red.
-        void Say(string text, bool problem = false)
+        void Say(Func<string> text, bool problem = false)
         {
-            status.Text = text;
+            statusText = text;
+            status.Text = text();
             status.ForeColor = problem ? Color.FromArgb(0xC0, 0x00, 0x00) : SystemColors.ControlText;
         }
 
-        static Label FieldLabel(string text)
+        void SetDevice(Func<string> text)
         {
-            return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left,
+            deviceText = text;
+            device.Text = text();
+        }
+
+        static Label FieldLabel()
+        {
+            return new Label { AutoSize = true, Anchor = AnchorStyles.Left,
                                Margin = new Padding(3, 8, 12, 8) };
         }
 
@@ -333,36 +394,29 @@ namespace EA9Updater
             }
             byte[] image = fw.Patch(cfg);
 
-            if (MessageBox.Show(this,
-                    "The firmware will now be written to the adapter with this configuration:\n\n" +
-                    cfg.Describe() + "\n" +
-                    "Do not unplug the USB cable or close this window until it finishes.",
-                    Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) {
+            if (MessageBox.Show(this, string.Format(S.Confirm, cfg.Describe()), Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) {
                 return;
             }
 
             SetBusy(true);
             bar.Value = 0;
             var progress = new Progress<int>(p => bar.Value = p);
-            var say = new Progress<string>(s => Say(s));
+            var say = new Progress<Func<string>>(s => Say(s));
             try {
                 await Task.Run(() => Run(image, progress, say));
                 bar.Value = 100;
                 // No second write until the adapter is unplugged and comes
                 // back: the poll sees the same path and does not re-enable.
                 deviceOk = false;
-                device.Text = "Firmware written";
-                Say("Done. Unplug the USB cable.");
-                MessageBox.Show(this,
-                    "The firmware was written successfully.\n\nUnplug the USB cable now.",
-                    Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                SetDevice(() => S.FirmwareWritten);
+                Say(() => S.Done);
+                MessageBox.Show(this, S.Success, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
             } catch (Exception ex) {
                 // Make the next poll check the adapter afresh.
                 seenPath = NotPolled;
                 deviceOk = false;
-                Say("Failed: " + ex.Message, true);
-                MessageBox.Show(this, "Writing the firmware failed.\n\n" + ex.Message,
-                                Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Say(() => string.Format(S.Failed, ex.Message), true);
+                MessageBox.Show(this, string.Format(S.WriteFailed, ex.Message), Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
             } finally {
                 SetBusy(false);
             }
@@ -405,30 +459,28 @@ namespace EA9Updater
                 deviceOk = false;
                 writeButton.Enabled = false;
                 if (path == null) {
-                    device.Text = "Not connected";
-                    Say("Please connect the adapter to this computer by USB.", true);
+                    SetDevice(() => S.NotConnected);
+                    Say(() => S.PleaseConnect, true);
                     return;
                 }
 
-                device.Text = "Checking...";
-                Say("Adapter found, reading its version...");
+                SetDevice(() => S.Checking);
+                Say(() => S.AdapterFound);
                 byte[] v;
                 try {
                     v = await Task.Run(() => ReadBootloaderVersion(path));
                 } catch (Exception ex) {
-                    device.Text = "Not responding";
-                    Say("The adapter did not answer (" + ex.Message + "). " +
-                        "Unplug it and plug it in again.", true);
+                    SetDevice(() => S.NotResponding);
+                    Say(() => string.Format(S.NoAnswer, ex.Message), true);
                     return;
                 }
                 deviceOk = true;
-                device.Text = string.Format("Connected, bootloader version {0}.{1}.{2}", v[0], v[1], v[2]);
-                Say(string.Format("Ready to write firmware {0}.{1}.{2}.",
-                                  Firmware.DeclaredVersion[0], Firmware.DeclaredVersion[1],
-                                  Firmware.DeclaredVersion[2]));
+                SetDevice(() => string.Format(S.Connected, v[0], v[1], v[2]));
+                Say(() => string.Format(S.ReadyToWrite, Firmware.DeclaredVersion[0],
+                                        Firmware.DeclaredVersion[1], Firmware.DeclaredVersion[2]));
                 writeButton.Enabled = true;
             } catch (Exception ex) {
-                Say("Looking for the adapter failed: " + ex.Message, true);
+                Say(() => string.Format(S.LookingFailed, ex.Message), true);
             } finally {
                 polling = false;
             }
@@ -444,23 +496,20 @@ namespace EA9Updater
         }
 
         // Runs on a worker thread; reports through the two Progress objects.
-        static void Run(byte[] image, IProgress<int> progress, IProgress<string> say)
+        static void Run(byte[] image, IProgress<int> progress, IProgress<Func<string>> say)
         {
-            say.Report("Looking for the adapter...");
+            say.Report(() => S.LookingForAdapter);
             var paths = HidDevice.Find(Flasher.Vid, Flasher.Pid);
             if (paths.Count == 0) {
-                throw new InvalidOperationException(
-                    "The adapter was not found.\n\n" +
-                    "Connect it to this computer's USB port.");
+                throw new InvalidOperationException(S.NotFound);
             }
 
             using (var dev = HidDevice.Open(paths[0])) {
                 var flasher = new Flasher(dev);
                 byte[] v = flasher.Check();
-                say.Report(string.Format("Found the adapter (bootloader record {0}.{1}.{2}). Preparing...",
-                                         v[0], v[1], v[2]));
+                say.Report(() => string.Format(S.Preparing, v[0], v[1], v[2]));
                 flasher.Start(Firmware.DeclaredVersion);
-                say.Report("Writing firmware...");
+                say.Report(() => S.Writing);
                 int last = -1;
                 flasher.Write(image, (sent, total) => {
                     int pct = Math.Min(100, sent * 100 / total);
@@ -483,8 +532,7 @@ namespace EA9Updater
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (busy && e.CloseReason == CloseReason.UserClosing) {
-                MessageBox.Show(this, "Please wait until the firmware has been written.",
-                                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, S.PleaseWait, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 e.Cancel = true;
             }
             base.OnFormClosing(e);
