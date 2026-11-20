@@ -29,11 +29,16 @@ namespace EA9Updater
         readonly RadioButton singleRadio;
         readonly Label singleFocalLabel;
         readonly TextBox singleFocal;
+        readonly Label singleXpdLabel;
+        readonly ComboBox singleXpd;
+        readonly LinkLabel singleXpdHelp;
+        readonly LinkLabel slotXpdHelp;
         readonly Label singleNameLabel;
         readonly TextBox singleName;
         readonly TableLayoutPanel slotGrid;
         readonly TextBox[] slotFocal = new TextBox[LensConfig.SlotCount];
         readonly TextBox[] slotName = new TextBox[LensConfig.SlotCount];
+        readonly ComboBox[] slotXpd = new ComboBox[LensConfig.SlotCount];
         readonly Button writeButton;
         readonly ProgressBar bar;
         readonly Label status;
@@ -56,17 +61,17 @@ namespace EA9Updater
             Font = SystemFonts.MessageBoxFont;
             AutoScaleMode = AutoScaleMode.Font;
             StartPosition = FormStartPosition.CenterScreen;
-            // 840 x 880, but never taller or wider than the screen's work
+            // 1008 x 880, but never taller or wider than the screen's work
             // area (a 1366 x 768 laptop has about 730 px of it); the release
             // notes take what height is left.
             var work = Screen.PrimaryScreen.WorkingArea.Size;
-            ClientSize = new Size(Math.Min(840, work.Width - 40), Math.Min(880, work.Height - 60));
+            ClientSize = new Size(Math.Min(1008, work.Width - 40), Math.Min(880, work.Height - 60));
             MinimumSize = new Size(680, 640);
 
             var t = new TableLayoutPanel {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 10,
+                RowCount = 12,
                 Padding = new Padding(12),
             };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -76,11 +81,13 @@ namespace EA9Updater
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 2 hardware version
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 3 single / multiple
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 4 single: focal
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 5 single: name
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 6 multiple: slot table
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 7 adapter
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 8 button + bar
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 9 status
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 5 single: exit pupil
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 6 single: name
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 7 multiple: slot table
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 8 multiple: exit pupil help
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 9 adapter
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 10 button + bar
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 11 status
 
             notesLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
                                      Margin = new Padding(3, 0, 3, 3) };
@@ -148,32 +155,50 @@ namespace EA9Updater
             t.Controls.Add(singleFocalLabel, 0, 4);
             t.Controls.Add(singleFocal, 1, 4);
 
+            singleXpd = XpdBox();
+            SelectXpd(singleXpd, LensConfig.DefaultSingleFocalMm);
+            singleFocal.TextChanged += (s, e) => AutoXpd(singleFocal, singleXpd);
+            singleXpdHelp = HelpLink(HelpPage.ExitPupil);
+            var xpdRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false,
+                                               Anchor = AnchorStyles.Left, Margin = new Padding(0) };
+            xpdRow.Controls.Add(singleXpd);
+            xpdRow.Controls.Add(singleXpdHelp);
+            singleXpdLabel = FieldLabel();
+            t.Controls.Add(singleXpdLabel, 0, 5);
+            t.Controls.Add(xpdRow, 1, 5);
+
             singleName = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right,
                                        MaxLength = LensConfig.NameMax,
                                        Text = LensConfig.DefaultName };
             singleNameLabel = FieldLabel();
-            t.Controls.Add(singleNameLabel, 0, 5);
-            t.Controls.Add(singleName, 1, 5);
+            t.Controls.Add(singleNameLabel, 0, 6);
+            t.Controls.Add(singleName, 1, 6);
 
             slotGrid = SlotGrid();
-            t.Controls.Add(slotGrid, 0, 6);
+            t.Controls.Add(slotGrid, 0, 7);
             t.SetColumnSpan(slotGrid, 2);
+
+            slotXpdHelp = HelpLink(HelpPage.ExitPupil);
+            slotXpdHelp.Margin = new Padding(3, 0, 3, 6);
+            slotXpdHelp.Anchor = AnchorStyles.Right;
+            t.Controls.Add(slotXpdHelp, 0, 8);
+            t.SetColumnSpan(slotXpdHelp, 2);
 
             device = new Label { AutoSize = true, Anchor = AnchorStyles.Left,
                                  Margin = new Padding(3, 8, 3, 8) };
             deviceLabel = FieldLabel();
-            t.Controls.Add(deviceLabel, 0, 7);
-            t.Controls.Add(device, 1, 7);
+            t.Controls.Add(deviceLabel, 0, 9);
+            t.Controls.Add(device, 1, 9);
 
             writeButton = new Button { AutoSize = true,
                                        Padding = new Padding(8, 2, 8, 2) };
             writeButton.Click += OnWrite;
             bar = new ProgressBar { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100 };
-            t.Controls.Add(writeButton, 0, 8);
-            t.Controls.Add(bar, 1, 8);
+            t.Controls.Add(writeButton, 0, 10);
+            t.Controls.Add(bar, 1, 10);
 
             status = new Label { AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
-            t.Controls.Add(status, 0, 9);
+            t.Controls.Add(status, 0, 11);
             t.SetColumnSpan(status, 2);
 
             Controls.Add(t);
@@ -209,15 +234,18 @@ namespace EA9Updater
             }
             hwLabel.Text = S.AdapterVersion;
             hwHelp.Text = focalHelp.Text = S.HowToChoose;
+            singleXpdHelp.Text = S.HowToChoose;
+            slotXpdHelp.Text = S.HowToChooseXpd;
             focalModeLabel.Text = S.FocalLength;
             multiRadio.Text = S.MultipleLenses;
             singleRadio.Text = S.SingleLens;
             singleFocalLabel.Text = S.FocalLengthMm;
+            singleXpdLabel.Text = S.ExitPupilMm;
             singleNameLabel.Text = S.LensName;
-            slotHeads[0].Text = S.ColSlot;
-            slotHeads[1].Text = S.ColAperture;
-            slotHeads[2].Text = S.ColFocal;
-            slotHeads[3].Text = S.ColName;
+            slotHeads[0].Text = S.ColAperture;
+            slotHeads[1].Text = S.ColFocal;
+            slotHeads[2].Text = S.ColName;
+            slotHeads[3].Text = S.ColXpd;
             deviceLabel.Text = S.Adapter;
             writeButton.Text = S.WriteFirmware;
             device.Text = deviceText();
@@ -225,9 +253,9 @@ namespace EA9Updater
             ResumeLayout(true);
         }
 
-        // The multiple-focal-length table: slot, the aperture that selects
-        // it, focal length, name.  A name is editable only once its slot has
-        // a focal length above 0.
+        // The multiple-focal-length table: the aperture that selects the
+        // slot, focal length, name, exit pupil.  The name and the exit pupil
+        // are shown only once the slot has a focal length above 0.
         TableLayoutPanel SlotGrid()
         {
             var g = new TableLayoutPanel {
@@ -241,8 +269,8 @@ namespace EA9Updater
             };
             g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             g.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             for (int r = 0; r <= LensConfig.SlotCount; r++) {
                 g.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             }
@@ -254,19 +282,26 @@ namespace EA9Updater
                 g.Controls.Add(slotHeads[c], c, 0);
             }
             for (int i = 0; i < LensConfig.SlotCount; i++) {
-                g.Controls.Add(CellLabel((i + 1).ToString()), 0, i + 1);
-                g.Controls.Add(CellLabel(LensConfig.SlotAperture[i]), 1, i + 1);
+                g.Controls.Add(CellLabel(LensConfig.SlotAperture[i]), 0, i + 1);
 
                 var f = FocalBox();
                 f.Margin = new Padding(6, 3, 6, 3);
                 var n = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right,
-                                      MaxLength = LensConfig.NameMax, Enabled = false,
+                                      MaxLength = LensConfig.NameMax, Visible = false,
                                       Margin = new Padding(6, 3, 6, 3) };
-                f.TextChanged += (s, e) => UpdateSlotNames();
+                var x = XpdBox();
+                x.Margin = new Padding(6, 3, 6, 3);
+                x.Visible = false;
+                f.TextChanged += (s, e) => {
+                    AutoXpd(f, x);
+                    UpdateSlotNames();
+                };
                 slotFocal[i] = f;
                 slotName[i] = n;
-                g.Controls.Add(f, 2, i + 1);
-                g.Controls.Add(n, 3, i + 1);
+                slotXpd[i] = x;
+                g.Controls.Add(f, 1, i + 1);
+                g.Controls.Add(n, 2, i + 1);
+                g.Controls.Add(x, 3, i + 1);
             }
             return g;
         }
@@ -310,6 +345,41 @@ namespace EA9Updater
             return b;
         }
 
+        // The exit pupil drop-down: OpticalFile.XpdChoices, in mm.
+        ComboBox XpdBox()
+        {
+            var b = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList,
+                                   Anchor = AnchorStyles.Left };
+            foreach (int v in OpticalFile.XpdChoices) {
+                b.Items.Add(v.ToString());
+            }
+            b.Width = TextRenderer.MeasureText("000", Font).Width
+                      + SystemInformation.VerticalScrollBarWidth + 24;
+            return b;
+        }
+
+        // Selects the exit pupil OpticalFile.AutoXpd gives for `focalMm`.
+        static void SelectXpd(ComboBox b, int focalMm)
+        {
+            b.SelectedItem = OpticalFile.AutoXpd(focalMm).ToString();
+        }
+
+        // On every change of a focal length, preselect its exit pupil; the
+        // user may then pick another, until the focal length changes again.
+        static void AutoXpd(TextBox focal, ComboBox xpd)
+        {
+            int mm = FocalValue(focal);
+            if (mm > 0) {
+                SelectXpd(xpd, mm);
+            }
+        }
+
+        static int XpdValue(ComboBox b)
+        {
+            int v;
+            return b.SelectedItem != null && int.TryParse((string)b.SelectedItem, out v) ? v : 0;
+        }
+
         static int FocalValue(TextBox b)
         {
             int v;
@@ -321,8 +391,9 @@ namespace EA9Updater
             bool single = singleRadio.Checked;
             SuspendLayout();
             singleFocalLabel.Visible = singleFocal.Visible = single;
+            singleXpdLabel.Visible = singleXpd.Visible = singleXpdHelp.Visible = single;
             singleNameLabel.Visible = singleName.Visible = single;
-            slotGrid.Visible = !single;
+            slotGrid.Visible = slotXpdHelp.Visible = !single;
             ResumeLayout(true);
         }
 
@@ -330,14 +401,17 @@ namespace EA9Updater
         {
             bool on = !busy && fw != null;
             for (int i = 0; i < LensConfig.SlotCount; i++) {
-                slotName[i].Enabled = on && FocalValue(slotFocal[i]) > 0;
+                // Hidden, not just greyed, while the slot has no focal length.
+                bool set = FocalValue(slotFocal[i]) > 0;
+                slotName[i].Visible = slotXpd[i].Visible = set;
+                slotName[i].Enabled = slotXpd[i].Enabled = on;
             }
         }
 
         void SetInputsEnabled(bool on)
         {
             hwVersion.Enabled = multiRadio.Enabled = singleRadio.Enabled = on;
-            singleFocal.Enabled = singleName.Enabled = on;
+            singleFocal.Enabled = singleXpd.Enabled = singleName.Enabled = on;
             foreach (var f in slotFocal) {
                 f.Enabled = on;
             }
@@ -351,10 +425,11 @@ namespace EA9Updater
             bool single = singleRadio.Checked;
             var entries = new List<LensConfig.Entry>();
             if (single) {
-                entries.Add(new LensConfig.Entry(singleFocal.Text, singleName.Text));
+                entries.Add(new LensConfig.Entry(singleFocal.Text, singleName.Text, XpdValue(singleXpd)));
             } else {
                 for (int i = 0; i < LensConfig.SlotCount; i++) {
-                    entries.Add(new LensConfig.Entry(slotFocal[i].Text, slotName[i].Text));
+                    entries.Add(new LensConfig.Entry(slotFocal[i].Text, slotName[i].Text,
+                                                     XpdValue(slotXpd[i])));
                 }
             }
             string error;

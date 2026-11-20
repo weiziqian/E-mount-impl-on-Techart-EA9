@@ -1,5 +1,6 @@
 // HelpPage.cs -- the pages the "How to choose?" links open: one next to the
-// adapter version, one next to the focal length.  spec.md section 4.
+// adapter version, one next to the focal length, and one for the exit pupil.
+// spec.md section 4.
 
 using System;
 using System.Drawing;
@@ -28,8 +29,14 @@ namespace EA9Updater
                 S.MultipleLenses, S.HelpMultipleText);
         }
 
+        // What the exit pupil is for, and which value to pick.
+        public static HelpPage ExitPupil()
+        {
+            return new HelpPage(S.HelpXpdTitle, null, null, S.HelpXpdText);
+        }
+
         // image: an embedded resource shown first, or null.  sections:
-        // heading, text, heading, text, ...
+        // heading, text, heading, text, ...; a null heading is left out.
         HelpPage(string title, string image, params string[] sections)
         {
             Text = title;
@@ -69,7 +76,9 @@ namespace EA9Updater
             }
 
             for (int i = 0; i + 1 < sections.Length; i += 2) {
-                flow.Controls.Add(Heading(sections[i]));
+                if (sections[i] != null) {
+                    flow.Controls.Add(Heading(sections[i]));
+                }
                 flow.Controls.Add(Para(sections[i + 1]));
             }
 

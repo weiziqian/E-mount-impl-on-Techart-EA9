@@ -13,30 +13,45 @@ src/LensConfig.cs).
 
 Checks: the magic occurs exactly once, the block fits in the image, and it
 parses (hardware version 1 or 2, pad 0, every name NUL-terminated, at least
-one slot set).
+one slot set), and every slot's optical file is exactly what gen_optical.py
+builds for its focal length and exit pupil (the exit pupil is read back from
+type 0), all zero for an unset slot.
 """
 
 import argparse
+import os
 import struct
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import gen_optical  # noqa: E402
 
 MAGIC = b"CfgAnchor\0"
 SLOTS = 8
 NAME_FIELD = 64
 HEADER = 12
-SLOT_SIZE = 2 + NAME_FIELD
-SIZE = HEADER + SLOTS * SLOT_SIZE          # 540
+OPTICAL = 296
+SLOT_SIZE = 2 + NAME_FIELD + OPTICAL       # 362
+SIZE = HEADER + SLOTS * SLOT_SIZE          # 2908
 
 
 def pack(hw_version, slots):
-    """slots: 8 (focal_mm, name) pairs, focal 0 / name '' when unset."""
+    """slots: 8 (focal_mm, name, xpd_mm) triples, (0, '', 0) when unset."""
     b = bytearray(MAGIC) + bytes((hw_version, 0))
-    for mm, name in slots:
+    for mm, name, xpd in slots:
         raw = name.encode("ascii")
         assert len(raw) < NAME_FIELD
         b += struct.pack("<H", mm) + raw + b"\0" * (NAME_FIELD - len(raw))
+        b += gen_optical.build(mm, xpd) if mm else bytes(OPTICAL)
     assert len(b) == SIZE
     return bytes(b)
+
+
+def xpd_of(optical):
+    """The exit pupil an optical file was built with: type 0 at infinity / 15."""
+    # LF header 16, ED chunk header 8, ED header 8, block header 10, closest row 12
+    t0_inf = struct.unpack_from("<H", optical, 16 + 8 + 8 + 10 + 12)[0]
+    return round(t0_inf / 15)
 
 
 def find(image):
@@ -61,8 +76,21 @@ def parse(block):
         name = block[o + 2:o + 2 + NAME_FIELD]
         if name[-1] != 0:
             sys.exit("slot %d: name not NUL-terminated" % i)
-        slots.append((mm, name.split(b"\0")[0].decode("ascii")))
-    if not any(mm for mm, _ in slots):
+        opt = block[o + 2 + NAME_FIELD:o + SLOT_SIZE]
+        if not mm:
+            if any(opt):
+                sys.exit("slot %d: not set but its optical file is not zero" % i)
+            xpd = 0
+        else:
+            if opt[:2] != b"LF":
+                sys.exit("slot %d: optical file does not start LF" % i)
+            xpd = xpd_of(opt)
+            if xpd not in gen_optical.XPD_CHOICES:
+                sys.exit("slot %d: exit pupil %d mm is not one of %s" % (i, xpd, gen_optical.XPD_CHOICES))
+            if gen_optical.build(mm, xpd) != opt:
+                sys.exit("slot %d: optical file differs from gen_optical.build(%d, %d)" % (i, mm, xpd))
+        slots.append((mm, name.split(b"\0")[0].decode("ascii"), xpd))
+    if not any(mm for mm, _, _ in slots):
         sys.exit("no slot is set")
     return hw, slots
 
@@ -80,8 +108,8 @@ def main():
     if pack(hw, slots) != image[at:at + SIZE]:
         sys.exit("the block does not round-trip (bytes after a name's NUL?)")
     print("lens configuration block at 0x%05x, hardware version %d" % (at, hw))
-    for i, (mm, name) in enumerate(slots):
-        print("  slot %d  %4d mm  %s" % (i, mm, name))
+    for i, (mm, name, xpd) in enumerate(slots):
+        print("  slot %d  %4d mm  exit pupil %2d mm  %s" % (i, mm, xpd, name))
     if args.out:
         with open(args.out, "wb") as f:
             f.write(image)

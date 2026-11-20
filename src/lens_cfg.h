@@ -2,14 +2,20 @@
  *
  * ONE STRUCT IN THE IMAGE, found by its magic.  The updater searches the
  * release image for LENS_CFG_MAGIC and overwrites the block in place; nothing
- * else in the image needs patching.  Layout (540 bytes, little-endian):
+ * else in the image needs patching.  Layout (2908 bytes, little-endian):
  *
  *   +0    magic[10]     "CfgAnchor" + NUL
  *   +10   hw_version    1 or 2
  *   +11   pad           0; alignment only
- *   +12   lens[8]       66 bytes each:
- *           +0  focal_mm   u16, whole mm; 0 = entry not set
- *           +2  name[64]   ASCII, NUL-padded; at most 63 characters
+ *   +12   lens[8]       362 bytes each:
+ *           +0  focal_mm      u16, whole mm; 0 = entry not set
+ *           +2  name[64]      ASCII, NUL-padded; at most 63 characters
+ *           +66 optical[296]  the entry's message 0x3B file (LF), built by the
+ *                             updater from the focal length and the exit
+ *                             pupil the user chose (tools/gen_optical.py is
+ *                             the reference); all zero when the entry is not
+ *                             set.  One that does not start "LF" makes the
+ *                             firmware serve optical_file[] instead.
  *
  * At least one entry must be set -- the updater enforces it.  Entry 0 may be
  * unset when several are (f/2.5 then selects nothing); the firmware falls
@@ -35,10 +41,12 @@
 #define LENS_CFG_MAGIC    "CfgAnchor"
 #define LENS_CFG_N        8u
 #define LENS_CFG_NAME_LEN 64u     /* 63 characters + NUL, as 0x3F pl[1..64] */
+#define LENS_CFG_OPTICAL_LEN 296u /* = OPTICAL_FILE_LEN */
 
 struct lens_cfg_lens {
 	uint16_t focal_mm;
 	char     name[LENS_CFG_NAME_LEN];
+	uint8_t  optical[LENS_CFG_OPTICAL_LEN];
 };
 
 struct lens_cfg {
@@ -62,10 +70,10 @@ void lens_cfg_boot(void);
  * apply it. */
 void lens_cfg_select(uint8_t idx);
 
-/* Puts entry `idx`'s focal length, name and lens ID into what the body is
- * sent: em_focal_mm10, message 0x3F, and message 0x07's lens ID as the
+/* Puts entry `idx`'s focal length, name, lens ID and optical file into what
+ * the body is sent: em_focal_mm10, message 0x3F, message 0x07's lens ID as the
  * template's plus `idx`, so a body that keys on the ID reloads after a
- * switch. */
+ * switch, and em_optical_file. */
 void lens_cfg_apply(uint8_t idx);
 
 /* SWITCHING BY APERTURE.  A 0x1B request for f/2.5, f/2.8 ... f/5.6 picks

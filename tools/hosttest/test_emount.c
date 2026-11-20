@@ -2388,6 +2388,28 @@ int main(void)
 			fail("0x3B page 9 was not answered with the last page");
 		}
 
+		/* Another entry's file (lens_cfg_apply sets em_optical_file):
+		 * served from the next 0x3A selection on. */
+		{
+			static uint8_t other[OPTICAL_FILE_LEN];
+
+			memcpy(other, optical_file, OPTICAL_FILE_LEN);
+			other[OPTICAL_FILE_LEN - 5] ^= 0x5A;    /* inside LC */
+			em_optical_file = other;
+			n = make_request(req, 0x03, 0x44, 0x3A, 0x00, 0x00);
+			host_body_frame(req, n);
+			em_poll();
+			n = make_request(req, 0x03, 0x45, 0x3B, 1, 0x00);
+			before = sent_n;
+			host_body_frame(req, n);
+			em_poll();
+			if (sent_n != before + 1
+			    || memcmp(&sent[before][9], other, OPTICAL_FILE_LEN) != 0) {
+				fail("0x3B does not serve em_optical_file after a switch");
+			}
+			em_optical_file = optical_file;
+		}
+
 		/* The one-page object: announced as one page, sent whole. */
 		n = make_request(req, 0x03, 0x41, 0x3A, 0x08, 0x00);
 		before = sent_n;

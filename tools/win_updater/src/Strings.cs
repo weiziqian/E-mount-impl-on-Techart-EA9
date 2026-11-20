@@ -22,15 +22,18 @@ namespace EA9Updater
                                                                "（无法读取更新说明：{0}）"); } }
         public static string AdapterVersion { get { return T("Adapter version", "转接环版本"); } }
         public static string HowToChoose { get { return T("How to choose?", "如何选择？"); } }
+        public static string HowToChooseXpd { get { return T("How to choose the exit pupil?",
+                                                             "如何选择出瞳距离？"); } }
         public static string FocalLength { get { return T("Focal length", "焦距"); } }
         public static string MultipleLenses { get { return T("Multiple Lenses", "多镜头"); } }
         public static string SingleLens { get { return T("Single Lens", "单镜头"); } }
         public static string FocalLengthMm { get { return T("Focal length (mm)", "焦距 (mm)"); } }
         public static string LensName { get { return T("Lens name", "镜头名称"); } }
-        public static string ColSlot { get { return T("Slot", "序号"); } }
         public static string ColAperture { get { return T("Aperture", "光圈"); } }
         public static string ColFocal { get { return T("Focal Length (mm)", "焦距 (mm)"); } }
         public static string ColName { get { return T("Lens Name", "镜头名称"); } }
+        public static string ColXpd { get { return T("Exit Pupil (mm)", "出瞳距离 (mm)"); } }
+        public static string ExitPupilMm { get { return T("Exit pupil (mm)", "出瞳距离 (mm)"); } }
         public static string Adapter { get { return T("Adapter", "转接环"); } }
         public static string WriteFirmware { get { return T("Write firmware", "写入固件"); } }
 
@@ -108,11 +111,27 @@ namespace EA9Updater
             "把每支镜头的信息填在你想用来选择它的那个光圈所在的行。换镜头时，把相机设为对应的光圈" +
             "并按下快门：转接环会重启，并切换到这支镜头的信息。再次拍摄前，记得把光圈调回最大。"); } }
 
+        public static string HelpXpdTitle { get { return T("Exit Pupil", "出瞳距离"); } }
+        public static string HelpXpdText { get { return T(
+            "The exit pupil distance affects how accurately phase-detect autofocus works. " +
+            "Usually the exact optical data of a lens is not known; then follow these rules:\n\n" +
+            "1. Start with a value close to the focal length (one is selected for you when you " +
+            "enter the focal length).\n\n" +
+            "2. If you are not happy with how the camera focuses toward the edges of the frame, " +
+            "try a smaller or a larger value.\n\n" +
+            "3. Rangefinder lenses usually have a shorter exit pupil distance than SLR lenses, and " +
+            "lenses with better image quality usually have a longer one.",
+            "出瞳距离会影响相位对焦的准确性。多数情况下你无法得知镜头精确的光学参数，" +
+            "可以按以下原则选择：\n\n" +
+            "1. 先选一个与焦距相近的数值（输入焦距后会自动选好）。\n\n" +
+            "2. 如果对相机在画面边缘的对焦效果不满意，尝试减小或增大这个数值。\n\n" +
+            "3. 通常旁轴镜头的出瞳距离比单反镜头短；画质更好的镜头，出瞳距离通常更长。"); } }
+
         // ---- lens configuration
         public static string ChooseHwVersion { get { return T("Choose a hardware version.", "请选择硬件版本。"); } }
         // Where an error is, put in front of the messages below: nothing for
         // the single lens, the slot for multiple lenses.
-        public static string InSlot { get { return T(" in slot {0}", "第 {0} 行的"); } }
+        public static string InSlot { get { return T(" in the {0} row", "{0} 那一行的"); } }
         public static string FocalWhole { get { return T("The focal length{0} must be a whole number of millimetres.",
                                                          "{0}焦距必须是整数（单位 mm）。"); } }
         public static string FocalRange { get { return T("The focal length{0} must be from {1} to {2} mm.",
@@ -128,8 +147,11 @@ namespace EA9Updater
             "No lens is configured: enter the focal length of at least one slot.",
             "尚未配置镜头：请至少在一行中输入焦距。"); } }
         public static string DescAdapter { get { return T("Adapter version: {0}", "转接环版本：{0}"); } }
-        public static string DescSingle { get { return T("Single lens: {0} mm, \"{1}\"", "单镜头：{0} mm，“{1}”"); } }
-        public static string DescSlot { get { return T("Slot {0} ({1}): {2} mm, \"{3}\"",
-                                                       "第 {0} 行（{1}）：{2} mm，“{3}”"); } }
+        public static string ChooseXpd { get { return T("Choose an exit pupil{0}.", "请选择{0}出瞳距离。"); } }
+        public static string DescSingle { get { return T("Single lens: {0} mm, exit pupil {1} mm, \"{2}\"",
+                                                         "单镜头：{0} mm，出瞳 {1} mm，“{2}”"); } }
+        // {0}, the slot number, is not shown: the window names rows by aperture.
+        public static string DescSlot { get { return T("{1}: {2} mm, exit pupil {3} mm, \"{4}\"",
+                                                       "{1}：{2} mm，出瞳 {3} mm，“{4}”"); } }
     }
 }

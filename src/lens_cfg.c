@@ -2,8 +2,11 @@
 #include "cfg.h"
 #include "emount.h"
 #include "emount_packets.h"
+#include "lens_cfg_optical.h"
+#include "optical_file.h"
 
-_Static_assert(sizeof(struct lens_cfg) == 540, "lens_cfg layout changed");
+_Static_assert(sizeof(struct lens_cfg) == 2908, "lens_cfg layout changed");
+_Static_assert(LENS_CFG_OPTICAL_LEN == OPTICAL_FILE_LEN, "optical file size");
 
 /* Message 0x3F's name field: pl[1..63], frame offsets 7..69; pl[64] stays NUL. */
 #define EM3F_NAME     7u
@@ -38,14 +41,14 @@ const volatile struct lens_cfg lens_cfg = {
 	.magic      = LENS_CFG_MAGIC,
 	.hw_version = 2,
 	.lens       = {
-		{ 25, "Community EA9 25MM" },
-		{ 28, "Community EA9 28MM" },
-		{ 32, "Community EA9 32MM" },
-		{ 35, "Community EA9 35MM" },
-		{ 40, "Community EA9 40MM" },
-		{ 45, "Community EA9 45MM" },
-		{ 50, "Community EA9 50MM" },
-		{ 56, "Community EA9 56MM" },
+		{ 25, "Community EA9 25MM", LENS_CFG_OPTICAL_25MM },
+		{ 28, "Community EA9 28MM", LENS_CFG_OPTICAL_28MM },
+		{ 32, "Community EA9 32MM", LENS_CFG_OPTICAL_32MM },
+		{ 35, "Community EA9 35MM", LENS_CFG_OPTICAL_35MM },
+		{ 40, "Community EA9 40MM", LENS_CFG_OPTICAL_40MM },
+		{ 45, "Community EA9 45MM", LENS_CFG_OPTICAL_45MM },
+		{ 50, "Community EA9 50MM", LENS_CFG_OPTICAL_50MM },
+		{ 56, "Community EA9 56MM", LENS_CFG_OPTICAL_56MM },
 	},
 };
 
@@ -130,6 +133,8 @@ void lens_cfg_apply(uint8_t idx)
 	em_msg_07[EM07_LENS_ID]      = (uint8_t)id;
 	em_msg_07[EM07_LENS_ID + 1u] = (uint8_t)(id >> 8);
 	em_focal_mm10 = (uint16_t)(l->focal_mm * 10u);
+	em_optical_file = (l->optical[0] == 'L' && l->optical[1] == 'F')
+	                  ? l->optical : optical_file;
 	for (i = 0; i < EM3F_NAME_LEN; i++) {
 		if (c) {
 			c = l->name[i];

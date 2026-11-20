@@ -361,6 +361,13 @@ extern volatile uint16_t em_stop_n;  /* how many Stop records have arrived */
  * it.  Defined in emount_packets.c. */
 extern uint16_t em_focal_mm10;
 
+/* The LF file that messages 0x3A/0x3B serve (pl[0] = 00): the optical file of
+ * the lens configuration entry in use, set by lens_cfg_apply.  Starts at
+ * optical_file[], which is also what an entry without a valid file falls back
+ * to.  Read through when 0x3A selects it, so a switch takes effect at the next
+ * selection.  Defined in emount.c. */
+extern const volatile uint8_t *em_optical_file;
+
 /* THE DEFOCUS SCALE: how many protocol position units one defocus unit is
  * worth.  Reported in message 0x06 payload[13..14], and used by everything
  * that moves in defocus units -- Move mode 6, and a Scan whose speed code has

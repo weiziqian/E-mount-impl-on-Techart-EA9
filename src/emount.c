@@ -762,8 +762,9 @@ static void em_send_id(uint8_t id)
 /* MESSAGES 0x3A AND 0x3B: the paged optical file, as Yongnuo 50 DF serves it
  * (FUN_080175e8, reached from its receive dispatcher on class 0x03 only).
  * The body selects a file with 0x3A pl[0] and reads it with 0x3B, one page
- * per request; the content is the DF's, cut to the f/1.8 entry and with its
- * check word recomputed (optical_file.c) -- 296 bytes, one page.
+ * per request.  The LF file is em_optical_file: the optical file of the lens
+ * configuration entry in use (lens_cfg.h), 296 bytes, one page; its fallback
+ * is optical_file.c's, the DF's cut to the f/1.8 entry.
  *
  *   0x3A pl[0] = 00   select the LF file: reply 32 bytes, seq 0, pl[1..2] =
  *                     size + 16, pl[5..6] = pages = (size + 16) / 488 + 1
@@ -787,7 +788,9 @@ static void em_send_id(uint8_t id)
 static volatile uint8_t g_file_pending;
 static volatile uint8_t g_file_id, g_file_p0, g_file_p1;
 
-static const uint8_t *g_file_ptr;   /* the selected object, or none */
+const volatile uint8_t *em_optical_file = optical_file;
+
+static const volatile uint8_t *g_file_ptr;   /* the selected object, or none */
 static uint16_t g_file_size;
 static uint16_t g_file_pages;
 static uint16_t g_file_chunk;       /* 488, or 500 for a whole frame */
@@ -807,9 +810,9 @@ static void em_send_file(uint8_t id, uint8_t p0, uint8_t p1)
 		if (p0 == 0x00u) {
 			uint16_t total;
 
-			g_file_ptr   = optical_file;
-			g_file_size  = (uint16_t)(optical_file[4]
-			                          | (optical_file[5] << 8)) + 16u;
+			g_file_ptr   = em_optical_file;
+			g_file_size  = (uint16_t)(g_file_ptr[4]
+			                          | (g_file_ptr[5] << 8)) + 16u;
 			g_file_chunk = EM_3B_CHUNK;
 			total        = (uint16_t)(g_file_size + 16u);
 			g_file_pages = (uint16_t)(total / EM_3B_CHUNK + 1u);
@@ -841,7 +844,7 @@ static void em_send_file(uint8_t id, uint8_t p0, uint8_t p1)
 
 	if (g_file_ptr) {
 		uint16_t idx = p0 ? (uint16_t)(p0 - 1u) : 0u;
-		const uint8_t *src;
+		const volatile uint8_t *src;
 
 		if (idx >= g_file_pages) {
 			idx = (uint16_t)(g_file_pages - 1u);

@@ -1,12 +1,13 @@
 // LensConfig.cs -- the lens configuration block the firmware reads at boot,
 // built from what the user entered.  spec.md section 5.
 //
-// The layout is struct lens_cfg in src/lens_cfg.h (540 bytes, little-endian):
+// The layout is struct lens_cfg in src/lens_cfg.h (2908 bytes, little-endian):
 //
 //   +0    magic[10]     "CfgAnchor" + NUL
 //   +10   hw_version    1 or 2
 //   +11   pad           0
-//   +12   lens[8]       66 bytes each: focal_mm u16 (0 = unset), name[64]
+//   +12   lens[8]       362 bytes each: focal_mm u16 (0 = unset), name[64],
+//                       optical[296] (OpticalFile.Build; all zero when unset)
 //
 // Encode() must stay identical to pack() in cfgblock.py.
 
@@ -21,6 +22,7 @@ namespace EA9Updater
     {
         public int FocalMm;     // 0 = unset
         public string Name;     // "" when unset
+        public int XpdMm;       // exit pupil, mm; 0 when unset
     }
 
     sealed class LensConfig
@@ -29,9 +31,9 @@ namespace EA9Updater
         public const int SlotCount = 8;
         public const int NameField = 64;        // 63 characters + NUL
         public const int NameMax = NameField - 1;
-        public const int SlotSize = 2 + NameField;
+        public const int SlotSize = 2 + NameField + OpticalFile.Size;   // 362
         public const int HeaderSize = 12;
-        public const int Size = HeaderSize + SlotCount * SlotSize;   // 540
+        public const int Size = HeaderSize + SlotCount * SlotSize;   // 2908
 
         public const int FocalMinMm = 8;
         public const int FocalMaxMm = 600;
@@ -52,12 +54,14 @@ namespace EA9Updater
             Slots = slots;
         }
 
-        // What one row of the form holds: the focal text as typed, and the name.
+        // What one row of the form holds: the focal text as typed, the name,
+        // and the exit pupil chosen (mm, one of OpticalFile.XpdChoices).
         public struct Entry
         {
             public string Focal;
             public string Name;
-            public Entry(string focal, string name) { Focal = focal; Name = name; }
+            public int Xpd;
+            public Entry(string focal, string name, int xpd) { Focal = focal; Name = name; Xpd = xpd; }
         }
 
         // Builds the block from the form, or returns null and says why.
@@ -79,10 +83,10 @@ namespace EA9Updater
 
             var slots = new LensSlot[SlotCount];
             for (int i = 0; i < SlotCount; i++) {
-                slots[i] = new LensSlot { FocalMm = 0, Name = "" };
+                slots[i] = new LensSlot { FocalMm = 0, Name = "", XpdMm = 0 };
             }
             for (int i = 0; i < entries.Count; i++) {
-                string where = single ? "" : string.Format(S.InSlot, i + 1);
+                string where = single ? "" : string.Format(S.InSlot, SlotAperture[i]);
                 string ft = (entries[i].Focal ?? "").Trim();
                 if (ft.Length == 0) {
                     continue;
@@ -107,8 +111,13 @@ namespace EA9Updater
                 if (error != null) {
                     return null;
                 }
+                if (Array.IndexOf(OpticalFile.XpdChoices, entries[i].Xpd) < 0) {
+                    error = string.Format(S.ChooseXpd, where);
+                    return null;
+                }
                 slots[i].FocalMm = mm;
                 slots[i].Name = name;
+                slots[i].XpdMm = entries[i].Xpd;
             }
 
             var set = Enumerable.Range(0, SlotCount).Where(i => slots[i].FocalMm != 0).ToList();
@@ -122,7 +131,7 @@ namespace EA9Updater
             // to the first set slot (lens_cfg.h).
             if (set.Count == 1 && set[0] != 0) {
                 slots[0] = slots[set[0]];
-                slots[set[0]] = new LensSlot { FocalMm = 0, Name = "" };
+                slots[set[0]] = new LensSlot { FocalMm = 0, Name = "", XpdMm = 0 };
             }
             return new LensConfig(hwVersion, slots);
         }
@@ -150,6 +159,9 @@ namespace EA9Updater
                 b[o] = (byte)(Slots[i].FocalMm & 0xFF);
                 b[o + 1] = (byte)(Slots[i].FocalMm >> 8);
                 Encoding.ASCII.GetBytes(Slots[i].Name).CopyTo(b, o + 2);   // NUL-padded
+                if (Slots[i].FocalMm != 0) {
+                    OpticalFile.Build(Slots[i].FocalMm, Slots[i].XpdMm).CopyTo(b, o + 2 + NameField);
+                }
             }
             return b;
         }
@@ -161,12 +173,13 @@ namespace EA9Updater
             sb.AppendFormat(S.DescAdapter + "\n", HwVersion);
             var set = Slots.Where(s => s.FocalMm != 0).ToList();
             if (set.Count == 1) {
-                sb.AppendFormat(S.DescSingle + "\n", Slots[0].FocalMm, Slots[0].Name);
+                sb.AppendFormat(S.DescSingle + "\n", Slots[0].FocalMm, Slots[0].XpdMm, Slots[0].Name);
             } else {
                 for (int i = 0; i < SlotCount; i++) {
                     if (Slots[i].FocalMm != 0) {
                         sb.AppendFormat(S.DescSlot + "\n",
-                                        i + 1, SlotAperture[i], Slots[i].FocalMm, Slots[i].Name);
+                                        i + 1, SlotAperture[i], Slots[i].FocalMm, Slots[i].XpdMm,
+                                        Slots[i].Name);
                     }
                 }
             }
