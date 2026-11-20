@@ -171,6 +171,21 @@ static void lens_restart(void)
 	PORT->Group[0].OUTSET.reg = 1u << EM_PIN_XDETECT;
 }
 
+/* THE BODY'S APERTURE SETTING, BACK TO WIDE OPEN, one step per 0x05 frame
+ * until message 0x03 asks for EM_APERTURE_MAX.  No pacing and no step limit:
+ * a step past wide open is one the body does not take. */
+static void aperture_reset(void)
+{
+	if (em_m03_n == 0) {
+		return;                 /* no 0x03 yet: nothing to judge by */
+	}
+	if (em_m03_aperture > EM_APERTURE_MAX) {
+		em_ap_step = 1;
+	} else {
+		em_ap_reset_due = 0;
+	}
+}
+
 /* The normal-class histogram, at most once.
  *
  * A flash page can be written once between erases, so the two callers -- the
@@ -2192,6 +2207,8 @@ int main(void)
 		 * takes a restart, and that waits for everything else. */
 		if (em_restart_due) {
 			lens_restart();
+		} else if (em_ap_reset_due) {
+			aperture_reset();
 		}
 	}
 }
