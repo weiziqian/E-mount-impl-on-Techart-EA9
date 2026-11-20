@@ -1,14 +1,19 @@
+Firmware 2.3 (20 November 2026)
+
+- Different focal lengths can now be selected with the aperture.
+- Custom exit pupil distance, for better phase-detect AF at different focal lengths.
+- A stricter return to infinity on version 1 adapters.
+
+Known limitations:
+- Only AF-C works; AF-S still misses focus.
+
+==== Previous versions ====
+
 Firmware 2.2 (12 November 2026)
 
 - 4th-generation bodies and newer are now supported!
 - Focus tracking now works during AF-C burst shooting.
 - Improved motor homing at start-up.
-
-Known limitations:
-- Only AF-C works; AF-S still misses focus.
-- AF is tuned for 50 mm lenses only.
-
-==== Previous versions ====
 
 Firmware 2.1 (10 November 2026)
 
