@@ -171,17 +171,35 @@ static void lens_restart(void)
 	PORT->Group[0].OUTSET.reg = 1u << EM_PIN_XDETECT;
 }
 
-/* THE BODY'S APERTURE SETTING, BACK TO WIDE OPEN, one step per 0x05 frame
- * until message 0x03 asks for EM_APERTURE_MAX.  No pacing and no step limit:
- * a step past wide open is one the body does not take. */
+/* THE BODY'S APERTURE SETTING, BACK TO WIDE OPEN: the aperture ring is
+ * reported at f/1.8 until message 0x03 asks for EM_APERTURE_MAX, then back
+ * at A.  A ring position, unlike a step, does not depend on which way the
+ * body counts.
+ *
+ * At most AP_RESET_MS with the ring at f/1.8: a body that ignores it is
+ * then left at A rather than held at f/1.8.  The next capture that ends
+ * away from wide open tries again. */
+#define AP_RESET_MS 1000u
+
+static uint8_t  g_ap_manual;    /* the ring is reported at f/1.8 */
+static uint32_t g_ap_manual_t;  /* millis() when it was first reported */
+
 static void aperture_reset(void)
 {
 	if (em_m03_n == 0) {
 		return;                 /* no 0x03 yet: nothing to judge by */
 	}
-	if (em_m03_aperture > EM_APERTURE_MAX) {
-		em_ap_step = 1;
+	if (em_m03_aperture > EM_APERTURE_MAX
+	    && (!g_ap_manual
+	        || (uint32_t)(millis() - g_ap_manual_t) < AP_RESET_MS)) {
+		if (!g_ap_manual) {
+			g_ap_manual   = 1;
+			g_ap_manual_t = millis();
+		}
+		em_ap_manual(1);
 	} else {
+		em_ap_manual(0);
+		g_ap_manual     = 0;
 		em_ap_reset_due = 0;
 	}
 }

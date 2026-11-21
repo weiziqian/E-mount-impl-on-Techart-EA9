@@ -182,11 +182,10 @@
 #define EM05_FLAG_REPORTS 0x80u
 #define EM05_FLAG_MOVING  0x40u
 
-/* Message 0x05 payload[19] = frame offset 0x19: bit 6 a step this frame, bit 7
- * its sign, set = +1 (lens_aperture_control.md).  Which sign opens the body's
- * aperture is not known; -1 is the guess under test. */
-#define EM05_IRIS_STEP    0x19
-#define EM05_IRIS_STEP_V  0x40u         /* a step of -1 */
+/* Message 0x05 payload[17..19] = frame offsets 0x17..0x19: the aperture set
+ * on the lens, and pl[19] bit 0 "set manually" (lens_aperture_control.md).
+ * All zero is the ring at A, as the template has it. */
+#define EM05_IRIS_MANUAL  0x17
 
 /* Message 0x05 payload[77..80] = frame offsets 0x53..0x56: the row numbers of
  * slots C and D, then two bytes the body stores but does not act on.
@@ -264,7 +263,6 @@ volatile uint16_t em_aperture_req;
 uint16_t          em_aperture_now = EM_APERTURE_MAX;
 volatile uint8_t  em_restart_due;
 volatile uint8_t  em_ap_reset_due = 1;
-volatile uint8_t  em_ap_step;
 static uint8_t    g_m1b_open;    /* a 0x1B arrived; the next 0x0A ends the capture */
 volatile uint16_t em_m03_aperture;
 volatile uint16_t em_m03_n;
@@ -2343,6 +2341,15 @@ static void status05_row_index(void)
 	__enable_irq();
 }
 
+/* The lens's aperture ring: at f/1.8 (on) or at A (off), in message 0x05
+ * pl[17..19]. */
+void em_ap_manual(uint8_t on)
+{
+	em_msg_05[EM05_IRIS_MANUAL]     = on ? (uint8_t)(EM_APERTURE_MAX & 0xFFu) : 0x00u;
+	em_msg_05[EM05_IRIS_MANUAL + 1] = on ? (uint8_t)(EM_APERTURE_MAX >> 8) : 0x00u;
+	em_msg_05[EM05_IRIS_MANUAL + 2] = on ? 0x01u : 0x00u;
+}
+
 /* The status half of em_poll, on its own. */
 void em_pump_status(void)
 {
@@ -2354,11 +2361,6 @@ void em_pump_status(void)
 	em_msg_05[4] = g_reply_seq;
 	em_msg_06[4] = g_reply_seq;
 	status05_row_index();
-	/* The template's pl[19] is 0; a step is written into this one frame
-	 * and taken out again once it is sent. */
-	if (em_ap_step) {
-		em_msg_05[EM05_IRIS_STEP] = EM05_IRIS_STEP_V;
-	}
 
 	delay_us(EM_LEAD_US);
 	if (em_status05_len == EM05_LEN_LONG) {
@@ -2377,11 +2379,6 @@ void em_pump_status(void)
 	} else {
 		em_transmit(em_msg_05, EA9_LEN_05);
 	}
-	if (em_ap_step) {
-		em_msg_05[EM05_IRIS_STEP] = 0x00u;
-		em_ap_step = 0;
-	}
-
 	/* THE TAIL.  Message 0x06 is a 43-byte core plus zero or more tail
 	 * blocks starting at pl[39] = frame offset 0x2D, and the frame grows to
 	 * fit them (msg_0x06.md).  At most one event per frame; the query

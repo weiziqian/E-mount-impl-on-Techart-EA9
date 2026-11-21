@@ -452,10 +452,10 @@ extern volatile uint8_t em_restart_due;
 /* THE BODY'S APERTURE SETTING, BACK TO WIDE OPEN (lens_aperture_control.md).
  * em_ap_reset_due: set at boot, and by the 0x0A that ends a capture shot at
  * anything but EM_APERTURE_MAX; cleared once message 0x03 asks for
- * EM_APERTURE_MAX (main.c, aperture_reset).  em_ap_step: one step wanted;
- * the next 0x05 carries it in pl[19] and clears it. */
+ * EM_APERTURE_MAX (main.c, aperture_reset).  Until then 0x05 reports the
+ * aperture ring at f/1.8, em_ap_manual(1); after, at A, em_ap_manual(0). */
 extern volatile uint8_t em_ap_reset_due;
-extern volatile uint8_t em_ap_step;
+void em_ap_manual(uint8_t on);
 
 /* ------------------------------------------------------------------------
  * MESSAGE 0x08's REQUEST -- captured whole, and the capability bit in it.

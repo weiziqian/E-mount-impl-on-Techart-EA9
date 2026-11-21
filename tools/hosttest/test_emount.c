@@ -2147,6 +2147,24 @@ int main(void)
 			fail("at rest did not clear bit 6 (%#04x)",
 			     em_msg_05[0x1C]);
 		}
+
+		/* pl[17..19]: the aperture ring at f/1.8, "set manually", then
+		 * back at A, all zero as in the template. */
+		if (em_msg_05[0x17] || em_msg_05[0x18] || em_msg_05[0x19]) {
+			fail("the template's aperture ring is not at A");
+		}
+		em_ap_manual(1);
+		if (em_msg_05[0x17] != (EM_APERTURE_MAX & 0xFFu)
+		    || em_msg_05[0x18] != (EM_APERTURE_MAX >> 8)
+		    || em_msg_05[0x19] != 0x01) {
+			fail("ring at f/1.8 sent %02x %02x %02x",
+			     em_msg_05[0x17], em_msg_05[0x18], em_msg_05[0x19]);
+		}
+		em_ap_manual(0);
+		if (em_msg_05[0x17] || em_msg_05[0x18] || em_msg_05[0x19]) {
+			fail("ring back at A sent %02x %02x %02x",
+			     em_msg_05[0x17], em_msg_05[0x18], em_msg_05[0x19]);
+		}
 	}
 
 

@@ -1,13 +1,16 @@
-Firmware 2.3 (20 November 2026)
+Firmware 2.4 (22 November 2026)
 
-- Different focal lengths can now be selected with the aperture.
-- Custom exit pupil distance, for better phase-detect AF at different focal lengths.
-- A stricter return to infinity on version 1 adapters.
+- Fixed aperture stuck at minimum in multi-lens mode.
 
 Known limitations:
 - Only AF-C works; AF-S still misses focus.
 
 ==== Previous versions ====
+
+Firmware 2.3 (20 November 2026)
+- Different focal lengths can now be selected with the aperture.
+- Custom exit pupil distance, for better phase-detect AF at different focal lengths.
+- A stricter return to infinity on version 1 adapters.
 
 Firmware 2.2 (12 November 2026)
 
