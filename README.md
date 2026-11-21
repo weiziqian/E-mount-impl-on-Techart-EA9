@@ -251,6 +251,9 @@ against a real camera unless the note says otherwise.
 
 ## 4. How to use (Ubuntu)
 
+For macOS, see the [Mac updater](tools/mac_updater/README.md) for building the
+app and configuring your lenses before flashing.
+
 ### 4.1 Prerequisites
 
 ```bash
