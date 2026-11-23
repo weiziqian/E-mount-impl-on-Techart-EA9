@@ -98,8 +98,10 @@ void trail_norm(uint32_t page)
 
 /* The body's message 0x08 request, raw.
  *
- * One page for one frame, because that frame carries a capability bit nothing
- * else does and it arrives exactly once per session.  Everything else about
+ * One page for one frame, because it arrives exactly once per session and its
+ * payload is still largely unexplained.  w[3] bits 8..15 keep the raw value
+ * of payload[1] bit 7 (frame byte 7), the bit once read as an aperture
+ * request.  Everything else about
  * 0x08 is in the reply, which is a static blob we send unchanged. */
 void trail_m08(uint32_t page)
 {
@@ -110,7 +112,8 @@ void trail_m08(uint32_t page)
 	w[0] = EM_DIAG_MAGIC;
 	w[1] = EM_DIAG_FORMAT;
 	w[2] = TAG_M08;
-	w[3] = ((uint32_t)em_m08_n << 16) | ((uint32_t)em_m08_aperture_on << 8)
+	w[3] = ((uint32_t)em_m08_n << 16)
+	       | ((uint32_t)(em_m08_len > 7u ? em_m08[7] >> 7 : 0u) << 8)
 	       | em_m08_len;
 	for (i = 0; i < EM_M08_LEN && i < em_m08_len; i++) {
 		w[4 + i / 4] |= (uint32_t)em_m08[i] << (8 * (i % 4));

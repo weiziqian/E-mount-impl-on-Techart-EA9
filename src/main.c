@@ -97,8 +97,8 @@
 #define MODE_PAGE       (CAP_PAGE0 + CAP_PAGES)
 
 /* The body's message 0x08 request, raw.  One page, taken back from the focus
- * list, because that frame arrives once per session and carries the bit that
- * decides whether message 0x28 reports the aperture. */
+ * list, because that frame arrives once per session and is still largely
+ * unexplained. */
 #define M08_PAGE        17u
 
 /* The message 0x34 log, four records a page (m34_pages).  Taken from the

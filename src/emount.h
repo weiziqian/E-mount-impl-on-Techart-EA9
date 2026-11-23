@@ -386,7 +386,7 @@ uint16_t em_defocus_scale(void);
  * aperture: wide open, permanently, and no range for the body to drive.
  *
  * ALL THREE ARE APERTURE VALUES -- the u16 `256 * AV + 4096` scale that
- * message 0x05 payload[0..1] and message 0x28 payload[9..10] carry directly
+ * message 0x05 payload[0..1] and message 0x1B payload[0..1] carry directly
  * (aperture_value.md).  Read one straight off:
  *
  *     AV = (value - 4096) / 256        F = 2^(AV / 2)
@@ -464,19 +464,15 @@ void em_ap_manual(uint8_t on);
  * session ever recorded.  So the first one is the only one, and capturing it
  * is the whole of the observation.
  *
- * Bit 7 of its payload[1] decides whether the lens populates payload[9..10] of
- * messages 0x28 and 0x35.  The bit is inverted: CLEAR means the body wants the
- * field.  A lens latches it when it answers 0x08 and applies it for the rest
- * of the session.
- *
- * Default OFF, which is both the stock's behaviour and the one measured to be
- * correct: filling the field unasked made an a9 II re-meter after every
- * exposure (NOTES.md 92). */
+ * Kept as a record only; nothing reads it.  Bit 7 of payload[1] was taken for
+ * a "fill 0x28 / 0x35 payload[9..10]" request, but the a7C II sets it as a
+ * constant and never consults it, and those bytes are an aperture offset that
+ * this lens always reports as zero (emount.c, EM28_AP_OFFSET).  Filling them
+ * with the aperture made an a9 II re-meter after every exposure. */
 #define EM_M08_LEN 24
 extern volatile uint8_t  em_m08[EM_M08_LEN];   /* the raw request, truncated  */
 extern volatile uint8_t  em_m08_len;           /* how much of it was captured */
 extern volatile uint16_t em_m08_n;             /* how many arrived            */
-extern volatile uint8_t  em_m08_aperture_on;   /* the decoded capability bit  */
 
 /* MESSAGE 0x0A's REQUEST, and the message 0x05 length it selects.
  *

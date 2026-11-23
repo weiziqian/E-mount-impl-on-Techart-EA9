@@ -982,8 +982,8 @@ int main(void)
 		aperture_cmd(0x7B, 4800);          /* restore: 0x1B has been seen */
 
 		/* The aperture 0x1B asked for, now current: message 0x05's
-		 * pair, and message 0x28's copy only when the body's 0x08
-		 * asked. */
+		 * pair.  Message 0x28's pl[9..10] is an aperture offset, not
+		 * this aperture, and stays zero. */
 		{
 			uint16_t a = em_msg_05[6]
 			             | ((uint16_t)em_msg_05[7] << 8);
@@ -991,16 +991,13 @@ int main(void)
 			             | ((uint16_t)em_msg_05[9] << 8);
 			uint16_t got = em_msg_28[0x0F]
 			               | ((uint16_t)em_msg_28[0x10] << 8);
-			uint16_t want = em_m08_aperture_on ? 4800 : 0;
 
 			if (a != 4800 || b != 4800) {
 				fail("message 0x05 aperture %u/%u, expected 4800",
 				     a, b);
 			}
-			if (got != want) {
-				fail("0x28 pl[9..10] is %u with the capability "
-				     "bit %s, expected %u",
-				     got, em_m08_aperture_on ? "on" : "off", want);
+			if (got != 0) {
+				fail("0x28 pl[9..10] is %u, expected 0", got);
 			}
 		}
 
@@ -2168,66 +2165,36 @@ int main(void)
 	}
 
 
-	/* --- message 0x08's capability bit -------------------------------- *
+	/* --- message 0x08's request: recorded, never acted on ------------ *
 	 *
-	 * Bit 7 of the request's pl[1], INVERTED, decides whether message 0x28
-	 * reports the aperture.  Both directions are tested, because the
-	 * inversion is the kind of thing that is half-right: a build that read
-	 * the bit straight would populate the field exactly when it must not.
+	 * pl[1] bit 7 was once read as "fill 0x28 / 0x35 pl[9..10]".  The a7C II
+	 * sets it as a constant and never reads it back, and those bytes are an
+	 * aperture offset this lens reports as zero.  So both values of the bit
+	 * must leave them zero.
 	 */
 	{
 		uint8_t  f[24];
 		uint16_t n = 17;          /* 6 header + 8 payload + 3 trailer */
 		uint16_t before_n = em_m08_n;
+		unsigned pass;
 
-		/* Bit 7 SET -> the body does NOT want it. */
 		memset(f, 0, sizeof(f));
 		f[0] = 0xF0; f[1] = (uint8_t)n; f[3] = 0x02; f[5] = 0x08;
-		f[6] = 0xC2; f[7] = 0xE1;                    /* pl[1] bit 7 set */
+		f[6] = 0xC2;
 		f[n - 1] = 0x55;
-		host_body_frame(f, n);
-		em_poll();
-
-		if (em_m08_n != (uint16_t)(before_n + 1)) {
-			fail("the 0x08 request was not counted");
-		}
-		if (em_m08_aperture_on) {
-			fail("pl[1] bit 7 SET was read as \"the body wants it\"");
-		}
-		if (em_msg_28[0x0F] || em_msg_28[0x10]
-		    || em_msg_35[0x0F] || em_msg_35[0x10]) {
-			fail("0x28/0x35 pl[9..10] was filled although bit 7 was set");
-		}
-
-		/* Bit 7 CLEAR -> it does.  And the field must take effect at
-		 * once: waiting for the next thing that happens to set the
-		 * aperture would leave it zero for the rest of a session in
-		 * which nothing else ever does. */
-		f[4] = 0x01;
-		f[7] = 0x61;                                 /* pl[1] bit 7 clear */
-		host_body_frame(f, n);
-		em_poll();
-
-		if (!em_m08_aperture_on) {
-			fail("pl[1] bit 7 CLEAR was not read as \"wanted\"");
-		}
-		{
-			uint16_t got = em_msg_28[0x0F]
-			               | ((uint16_t)em_msg_28[0x10] << 8);
-
-			if (got != em_aperture_now) {
-				fail("0x28 pl[9..10] is %u, expected the current "
-				     "aperture %u", got, em_aperture_now);
+		for (pass = 0; pass < 2; pass++) {
+			f[4] = (uint8_t)pass;
+			f[7] = pass ? 0x61 : 0xE1;   /* bit 7 set, then clear */
+			host_body_frame(f, n);
+			em_poll();
+			if (em_msg_28[0x0F] || em_msg_28[0x10]
+			    || em_msg_35[0x0F] || em_msg_35[0x10]) {
+				fail("0x28/0x35 pl[9..10] filled with pl[1] = "
+				     "0x%02X", f[7]);
 			}
 		}
-		{
-			uint16_t got = em_msg_35[0x0F]
-			               | ((uint16_t)em_msg_35[0x10] << 8);
-
-			if (got != em_aperture_now) {
-				fail("0x35 pl[9..10] is %u, expected the current "
-				     "aperture %u", got, em_aperture_now);
-			}
+		if (em_m08_n != (uint16_t)(before_n + 2)) {
+			fail("the 0x08 requests were not counted");
 		}
 		/* THE FIRST REQUEST IS THE ONE CAPTURED.  The body sends 0x08
 		 * once per session, so the capture must be the handshake's --
@@ -2240,18 +2207,6 @@ int main(void)
 			fail("a later 0x08 overwrote the first: %u bytes, "
 			     "length field %u", em_m08_len, em_m08[1]);
 		}
-		/* ...while the FLAG does follow the latest, because it is a
-		 * live setting and the capture is a record. */
-		if (em_m08_n < 3) {
-			fail("only %u 0x08 request(s) counted, expected 3",
-			     em_m08_n);
-		}
-
-		/* Put it back the way the rest of the suite expects. */
-		f[4] = 0x02;
-		f[7] = 0xE1;
-		host_body_frame(f, n);
-		em_poll();
 	}
 
 	/* --- the body's capability offer -------------------------------- */

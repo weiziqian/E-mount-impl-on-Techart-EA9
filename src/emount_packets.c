@@ -15,8 +15,7 @@
  *   EM_APERTURE_MAX   0x08 pl[0..1]    (aperture value, the largest opening)
  *   EM_APERTURE_MIN   0x08 pl[2..3]    (aperture value, the smallest opening)
  *
- * Only what changes at run time (positions, status, events, 0x28 pl[9..10],
- * the 0x34 echo) is written by emount.c -- and the focal length, which
+ * Only what changes at run time (positions, status, events, the 0x34 echo) is written by emount.c -- and the focal length, which
  * em_init writes from em_focal_mm10 into 0x05 pl[24..27], 0x08 pl[16..17]
  * (whole mm, BCD), 0x28 pl[4..7] and 0x35 pl[4..7], and the minimum aperture,
  * from em_aperture_min into 0x05 pl[52] and 0x08 pl[2..3].  Both words and
@@ -262,7 +261,8 @@ uint8_t em_msg_28[EA9_LEN_28] = {
  * the same two rows as message 0x28 (msg_0x35.md: the same content, rows split
  * by three bytes).  pl[8] = 01 as Yongnuo and TTArtisan send it (stock ff);
  * the secondary bytes pl[17..19] / pl[26..28] zeroed -- the stock's went with
- * its own rows.  pl[9..10] is written by emount.c, as message 0x28's.
+ * its own rows.  pl[9..10] stays zero, as message 0x28's: an aperture
+ * offset, and this lens loses no aperture (emount.c, EM28_AP_OFFSET).
  * pl[0..3] is the subject distance, as message 0x28's: infinity until
  * emount.c writes it (the stock's 42 01 00 7f was another lens's 0.5 m). */
 uint8_t em_msg_35[EA9_LEN_35] = {
