@@ -5,6 +5,15 @@ macOS app. It writes the same lens configuration as the Windows updater,
 including adapter hardware version, lens names, focal lengths, and exit pupils.
 It supports one lens or up to eight lenses selectable from the camera.
 
+## Download the Apple silicon app
+
+In the repository's **Actions** tab, open a successful
+**Build Apple silicon updater** run.
+Under **Artifacts**, download **Community-EA9-Firmware-Updater-macOS-arm64**
+and unzip it to get **Community EA9 Firmware Updater.app**. GitHub may ask you
+to sign in, and Actions artifacts expire; this is a development build, not a
+signed or notarized release.
+
 ## Use the updater
 
 1. Open **Community EA9 Firmware Updater.app**. Connect the LM-EA9 by USB with

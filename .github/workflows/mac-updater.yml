@@ -1,0 +1,58 @@
+name: Build Apple silicon updater
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Fetch SAM D21 ASF4 headers
+        run: git clone --depth 1 https://github.com/adafruit/asf4.git "$RUNNER_TEMP/asf4"
+      - name: Build release firmware from source
+        env:
+          TOOLCHAIN: arm-none-eabi-
+        run: |
+          ASF4="$RUNNER_TEMP/asf4/samd21" tools/mac_updater/build.sh --firmware-only
+          make hosttest
+          PYTHONPATH=tools/mac_updater:tools/win_updater:tools \
+            python3 -m unittest discover -s tools/mac_updater/tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-updater-firmware-resources
+          path: build/mac_updater/resources/
+          if-no-files-found: error
+
+  mac-app:
+    needs: firmware
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-updater-firmware-resources
+          path: build/mac_updater/resources/
+      - name: Install native Python and Tk
+        run: brew install python@3.12 python-tk@3.12
+      - name: Build Apple silicon app
+        run: |
+          test "$(uname -m)" = arm64
+          python3.12 -m venv tools/mac_updater/.venv
+          tools/mac_updater/.venv/bin/python -m pip install -r tools/mac_updater/requirements-build.txt
+          PYTHON=tools/mac_updater/.venv/bin/python tools/mac_updater/build.sh --package-resources
+          ditto -c -k --sequesterRsrc --keepParent \
+            'tools/mac_updater/out/Community EA9 Firmware Updater.app' \
+            'tools/mac_updater/out/Community EA9 Firmware Updater macOS arm64.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Community-EA9-Firmware-Updater-macOS-arm64
+          path: tools/mac_updater/out/Community EA9 Firmware Updater macOS arm64.zip
+          if-no-files-found: error

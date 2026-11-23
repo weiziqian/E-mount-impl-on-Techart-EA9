@@ -8,12 +8,13 @@ build="$repo/build/mac_updater"
 out="$here/out"
 
 case "${1:-}" in
-    "") firmware_only=0 ;;
-    --firmware-only) firmware_only=1 ;;
-    *) echo "Usage: $0 [--firmware-only]" >&2; exit 2 ;;
+    "") mode=all ;;
+    --firmware-only) mode=firmware ;;
+    --package-resources) mode=package ;;
+    *) echo "Usage: $0 [--firmware-only|--package-resources]" >&2; exit 2 ;;
 esac
 
-if [ "$firmware_only" -eq 0 ]; then
+if [ "$mode" != firmware ]; then
     if [ "$(uname -s)" != Darwin ]; then
         echo "Building the .app requires macOS. Use --firmware-only to build and validate its firmware." >&2
         exit 1
@@ -21,10 +22,15 @@ if [ "$firmware_only" -eq 0 ]; then
     "$python" -c "import PyInstaller, hid, tkinter; print('Tk', tkinter.TkVersion)"
 fi
 
-make -C "$repo" -B release
-PYTHONPATH="$repo/tools:$repo/tools/win_updater" \
-    "$python" "$here/prepare.py" "$repo" "$build/resources"
-[ "$firmware_only" -eq 0 ] || exit 0
+if [ "$mode" != package ]; then
+    make -C "$repo" -B release
+    PYTHONPATH="$repo/tools:$repo/tools/win_updater" \
+        "$python" "$here/prepare.py" "$repo" "$build/resources"
+fi
+[ "$mode" != firmware ] || exit 0
+
+PYTHONPATH="$repo/tools:$repo/tools/win_updater:$here" \
+    "$python" -c 'from pathlib import Path; from firmware import Firmware; import sys; Firmware(Path(sys.argv[1]))' "$build/resources"
 
 app="Community EA9 Firmware Updater"
 "$python" -m PyInstaller --noconfirm --windowed --onedir \
