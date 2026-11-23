@@ -242,7 +242,6 @@ volatile uint8_t  em_shutdown_acked;
  * clears it with em_shutdown_acked. */
 static volatile uint8_t g_m16_seen;
 volatile uint32_t em_t_shutdown;
-volatile uint32_t em_t_revived;
 volatile uint8_t  em_ignored_after_shutdown;
 volatile uint8_t  em_m16_pl0;
 volatile uint16_t em_sleep_n;
@@ -698,7 +697,6 @@ static void em_send_id(uint8_t id)
 		}
 		em_shutdown_acked = 0;
 		g_m16_seen        = 0;
-		em_t_revived      = millis();
 	}
 
 	/* Message 0x16 has a handler but no frame: it is a pure state poke that
@@ -2199,7 +2197,10 @@ void em_init(void)
 
 	/* protocol_init, 0x551c, replicated including the one non-obvious bit:
 	 * our chip select goes high FIRST and stays high across the whole
-	 * bring-up, only dropping 50 ms after the body's first pulse.  The pin
+	 * bring-up, only dropping once the body's first pulse has ended and the
+	 * edge interrupt is armed.  The stock waited a further 50 ms there; the
+	 * body polls our chip select for about 2 s, nothing here needs the
+	 * time, so the wait is gone (unmeasured).  The pin
 	 * is already an output driven low -- board_init_pins did that, and the
 	 * caller must have run it. */
 	PORT->Group[0].OUTSET.reg = (1u << EM_PIN_LENS_CS);
@@ -2306,7 +2307,6 @@ void em_init(void)
 
 	em_eic_init(on_cs_edge, on_vd_edge);
 
-	delay_ms(50);
 	PORT->Group[0].OUTCLR.reg = (1u << EM_PIN_LENS_CS);
 	em_t_init_done = millis();
 }

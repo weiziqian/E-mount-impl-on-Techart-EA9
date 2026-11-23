@@ -96,7 +96,6 @@ void em_poll(void);
 
 extern volatile uint8_t  em_shutdown_acked;  /* 0x16 answered, status loop off */
 extern volatile uint32_t em_t_shutdown;      /* ms when it was answered */
-extern volatile uint32_t em_t_revived;       /* ms a new session reopened us */
 extern volatile uint8_t  em_ignored_after_shutdown;  /* requests left unanswered */
 extern volatile uint8_t  em_m16_pl0;         /* the last 0x16 request's pl[0] */
 extern volatile uint16_t em_sleep_n;         /* standby waits entered */

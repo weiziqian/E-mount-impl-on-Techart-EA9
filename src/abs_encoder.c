@@ -3,7 +3,6 @@
 
 #define ENCSPI  ((Sercom *)ENC_SPI_SERCOM_ADDR)
 
-static uint16_t g_reference;
 
 static int32_t  g_track;        /* unwrapped counts since track_reset */
 static uint16_t g_track_last;   /* raw value at the previous call */
@@ -68,25 +67,6 @@ uint16_t abs_encoder_raw(void)
 
 	/* 0x89a4: ((hi << 8) | lo) >> 2 -- the top 14 bits of a big-endian word */
 	return (uint16_t)((((uint16_t)hi << 8) | lo) >> 2);
-}
-
-void abs_encoder_set_reference(void)
-{
-	g_reference = abs_encoder_raw();
-}
-
-int32_t abs_encoder_position(void)
-{
-	/* 0x8cc0's wrap handling, written plainly: take the shortest signed
-	 * distance from the reference around a 14-bit circle. */
-	int32_t d = (int32_t)abs_encoder_raw() - (int32_t)g_reference;
-
-	if (d > ENC_COUNTS / 2) {
-		d -= ENC_COUNTS;
-	} else if (d < -(ENC_COUNTS / 2)) {
-		d += ENC_COUNTS;
-	}
-	return (d >> 2) + ENC_POS_OFFSET;
 }
 
 void abs_encoder_track_reset(void)

@@ -637,10 +637,17 @@ static uint16_t motor_reset(void)
 	g_move_target = 0;
 	g_move_dir    = -1;
 
-	/* The idle supply, with the bus served throughout: 20 ms of evidence. */
-	t0 = millis();
+	/* Position 0 is wherever the mechanism is now, until the stop found
+	 * below takes its place. */
+	abs_encoder_track_reset();
+
+	/* The idle supply, with the bus served throughout: 20 ms of evidence
+	 * for the RST page, so a debug build only -- in a release it would
+	 * only delay the 0x10 reply. */
 	idle_lo = 0xFFFF;
 	idle_hi = 0;
+#ifndef EA9_NO_LOG
+	t0 = millis();
 	while ((uint32_t)(millis() - t0) < 20u) {
 		uint16_t v = vdd_read_mv();
 
@@ -652,8 +659,10 @@ static uint16_t motor_reset(void)
 		}
 		pump(abs_encoder_track());
 	}
+#endif
 	if (idle_lo > idle_hi) {
 		idle_lo = 0;            /* not sampled */
+		idle_hi = 0;
 	}
 	raw_start = abs_encoder_raw();
 	start     = prev = abs_encoder_track();
@@ -2055,9 +2064,6 @@ int main(void)
 	 * focal length -- the same model as the subject distance. */
 	em_set_min_focus(focus_distance_code(FOCUS_TRAVEL_COUNTS, em_focal_mm10));
 	diag_tally_mark(DIAG_MARK_BUSUP, 0);
-
-	abs_encoder_set_reference();
-	abs_encoder_track_reset();
 
 	/* The boot reset runs when the body first asks 0x10, and 0x10 waits for
 	 * it (em_hold_ready). */

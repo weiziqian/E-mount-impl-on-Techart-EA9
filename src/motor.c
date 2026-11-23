@@ -141,34 +141,3 @@ void motor_drive(int16_t duty)
 		pair_b(0, mag);
 	}
 }
-
-int32_t motor_seek_end(int8_t dir, uint16_t duty,
-                       uint32_t min_run_ms, uint32_t stall_ms,
-                       uint32_t timeout_ms)
-{
-	uint32_t start       = millis();
-	uint32_t last_change = start;
-	int32_t  first       = abs_encoder_position();
-	int32_t  last_pos    = first;
-
-	motor_drive(dir >= 0 ? (int16_t)duty : (int16_t)(-(int32_t)duty));
-
-	for (;;) {
-		uint32_t now = millis();
-		int32_t  p   = abs_encoder_position();
-
-		if (p != last_pos) {
-			last_pos    = p;
-			last_change = now;
-		}
-		if ((now - start) >= min_run_ms && (now - last_change) >= stall_ms) {
-			break;                       /* position frozen -> at an end stop */
-		}
-		if ((now - start) >= timeout_ms) {
-			break;                       /* safety net */
-		}
-	}
-
-	motor_release();
-	return last_pos - first;
-}
