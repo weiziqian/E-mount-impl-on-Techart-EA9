@@ -40,6 +40,7 @@
 TOOLCHAIN ?= $(HOME)/opt/arm-gcc/bin/arm-none-eabi-
 HOSTCC    ?= gcc
 ASF4      ?= $(HOME)/opt/asf4/samd21
+SOURCE_ID  = cat src/*.c src/*.h | python3 -c 'import hashlib, sys; print(hashlib.md5(sys.stdin.buffer.read()).hexdigest()[:6])'
 
 CC      := $(TOOLCHAIN)gcc
 OBJCOPY := $(TOOLCHAIN)objcopy
@@ -135,7 +136,7 @@ else
 	 fi
 	@echo "  verified: no diag_*/trail_*/nvm_log_* symbol -- the image writes no log"
 endif
-	@echo "  source id: $$(cat src/*.c src/*.h | md5sum | cut -c1-6)"
+	@echo "  source id: $$($(SOURCE_ID))"
 
 # `make release` is the same build with BUILD=release; `make debug` is a name
 # for the default so both configurations can be asked for the same way.
@@ -159,7 +160,7 @@ $(OBJDIR)/%.o: src/%.c | $(OBJDIR)
 FORCE:
 $(OBJDIR)/diag.o: src/diag.c FORCE | $(OBJDIR)
 	$(CC) $(CFLAGS) -DDIAG_BUILD_STAMP=$$(date +%s) \
-	  -DDIAG_SRC_ID=0x$$(cat src/*.c src/*.h | md5sum | cut -c1-6) \
+	  -DDIAG_SRC_ID=0x$$($(SOURCE_ID)) \
 	  $(INCLUDES) -c $< -o $@
 
 $(TARGET).elf: $(OBJS)
@@ -168,7 +169,7 @@ $(TARGET).elf: $(OBJS)
 
 $(TARGET).bin: $(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
-	@echo "built $@ ($$(stat -c%s $@) bytes)"
+	@echo "built $@ ($$(wc -c < "$@" | tr -d '[:space:]') bytes)"
 
 # The responder, compiled for the host and driven through scripted body
 # traffic.  It compiles src/emount.c unmodified, so what passes here is the
