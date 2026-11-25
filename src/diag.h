@@ -172,6 +172,9 @@ uint32_t diag_boot_tally(uint32_t rcause);
  * does not.  So a long wait with no frame sync at all says nobody is there.
  * Payload: the number of frame-sync edges seen, saturated at 255. */
 #define DIAG_MARK_NOBODY    0xB6u
+/* The encoder's power-on transient is over (main.c ENC_SETTLE_*).  Payload:
+ * when, in 4 ms units since power-on; 0xFF if it gave up waiting. */
+#define DIAG_MARK_ENCSTABLE 0xBAu
 
 #ifdef EA9_NO_LOG
 static inline void diag_tally_mark(uint8_t code, uint8_t data)

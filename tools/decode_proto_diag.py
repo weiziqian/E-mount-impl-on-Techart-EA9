@@ -173,7 +173,8 @@ def summarise_motor(motr, dry=False):
 
 MARKS = {0xB0: "boot", 0xB2: "bus up", 0xB3: "handshake",
          0xB4: "0x16 acked", 0xB5: "PA23 driven high", 0xB6: "NO BODY",
-         0xB7: "TX driven low", 0xB8: "standby wait", 0xB9: "woke"}
+         0xB7: "TX driven low", 0xB8: "standby wait", 0xB9: "woke",
+         0xBA: "encoder settled"}
 
 
 def summarise_tally(blob, tally_off):
@@ -233,6 +234,9 @@ def summarise_tally(blob, tally_off):
                 n += f" (pl[0]={data:02x})"
             elif code == 0xB8:
                 n += "" if data else " (body TXD never went low)"
+            elif code == 0xBA:
+                n += (" (NOT -- gave up at 500 ms)" if data == 0xFF
+                      else f" (t~{data * 4} ms)")
             elif code == 0xB9:
                 kind = {0x0B: "short init", 0x01: "FULL init"}.get(data, "")
                 n += f" (first id {data:#04x}{', ' + kind if kind else ''})"

@@ -359,6 +359,25 @@ static void trace_page(uint32_t page, unsigned k, const struct servo_result *r);
 #define RST_SETTLE_STILL_MS 40
 #define RST_SETTLE_COUNTS   6
 
+/* THE ENCODER'S POWER-ON TRANSIENT (pin experiment, two boots, 2026-11-25).
+ * For 150-190 ms after power-on the encoder's output swings by thousands of
+ * counts -- one overshoot of either sign, then a ~20 ms exponential tail --
+ * while the mechanism sits still.  Every reading in it looks like a valid
+ * angle.  The a9 II asks 0x10 at 177-202 ms, so the reset began on the tail's
+ * last few counts; a body that asks sooner would home on a phantom movement.
+ *
+ * So the reset waits for the readings to settle: sampled once a millisecond
+ * from the main loop's start (enc_settle_poll), settled once
+ * ENC_SETTLE_WINS consecutive ENC_SETTLE_WIN_MS windows each span at most
+ * ENC_SETTLE_COUNTS (max - min, not end to end: the overshoot's turn can
+ * bring two readings 10 ms apart close together).  ENC_SETTLE_LIMIT_MS
+ * after power-on it gives up waiting and homes anyway.  Only the first
+ * power-on can need it: the encoder stays powered through standby. */
+#define ENC_SETTLE_WIN_MS    10
+#define ENC_SETTLE_COUNTS    4
+#define ENC_SETTLE_WINS      2
+#define ENC_SETTLE_LIMIT_MS  500u
+
 /* How the reset's drive ended -- the trail's MOTR page, w[12] bits 24-31. */
 enum { RST_END_TIMEOUT, RST_END_STILL, RST_END_STOP, RST_END_REVERSED };
 
@@ -617,6 +636,62 @@ static uint8_t home_still_for(struct home_still *st, uint32_t ms,
  * it rests at track position 0.  Returns that raw reading.  A shutdown that
  * cuts it short (g_rst_cut) leaves it unhomed and braked, and the main loop
  * runs it again after the wake. */
+static uint8_t  g_enc_settled;
+static uint8_t  g_enc_win_open;
+static uint8_t  g_enc_wins;
+static uint16_t g_enc_ref;          /* the window's first reading */
+static int32_t  g_enc_lo, g_enc_hi; /* the window's span, from g_enc_ref */
+static uint32_t g_enc_t_last, g_enc_t_win;
+
+/* One sample per millisecond, until settled (ENC_SETTLE_*).  Raw readings,
+ * shortest path from the window's first: the transient can cross the wrap. */
+static void enc_settle_poll(void)
+{
+	uint32_t now = millis();
+	uint16_t raw;
+	int32_t  d;
+
+	if (g_enc_settled || (g_enc_win_open && now == g_enc_t_last)) {
+		return;
+	}
+	if (now >= ENC_SETTLE_LIMIT_MS) {
+		g_enc_settled = 1;
+		diag_tally_mark(DIAG_MARK_ENCSTABLE, 0xFFu);
+		return;
+	}
+	g_enc_t_last = now;
+	raw = abs_encoder_raw();
+	if (!g_enc_win_open) {
+		g_enc_win_open = 1;
+		g_enc_ref   = raw;
+		g_enc_lo    = g_enc_hi = 0;
+		g_enc_t_win = now;
+		return;
+	}
+	d = abs_encoder_delta(raw, g_enc_ref);
+	if (d < g_enc_lo) {
+		g_enc_lo = d;
+	}
+	if (d > g_enc_hi) {
+		g_enc_hi = d;
+	}
+	if ((uint32_t)(now - g_enc_t_win) < ENC_SETTLE_WIN_MS) {
+		return;
+	}
+	g_enc_wins = (g_enc_hi - g_enc_lo <= ENC_SETTLE_COUNTS)
+	             ? (uint8_t)(g_enc_wins + 1) : 0;
+	if (g_enc_wins >= ENC_SETTLE_WINS) {
+		g_enc_settled = 1;
+		/* When, in 4 ms units: 0..250 covers the limit. */
+		diag_tally_mark(DIAG_MARK_ENCSTABLE, (uint8_t)(now / 4u));
+		return;
+	}
+	/* The next window starts on this reading. */
+	g_enc_ref   = raw;
+	g_enc_lo    = g_enc_hi = 0;
+	g_enc_t_win = now;
+}
+
 static uint16_t motor_reset(void)
 {
 	struct home_still   still;
@@ -636,6 +711,13 @@ static uint16_t motor_reset(void)
 	g_moving      = 1;          /* toward infinity */
 	g_move_target = 0;
 	g_move_dir    = -1;
+
+	/* Not before the encoder has settled (ENC_SETTLE_*).  Usually it
+	 * already has, in the main loop; 0x10 stays held meanwhile. */
+	while (!g_enc_settled && !g_rst_cut) {
+		enc_settle_poll();
+		pump(0);                /* unhomed: the position is not used */
+	}
 
 	/* Position 0 is wherever the mechanism is now, until the stop found
 	 * below takes its place. */
@@ -2192,6 +2274,9 @@ int main(void)
 		/* Reset once, on the body's first 0x10, then serve whatever
 		 * focus targets arrive.  A reset cut short by a shutdown is
 		 * run again after the wake: 0x10 is still held. */
+		if (!g_homed) {
+			enc_settle_poll();
+		}
 		if (!g_aborted && !g_homed && em_reset_wanted) {
 			motor_reset();
 		}
