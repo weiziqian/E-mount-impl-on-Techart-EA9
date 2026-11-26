@@ -172,7 +172,7 @@ def summarise_motor(motr, dry=False):
 
 
 MARKS = {0xB0: "boot", 0xB2: "bus up", 0xB3: "handshake",
-         0xB4: "0x16 acked", 0xB5: "PA23 driven high", 0xB6: "NO BODY",
+         0xB4: "0x16 acked", 0xB5: "XDETECT high", 0xB6: "NO BODY",
          0xB7: "TX driven low", 0xB8: "standby wait", 0xB9: "woke",
          0xBA: "encoder settled", 0xBB: "HOME"}
 

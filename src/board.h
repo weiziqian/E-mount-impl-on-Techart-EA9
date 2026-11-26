@@ -72,7 +72,7 @@
 #define EM_EXTINT_BODY_CS       2
 #define EM_EXTINT_BODY_VD       3
 #define EM_PIN_LENS_CS          10     /* PA10, plain GPIO output */
-#define EM_PIN_XDETECT          23     /* PA23, believed XDETECT; held low */
+#define EM_PIN_XDETECT          23     /* PA23, XDETECT: low = lens attached, high = removed */
 
 /* SERCOM1 USART, from _usarts[0] at flash 0x9920 (NOTES.md §13).
  *   CTRLA: MODE=1 internal clock, TXPO=0 (PAD0), RXPO=1 (PAD1),

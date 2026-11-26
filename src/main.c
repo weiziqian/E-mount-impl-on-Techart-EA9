@@ -161,8 +161,8 @@ static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29, 0, 1, 2, 4 };
 
 /* THE LENS RESTART, after the 0x0A that ends a capture with a switch, or
  * shot at f/6.3 (emount.c).
- * Save the new entry -- clearing HOME first if f/6.3 asked -- then raise PA23 (XDETECT) so the body sees the lens
- * removed and attaches it again from cold, loading it -- expected, not yet
+ * Save the new entry -- clearing HOME first if f/6.3 asked -- then raise
+ * XDETECT so the body sees the lens removed and attaches it again from cold, loading it -- expected, not yet
  * measured.  The flash writes stall the CPU for a few ms; nothing is owed
  * the body between that 0x0A and the restart. */
 static void lens_restart(void)
@@ -550,7 +550,7 @@ static void build_marker_page(uint32_t page)
 	w[2] = 0x30595244u;           /* "DRY0" -- coils live */
 	w[3] = 0;
 	w[4] = 7;
-	w[5] = 0x57504C53u;           /* "SLPW" -- bus off, TX low, standby wait; no PA23 */
+	w[5] = 0x41505442u;           /* "BTPA" -- bus off, TX low, XDETECT high */
 	diag_page(page, w, 16);
 }
 
@@ -968,14 +968,17 @@ static uint16_t motor_reset(void)
  * from the SERCOM and drive it low.  Shown on the a9 II to release the body
  * as fast as the stock's PA23 does (NOTES.md §120).
  *
- * Then WAIT, because 0x16 is also how the body enters standby, and nothing in
- * it says which (em_sleep_until_wake, emount.h).  Switching off, the body
- * cuts our power during the wait; in standby it keeps it and wakes us with
- * the pin handshake and a short init at the speed already negotiated.
- * Yongnuo and TTArtisan both do this.
+ * Then XDETECT high, on every hardware version: a complete power off (see
+ * below, and the history that follows).
  *
- * PA23 is NO LONGER DRIVEN.  §122 found a quick re-power-on slower without
- * it, but PA23 is believed to be XDETECT, and releasing that tells the body
+ * The standby wait, kept but not reached: 0x16 is also how the body enters
+ * standby, and nothing in it says which (em_sleep_until_wake, emount.h).
+ * Switching off, the body cuts our power during the wait; in standby it
+ * keeps it and wakes us with the pin handshake and a short init at the speed
+ * already negotiated.  Yongnuo and TTArtisan both do this.
+ *
+ * HISTORY -- before 2026-11-26 XDETECT was NOT DRIVEN here.  §122 found a quick re-power-on slower without
+ * it, but PA23 is XDETECT, and releasing that tells the body
  * the lens has been removed (A7 IV: `LIF_DETACH_DET`, which cuts the lens's
  * logic power).  That made standby work by accident -- every wake became a
  * cold attach -- and is the likeliest reason it was "needed": without it the
@@ -987,7 +990,7 @@ static uint16_t motor_reset(void)
  *   VD sync      the stock waits for two frame-sync pulses first.  The body
  *                does not look at VD here, so the wait only delayed RXD low,
  *                by up to 500 ms when VD had already stopped (§121).
- *   halt         replaced by the standby wait.
+ *   halt         the body cuts the power instead.
  */
 static void powerdown_signal(void)
 {
@@ -1010,20 +1013,28 @@ static void powerdown_signal(void)
 	PORT->Group[0].PINCFG[EM_PIN_TX].reg &= ~(uint8_t)PORT_PINCFG_PMUXEN;
 	diag_tally_mark(DIAG_MARK_TXLOW, 0);
 
-	/* HARDWARE VERSION 1: the shutdown from before standby (faeaf91) --
-	 * PA23 (XDETECT) high, so the body sees the lens removed and cuts the
-	 * power, and no standby wait.  No halt either, as then: the body cuts
-	 * power.
+	/* XDETECT HIGH, ON EVERY HARDWARE VERSION (user's, 2026-11-26).
 	 *
-	 * Why: version 1 has no margin at infinity focus, so every wake from
-	 * standby should run the boot reset again, to be sure of taking the
-	 * minimum position each time (motor_reset).  The cost: the camera
-	 * cannot wake quickly from standby -- every wake is a cold start.
-	 * Since the stored HOME (2026-11-26) that cold start takes the stop
-	 * from flash and resets only without a valid record. */
-	if (lens_cfg_hw_version() == 1) {
+	 * Purpose: driving XDETECT (PA23) high imitates taking the lens off
+	 * during shutdown, so the body cuts the lens power -- a complete power
+	 * off.  No halt follows, as before standby (faeaf91): the body cuts
+	 * the power.
+	 *
+	 * Drawback: the standby wait below is never reached, so a wake from
+	 * standby is always a cold start.  The stored HOME keeps that cheap:
+	 * the stop comes from flash, and the reset runs only without a valid
+	 * record.
+	 *
+	 * Why: in standby the encoder's supply cannot be cut (pintest, PA16
+	 * and PA11 ruled out), so standby still drains the camera's battery;
+	 * only the complete power off avoids it.  Until now this was hardware
+	 * version 1 only, so that version 1, with no margin at infinity,
+	 * re-homed on every wake.
+	 *
+	 * The standby wait is kept, to be switched back on here. */
+	if (1) {
 		PORT->Group[0].OUTSET.reg = 1u << EM_PIN_XDETECT;
-		diag_tally_mark(DIAG_MARK_PA23, 0);
+		diag_tally_mark(DIAG_MARK_XDETECT, 0);
 		return;
 	}
 
