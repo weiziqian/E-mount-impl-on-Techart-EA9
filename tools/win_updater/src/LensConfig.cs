@@ -38,12 +38,15 @@ namespace EA9Updater
         public const int FocalMinMm = 8;
         public const int FocalMaxMm = 600;
         public const string DefaultName = "Community EA9 Adapter";
-        public const int DefaultSingleFocalMm = 50;
         public static readonly int[] HwVersions = { 2, 1 };          // the first is the default
 
         // The aperture that selects each slot on the camera (lens_cfg.c AP_SEL).
         public static readonly string[] SlotAperture =
             { "f2.5", "f2.8", "f3.2", "f3.5", "f4.0", "f4.5", "f5.0", "f5.6" };
+
+        // A shot at this aperture resets the motor homing (the minimum
+        // aperture, firmware emount.h EM_APERTURE_MIN, lens_cfg.h).
+        public const string HomeResetAperture = "f6.3";
 
         public int HwVersion;
         public readonly LensSlot[] Slots;
@@ -65,11 +68,11 @@ namespace EA9Updater
         }
 
         // Builds the block from the form, or returns null and says why.
-        //   single: entries has one element, which becomes slot 0.
-        //   empty focal -> 0 and no name; focal set but no name -> DefaultName;
-        //   exactly one slot set -> it moves to slot 0; none set -> error.
-        //   Several set: they stay where they are, slot 0 may be empty.
-        public static LensConfig FromForm(int hwVersion, bool single, IList<Entry> entries,
+        //   entries: one per slot.  Empty focal -> 0 and no name; focal set
+        //   but no name -> DefaultName; none set -> error.  Set slots stay
+        //   where they are, slot 0 may be empty: the firmware falls back to
+        //   the first set slot (lens_cfg.h).
+        public static LensConfig FromForm(int hwVersion, IList<Entry> entries,
                                           out string error)
         {
             error = null;
@@ -77,7 +80,7 @@ namespace EA9Updater
                 error = S.ChooseHwVersion;
                 return null;
             }
-            if (single ? entries.Count != 1 : entries.Count != SlotCount) {
+            if (entries.Count != SlotCount) {
                 throw new ArgumentException("entries");
             }
 
@@ -86,7 +89,7 @@ namespace EA9Updater
                 slots[i] = new LensSlot { FocalMm = 0, Name = "", XpdMm = 0 };
             }
             for (int i = 0; i < entries.Count; i++) {
-                string where = single ? "" : string.Format(S.InSlot, SlotAperture[i]);
+                string where = string.Format(S.InSlot, SlotAperture[i]);
                 string ft = (entries[i].Focal ?? "").Trim();
                 if (ft.Length == 0) {
                     continue;
@@ -122,21 +125,13 @@ namespace EA9Updater
 
             var set = Enumerable.Range(0, SlotCount).Where(i => slots[i].FocalMm != 0).ToList();
             if (set.Count == 0) {
-                error = single
-                    ? S.NoLensSingle
-                    : S.NoLensMultiple;
+                error = S.NoLens;
                 return null;
-            }
-            // With several set, slot 0 may be empty: the firmware falls back
-            // to the first set slot (lens_cfg.h).
-            if (set.Count == 1 && set[0] != 0) {
-                slots[0] = slots[set[0]];
-                slots[set[0]] = new LensSlot { FocalMm = 0, Name = "", XpdMm = 0 };
             }
             return new LensConfig(hwVersion, slots);
         }
 
-        // Null if the name is acceptable, else why not.  where: S.InSlot or "".
+        // Null if the name is acceptable, else why not.  where: S.InSlot.
         public static string CheckName(string name, string where)
         {
             if (name.Length > NameMax) {
@@ -171,16 +166,11 @@ namespace EA9Updater
         {
             var sb = new StringBuilder();
             sb.AppendFormat(S.DescAdapter + "\n", HwVersion);
-            var set = Slots.Where(s => s.FocalMm != 0).ToList();
-            if (set.Count == 1) {
-                sb.AppendFormat(S.DescSingle + "\n", Slots[0].FocalMm, Slots[0].XpdMm, Slots[0].Name);
-            } else {
-                for (int i = 0; i < SlotCount; i++) {
-                    if (Slots[i].FocalMm != 0) {
-                        sb.AppendFormat(S.DescSlot + "\n",
-                                        i + 1, SlotAperture[i], Slots[i].FocalMm, Slots[i].XpdMm,
-                                        Slots[i].Name);
-                    }
+            for (int i = 0; i < SlotCount; i++) {
+                if (Slots[i].FocalMm != 0) {
+                    sb.AppendFormat(S.DescSlot + "\n",
+                                    i + 1, SlotAperture[i], Slots[i].FocalMm, Slots[i].XpdMm,
+                                    Slots[i].Name);
                 }
             }
             return sb.ToString();

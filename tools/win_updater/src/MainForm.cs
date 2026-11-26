@@ -1,5 +1,5 @@
 // MainForm.cs -- the one window: release notes, hardware version, the lens
-// configuration (one focal length, or up to eight selected by aperture), and
+// configuration (up to eight focal lengths, selected by aperture), and
 // a button that writes the firmware.  Laid out in code (no designer), so it
 // builds on Linux.  spec.md section 4.
 
@@ -20,21 +20,12 @@ namespace EA9Updater
         readonly TextBox notes;
         readonly Label hwLabel;
         readonly LinkLabel hwHelp;
-        readonly Label focalModeLabel;
         readonly LinkLabel focalHelp;
         readonly Label[] slotHeads = new Label[4];
         readonly Label deviceLabel;
         readonly ComboBox hwVersion;
-        readonly RadioButton multiRadio;
-        readonly RadioButton singleRadio;
-        readonly Label singleFocalLabel;
-        readonly TextBox singleFocal;
-        readonly Label singleXpdLabel;
-        readonly ComboBox singleXpd;
-        readonly LinkLabel singleXpdHelp;
         readonly LinkLabel slotXpdHelp;
-        readonly Label singleNameLabel;
-        readonly TextBox singleName;
+        readonly Label homeResetText;
         readonly TableLayoutPanel slotGrid;
         readonly TextBox[] slotFocal = new TextBox[LensConfig.SlotCount];
         readonly TextBox[] slotName = new TextBox[LensConfig.SlotCount];
@@ -71,7 +62,7 @@ namespace EA9Updater
             var t = new TableLayoutPanel {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 12,
+                RowCount = 8,
                 Padding = new Padding(12),
             };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -79,15 +70,11 @@ namespace EA9Updater
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 0 notes label
             t.RowStyles.Add(new RowStyle(SizeType.Percent, 100));     // 1 notes
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 2 hardware version
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 3 single / multiple
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 4 single: focal
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 5 single: exit pupil
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 6 single: name
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 7 multiple: slot table
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 8 multiple: exit pupil help
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 9 adapter
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 10 button + bar
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 11 status
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 3 slot table
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 4 help links
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 5 adapter
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 6 button + bar
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));         // 7 status
 
             notesLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Bottom,
                                      Margin = new Padding(3, 0, 3, 3) };
@@ -135,75 +122,43 @@ namespace EA9Updater
             t.Controls.Add(hwLabel, 0, 2);
             t.Controls.Add(hwRow, 1, 2);
 
-            multiRadio = new RadioButton { AutoSize = true, Checked = true };
-            singleRadio = new RadioButton { AutoSize = true,
-                                            Margin = new Padding(16, 3, 3, 3) };
-            multiRadio.CheckedChanged += (s, e) => ShowLensMode();
-            var modes = new FlowLayoutPanel { AutoSize = true, WrapContents = false,
-                                              Anchor = AnchorStyles.Left, Margin = new Padding(0) };
-            modes.Controls.Add(multiRadio);
-            modes.Controls.Add(singleRadio);
-            focalHelp = HelpLink(HelpPage.FocalLength);
-            modes.Controls.Add(focalHelp);
-            focalModeLabel = FieldLabel();
-            t.Controls.Add(focalModeLabel, 0, 3);
-            t.Controls.Add(modes, 1, 3);
-
-            singleFocal = FocalBox();
-            singleFocal.Text = LensConfig.DefaultSingleFocalMm.ToString();
-            singleFocalLabel = FieldLabel();
-            t.Controls.Add(singleFocalLabel, 0, 4);
-            t.Controls.Add(singleFocal, 1, 4);
-
-            singleXpd = XpdBox();
-            SelectXpd(singleXpd, LensConfig.DefaultSingleFocalMm);
-            singleFocal.TextChanged += (s, e) => AutoXpd(singleFocal, singleXpd);
-            singleXpdHelp = HelpLink(HelpPage.ExitPupil);
-            var xpdRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false,
-                                               Anchor = AnchorStyles.Left, Margin = new Padding(0) };
-            xpdRow.Controls.Add(singleXpd);
-            xpdRow.Controls.Add(singleXpdHelp);
-            singleXpdLabel = FieldLabel();
-            t.Controls.Add(singleXpdLabel, 0, 5);
-            t.Controls.Add(xpdRow, 1, 5);
-
-            singleName = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right,
-                                       MaxLength = LensConfig.NameMax,
-                                       Text = LensConfig.DefaultName };
-            singleNameLabel = FieldLabel();
-            t.Controls.Add(singleNameLabel, 0, 6);
-            t.Controls.Add(singleName, 1, 6);
-
+            homeResetText = new Label { AutoSize = true, Anchor = AnchorStyles.Left,
+                                        Margin = new Padding(6, 6, 6, 6) };
             slotGrid = SlotGrid();
-            t.Controls.Add(slotGrid, 0, 7);
+            t.Controls.Add(slotGrid, 0, 3);
             t.SetColumnSpan(slotGrid, 2);
 
+            // Under the table, right-aligned: how to switch lenses, and how
+            // to choose the exit pupil.
+            focalHelp = HelpLink(HelpPage.FocalLength);
             slotXpdHelp = HelpLink(HelpPage.ExitPupil);
-            slotXpdHelp.Margin = new Padding(3, 0, 3, 6);
-            slotXpdHelp.Anchor = AnchorStyles.Right;
-            t.Controls.Add(slotXpdHelp, 0, 8);
-            t.SetColumnSpan(slotXpdHelp, 2);
+            var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false,
+                                              Anchor = AnchorStyles.Right,
+                                              Margin = new Padding(3, 0, 3, 6) };
+            links.Controls.Add(focalHelp);
+            links.Controls.Add(slotXpdHelp);
+            t.Controls.Add(links, 0, 4);
+            t.SetColumnSpan(links, 2);
 
             device = new Label { AutoSize = true, Anchor = AnchorStyles.Left,
                                  Margin = new Padding(3, 8, 3, 8) };
             deviceLabel = FieldLabel();
-            t.Controls.Add(deviceLabel, 0, 9);
-            t.Controls.Add(device, 1, 9);
+            t.Controls.Add(deviceLabel, 0, 5);
+            t.Controls.Add(device, 1, 5);
 
             writeButton = new Button { AutoSize = true,
                                        Padding = new Padding(8, 2, 8, 2) };
             writeButton.Click += OnWrite;
             bar = new ProgressBar { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100 };
-            t.Controls.Add(writeButton, 0, 10);
-            t.Controls.Add(bar, 1, 10);
+            t.Controls.Add(writeButton, 0, 6);
+            t.Controls.Add(bar, 1, 6);
 
             status = new Label { AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
-            t.Controls.Add(status, 0, 11);
+            t.Controls.Add(status, 0, 7);
             t.SetColumnSpan(status, 2);
 
             Controls.Add(t);
             AcceptButton = writeButton;
-            ShowLensMode();
 
             try {
                 fw = Firmware.LoadEmbedded();
@@ -233,15 +188,10 @@ namespace EA9Updater
                 notes.Text = string.Format(S.NotesUnavailable, ex.Message);
             }
             hwLabel.Text = S.AdapterVersion;
-            hwHelp.Text = focalHelp.Text = S.HowToChoose;
-            singleXpdHelp.Text = S.HowToChoose;
+            hwHelp.Text = S.HowToChoose;
+            focalHelp.Text = S.HowToSwitch;
             slotXpdHelp.Text = S.HowToChooseXpd;
-            focalModeLabel.Text = S.FocalLength;
-            multiRadio.Text = S.MultipleLenses;
-            singleRadio.Text = S.SingleLens;
-            singleFocalLabel.Text = S.FocalLengthMm;
-            singleXpdLabel.Text = S.ExitPupilMm;
-            singleNameLabel.Text = S.LensName;
+            homeResetText.Text = S.HomeReset;
             slotHeads[0].Text = S.ColAperture;
             slotHeads[1].Text = S.ColFocal;
             slotHeads[2].Text = S.ColName;
@@ -253,14 +203,15 @@ namespace EA9Updater
             ResumeLayout(true);
         }
 
-        // The multiple-focal-length table: the aperture that selects the
-        // slot, focal length, name, exit pupil.  The name and the exit pupil
-        // are shown only once the slot has a focal length above 0.
+        // The lens table: the aperture that selects the slot, focal length,
+        // name, exit pupil.  The name and the exit pupil are shown only once
+        // the slot has a focal length above 0.  A last row, text only, says
+        // what f6.3 does (LensConfig.HomeResetAperture).
         TableLayoutPanel SlotGrid()
         {
             var g = new TableLayoutPanel {
                 ColumnCount = 4,
-                RowCount = LensConfig.SlotCount + 1,
+                RowCount = LensConfig.SlotCount + 2,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Dock = DockStyle.Top,
@@ -271,7 +222,7 @@ namespace EA9Updater
             g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             g.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            for (int r = 0; r <= LensConfig.SlotCount; r++) {
+            for (int r = 0; r <= LensConfig.SlotCount + 1; r++) {
                 g.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             }
             for (int c = 0; c < slotHeads.Length; c++) {
@@ -303,6 +254,10 @@ namespace EA9Updater
                 g.Controls.Add(n, 2, i + 1);
                 g.Controls.Add(x, 3, i + 1);
             }
+            int last = LensConfig.SlotCount + 1;
+            g.Controls.Add(CellLabel(LensConfig.HomeResetAperture), 0, last);
+            g.Controls.Add(homeResetText, 1, last);
+            g.SetColumnSpan(homeResetText, 3);
             return g;
         }
 
@@ -386,17 +341,6 @@ namespace EA9Updater
             return int.TryParse(b.Text, out v) ? v : 0;
         }
 
-        void ShowLensMode()
-        {
-            bool single = singleRadio.Checked;
-            SuspendLayout();
-            singleFocalLabel.Visible = singleFocal.Visible = single;
-            singleXpdLabel.Visible = singleXpd.Visible = singleXpdHelp.Visible = single;
-            singleNameLabel.Visible = singleName.Visible = single;
-            slotGrid.Visible = slotXpdHelp.Visible = !single;
-            ResumeLayout(true);
-        }
-
         void UpdateSlotNames()
         {
             bool on = !busy && fw != null;
@@ -410,8 +354,7 @@ namespace EA9Updater
 
         void SetInputsEnabled(bool on)
         {
-            hwVersion.Enabled = multiRadio.Enabled = singleRadio.Enabled = on;
-            singleFocal.Enabled = singleXpd.Enabled = singleName.Enabled = on;
+            hwVersion.Enabled = on;
             foreach (var f in slotFocal) {
                 f.Enabled = on;
             }
@@ -422,18 +365,13 @@ namespace EA9Updater
         // telling the user why) if it cannot be written.
         LensConfig ReadConfig()
         {
-            bool single = singleRadio.Checked;
             var entries = new List<LensConfig.Entry>();
-            if (single) {
-                entries.Add(new LensConfig.Entry(singleFocal.Text, singleName.Text, XpdValue(singleXpd)));
-            } else {
-                for (int i = 0; i < LensConfig.SlotCount; i++) {
-                    entries.Add(new LensConfig.Entry(slotFocal[i].Text, slotName[i].Text,
-                                                     XpdValue(slotXpd[i])));
-                }
+            for (int i = 0; i < LensConfig.SlotCount; i++) {
+                entries.Add(new LensConfig.Entry(slotFocal[i].Text, slotName[i].Text,
+                                                 XpdValue(slotXpd[i])));
             }
             string error;
-            var cfg = LensConfig.FromForm(int.Parse((string)hwVersion.SelectedItem), single,
+            var cfg = LensConfig.FromForm(int.Parse((string)hwVersion.SelectedItem),
                                           entries, out error);
             if (cfg == null) {
                 MessageBox.Show(this, error, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);

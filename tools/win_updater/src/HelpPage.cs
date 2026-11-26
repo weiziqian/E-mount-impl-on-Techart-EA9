@@ -1,5 +1,5 @@
-// HelpPage.cs -- the pages the "How to choose?" links open: one next to the
-// adapter version, one next to the focal length, and one for the exit pupil.
+// HelpPage.cs -- the pages the help links open: one next to the adapter
+// version, and two under the lens table (switching lenses, the exit pupil).
 // spec.md section 4.
 
 using System;
@@ -21,12 +21,11 @@ namespace EA9Updater
                 S.HelpHowToChoose, S.HelpAdapterChoose);
         }
 
-        // Single Lens or Multiple Lenses.
+        // Switching lenses by aperture, and resetting the homing at f6.3.
         public static HelpPage FocalLength()
         {
-            return new HelpPage(S.HelpFocalTitle, null,
-                S.SingleLens, S.HelpSingleText,
-                S.MultipleLenses, S.HelpMultipleText);
+            return new HelpPage(S.HelpFocalTitle, null, null, S.HelpMultipleText,
+                                null, S.HelpHomeResetText);
         }
 
         // What the exit pupil is for, and which value to pick.

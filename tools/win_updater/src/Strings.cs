@@ -24,16 +24,12 @@ namespace EA9Updater
         public static string HowToChoose { get { return T("How to choose?", "如何选择？"); } }
         public static string HowToChooseXpd { get { return T("How to choose the exit pupil?",
                                                              "如何选择出瞳距离？"); } }
-        public static string FocalLength { get { return T("Focal length", "焦距"); } }
-        public static string MultipleLenses { get { return T("Multiple Lenses", "多镜头"); } }
-        public static string SingleLens { get { return T("Single Lens", "单镜头"); } }
-        public static string FocalLengthMm { get { return T("Focal length (mm)", "焦距 (mm)"); } }
-        public static string LensName { get { return T("Lens name", "镜头名称"); } }
+        public static string HowToSwitch { get { return T("How to switch lenses?", "如何切换镜头？"); } }
         public static string ColAperture { get { return T("Aperture", "光圈"); } }
         public static string ColFocal { get { return T("Focal Length (mm)", "焦距 (mm)"); } }
         public static string ColName { get { return T("Lens Name", "镜头名称"); } }
         public static string ColXpd { get { return T("Exit Pupil (mm)", "出瞳距离 (mm)"); } }
-        public static string ExitPupilMm { get { return T("Exit pupil (mm)", "出瞳距离 (mm)"); } }
+        public static string HomeReset { get { return T("Reset motor homing", "重置马达归位"); } }
         public static string Adapter { get { return T("Adapter", "转接环"); } }
         public static string WriteFirmware { get { return T("Write firmware", "写入固件"); } }
 
@@ -98,11 +94,7 @@ namespace EA9Updater
             "Only if your adapter is version 1 hardware (see the picture) " +
             "and it cannot focus at infinity, try version 1.",
             "只有当你的转接环是版本 1 的硬件（见上图），并且无法对焦到无穷远时，才尝试选择版本 1。"); } }
-        public static string HelpFocalTitle { get { return T("Focal Length", "焦距"); } }
-        public static string HelpSingleText { get { return T(
-            "Choose this if you only use one lens. The aperture is then fixed while you " +
-            "shoot, so it cannot be changed by mistake.",
-            "如果你只使用一支镜头，请选择这一项。拍摄时光圈固定不变，不会被误操作改动。"); } }
+        public static string HelpFocalTitle { get { return T("Switching Lenses", "切换镜头"); } }
         public static string HelpMultipleText { get { return T(
             "Enter each lens's details in the row of the aperture you want to use for it. " +
             "To change lenses, set the camera to that aperture and press the shutter: the " +
@@ -110,6 +102,12 @@ namespace EA9Updater
             "aperture back to its widest value before you shoot again.",
             "把每支镜头的信息填在你想用来选择它的那个光圈所在的行。换镜头时，把相机设为对应的光圈" +
             "并按下快门：转接环会重启，并切换到这支镜头的信息。再次拍摄前，记得把光圈调回最大。"); } }
+        public static string HelpHomeResetText { get { return T(
+            "f6.3 resets the motor homing: set the camera to f6.3 and press the shutter. The " +
+            "adapter restarts and finds its infinity end stop again. Do this if focus at " +
+            "infinity is off.",
+            "f6.3 用来重置马达归位：把相机设为 f6.3 并按下快门，转接环会重启，并重新寻找无穷远限位。" +
+            "如果无穷远对焦不准，可以这样做一次。"); } }
 
         public static string HelpXpdTitle { get { return T("Exit Pupil", "出瞳距离"); } }
         public static string HelpXpdText { get { return T(
@@ -129,8 +127,7 @@ namespace EA9Updater
 
         // ---- lens configuration
         public static string ChooseHwVersion { get { return T("Choose a hardware version.", "请选择硬件版本。"); } }
-        // Where an error is, put in front of the messages below: nothing for
-        // the single lens, the slot for multiple lenses.
+        // Where an error is, put in front of the messages below: the slot.
         public static string InSlot { get { return T(" in the {0} row", "{0} 那一行的"); } }
         public static string FocalWhole { get { return T("The focal length{0} must be a whole number of millimetres.",
                                                          "{0}焦距必须是整数（单位 mm）。"); } }
@@ -141,15 +138,11 @@ namespace EA9Updater
         public static string NameAscii { get { return T(
             "The lens name{0} can only use English letters, digits, spaces and common symbols.",
             "{0}镜头名称只允许输入英文字母、数字和符号。"); } }
-        public static string NoLensSingle { get { return T("No lens is configured: enter a focal length.",
-                                                           "尚未配置镜头：请输入焦距。"); } }
-        public static string NoLensMultiple { get { return T(
+        public static string NoLens { get { return T(
             "No lens is configured: enter the focal length of at least one slot.",
             "尚未配置镜头：请至少在一行中输入焦距。"); } }
         public static string DescAdapter { get { return T("Adapter version: {0}", "转接环版本：{0}"); } }
         public static string ChooseXpd { get { return T("Choose an exit pupil{0}.", "请选择{0}出瞳距离。"); } }
-        public static string DescSingle { get { return T("Single lens: {0} mm, exit pupil {1} mm, \"{2}\"",
-                                                         "单镜头：{0} mm，出瞳 {1} mm，“{2}”"); } }
         // {0}, the slot number, is not shown: the window names rows by aperture.
         public static string DescSlot { get { return T("{1}: {2} mm, exit pupil {3} mm, \"{4}\"",
                                                        "{1}：{2} mm，出瞳 {3} mm，“{4}”"); } }

@@ -43,11 +43,7 @@ Top to bottom:
    - a picture telling the two apart (`assets/hw_version.jpg`, embedded): version 1 has a single continuous metal spring strip, version 2 a separate triangular block;
    - **What is the difference**: version 1 has less room past infinity, so to focus at infinity it must retract to its end stop; version 2 need not, which is easier on the mechanism;
    - **How to choose**: version 2, unless the adapter is version 1 hardware and cannot focus at infinity.
-3. **Focal length**: radio buttons, **Multiple Lenses** (default) or **Single Lens**, and, in **Single** only, a "How to choose?" link that opens a help page (`src/HelpPage.cs`):
-   - **Single Lens**: for one lens; the aperture is fixed while shooting, so it cannot be changed by mistake;
-   - **Multiple Lenses**: enter each lens in the row of the aperture chosen for it; to change lenses, set that aperture and press the shutter, and the adapter restarts with that lens; then set the aperture back to its widest. Only the inputs of the chosen mode are shown:
-   - **Single**: a focal length box (default `50`), an exit pupil drop-down and a lens name box (default `Community EA9 Adapter`).
-   - **Multiple**: a table with one row per slot:
+3. **Lens table**: one row per slot. Enter each lens in the row of the aperture chosen for it; to change lenses, set that aperture and press the shutter, and the adapter restarts with that lens; then set the aperture back to its widest.
 
      | Column | Content |
      |---|---|
@@ -56,9 +52,13 @@ Top to bottom:
      | Lens Name | input, empty by default; hidden while the slot's focal length is empty or 0 |
      | Exit Pupil (mm) | drop-down, `25 30 35 40 45 50 55 60 70`; hidden while the slot's focal length is empty or 0 |
 
-   Below the table, on its own line and right-aligned, a "How to choose the exit pupil?" link opens a help page (what the exit pupil is for; keep the preselected value unless the lens's is known; try the neighbours if off-centre focus is consistently off). In **Single** the same page opens from a plain "How to choose?" link next to the exit pupil drop-down.
+   A last row, `f6.3`, has no inputs, only the text **Reset motor homing**: a shot at f6.3 clears the adapter's stored homing, and it restarts and finds the infinity stop again.
 
-   **Exit pupil preselection.** Whenever a focal length changes (in either mode), its exit pupil drop-down is set from it: ≤ 30 mm → 30, ≤ 35 → 35, ≤ 40 → 40, ≤ 50 → 45, ≤ 60 → 50, otherwise 60 (`OpticalFile.AutoXpd`, `gen_optical.py auto_xpd`). The user may then pick another value; it is kept until the focal length changes again.
+   Below the table, on its own line and right-aligned, two links:
+   - "How to switch lenses?" opens a help page: switching by aperture, as above, and what f6.3 does;
+   - "How to choose the exit pupil?" opens a help page (what the exit pupil is for; keep the preselected value unless the lens's is known; try the neighbours if off-centre focus is consistently off).
+
+   **Exit pupil preselection.** Whenever a focal length changes, its exit pupil drop-down is set from it: ≤ 30 mm → 30, ≤ 35 → 35, ≤ 40 → 40, ≤ 50 → 45, ≤ 60 → 50, otherwise 60 (`OpticalFile.AutoXpd`, `gen_optical.py auto_xpd`). The user may then pick another value; it is kept until the focal length changes again.
 
    Input rules are in section 5.3.
 4. **Adapter**: connection state and bootloader version (see "Adapter detection" below).
@@ -108,8 +108,8 @@ The optical file is built by the updater from the slot's focal length and exit p
 The firmware serves the file of the slot in use through messages 0x3A/0x3B (`lens_cfg_apply` sets `em_optical_file`); a slot whose file does not start with `LF` falls back to the built-in `optical_file[]`.
 
 At boot the firmware reads the block (`lens_cfg_boot`):
-- If any slot 1..7 is set, it is a multiple-focal-length lens: on the camera, setting the aperture of a slot (f/2.5 … f/5.6) and taking a picture switches to that slot. If the saved slot is missing or not set, the firmware uses the first set slot, searching up from slot 0. So slot 0 may be empty when several slots are set.
-- If only slot 0 is set, it is a single lens at f/1.8.
+- On the camera, setting the aperture of a slot (f/2.5 … f/5.6) and taking a picture switches to that slot. If the saved slot is missing or not set, the firmware uses the first set slot, searching up from slot 0. So slot 0 may be empty. One set slot is simply a single lens.
+- The minimum aperture is f/6.3, whatever is set; a picture at f/6.3 clears the stored homing (the firmware's HOME record) and restarts the adapter.
 
 ### 5.2 What the updater does
 
@@ -123,15 +123,13 @@ No other checksum needs fixing: the firmware recomputes frame checksums on every
 
 Applied in this order (`LensConfig.FromForm` in `src/LensConfig.cs`):
 
-1. **Single Lens** is slot 0; slots 1..7 are written as unset.
-2. A slot whose focal length is empty or 0 is written as `focal_mm = 0` with an empty name, whatever its name box holds.
-3. A set focal length must be 8–600 mm.
-4. A slot with a focal length but an empty name gets the name `Community EA9 Adapter`.
-5. A name is printable ASCII (0x20–0x7E), at most 63 characters; leading and trailing spaces are trimmed.
-6. **Multiple Lenses** with exactly one slot set: that slot is moved to slot 0 (the firmware then treats it as a single lens).
-7. **Multiple Lenses** with two or more slots set: they stay where they are; slot 1 (f2.5) may be empty.
-8. A set slot must have an exit pupil chosen from the list (it always has one once a focal length is typed).
-9. No slot set, in either mode: error, "No lens is configured".
+1. A slot whose focal length is empty or 0 is written as `focal_mm = 0` with an empty name, whatever its name box holds.
+2. A set focal length must be 8–600 mm.
+3. A slot with a focal length but an empty name gets the name `Community EA9 Adapter`.
+4. A name is printable ASCII (0x20–0x7E), at most 63 characters; leading and trailing spaces are trimmed.
+5. Set slots stay where they are, however many; slot 1 (f2.5) may be empty.
+6. A set slot must have an exit pupil chosen from the list (it always has one once a focal length is typed).
+7. No slot set: error, "No lens is configured".
 
 ### 5.4 Release
 
