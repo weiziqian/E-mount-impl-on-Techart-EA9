@@ -175,6 +175,10 @@ uint32_t diag_boot_tally(uint32_t rcause);
 /* The encoder's power-on transient is over (main.c ENC_SETTLE_*).  Payload:
  * when, in 4 ms units since power-on; 0xFF if it gave up waiting. */
 #define DIAG_MARK_ENCSTABLE 0xBAu
+/* The stored HOME (main.c home_from_cfg).  Payload: 0 taken from flash, no
+ * reset; 1 no valid record; 2 record impossible for the reading; 3 a reset
+ * stored a new one. */
+#define DIAG_MARK_HOME      0xBBu
 
 #ifdef EA9_NO_LOG
 static inline void diag_tally_mark(uint8_t code, uint8_t data)

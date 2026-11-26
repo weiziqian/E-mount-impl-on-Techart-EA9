@@ -13,9 +13,9 @@ _Static_assert(LENS_CFG_OPTICAL_LEN == OPTICAL_FILE_LEN, "optical file size");
 #define EM3F_NAME_LEN (LENS_CFG_NAME_LEN - 1u)
 
 /* The aperture that selects each entry, as aperture values (256 x AV + 4096)
- * on the third-stop series, f/2.5 to f/5.6.  The highest set entry's is also
- * the minimum aperture.  Matched exactly, so these are the values a body was
- * logged sending: two thirds of a stop is 0xAA, not 0xAB, as the stock's own
+ * on the third-stop series, f/2.5 to f/5.6, all inside the fixed minimum
+ * aperture f/6.3 (EM_APERTURE_MIN).  Matched exactly, so these are the values
+ * a body was logged sending: two thirds of a stop is 0xAA, not 0xAB, as the stock's own
  * focal menu (0x56cc) also expects. */
 static const uint16_t AP_SEL[LENS_CFG_N] = {
 	0x12AAu,                /* f/2.5 */
@@ -31,10 +31,10 @@ static const uint16_t AP_SEL[LENS_CFG_N] = {
 /* Message 0x07's lens ID, pl[9..10] = frame offsets 15..16, u16 LE. */
 #define EM07_LENS_ID 15u
 
-static uint8_t          g_top;          /* highest entry that may be chosen */
 static uint8_t          g_boot_idx;     /* the entry booted with */
 static volatile uint8_t g_sel_idx;      /* the entry last chosen */
 volatile uint8_t        lens_changed;
+volatile uint8_t        lens_home_clear;
 
 __attribute__((used, aligned(4)))
 const volatile struct lens_cfg lens_cfg = {
@@ -72,24 +72,13 @@ uint8_t lens_cfg_hw_version(void)
 
 void lens_cfg_boot(void)
 {
-	uint8_t  top = 0;
 	uint32_t idx = 0;
 
-	for (top = LENS_CFG_N - 1u; top > 0; top--) {
-		if (lens_cfg.lens[top].focal_mm != 0) {
-			break;
-		}
+	if (!cfg_read(CFG_TYPE_LENS, &idx) || idx >= LENS_CFG_N
+	    || lens_cfg.lens[idx].focal_mm == 0) {
+		idx = first_set();
+		lens_cfg_select((uint8_t)idx);
 	}
-	em_aperture_min = top ? AP_SEL[top] : EM_APERTURE_MIN;
-
-	if (top != 0) {
-		if (!cfg_read(CFG_TYPE_LENS, &idx) || idx >= LENS_CFG_N
-		    || lens_cfg.lens[idx].focal_mm == 0) {
-			idx = first_set();
-			lens_cfg_select((uint8_t)idx);
-		}
-	}
-	g_top      = top;
 	g_boot_idx = (uint8_t)idx;
 	g_sel_idx  = (uint8_t)idx;
 	lens_cfg_apply((uint8_t)idx);
@@ -99,12 +88,16 @@ void lens_cfg_request(uint16_t av)
 {
 	uint8_t i;
 
-	for (i = 0; i <= g_top; i++) {
+	if (av == EM_APERTURE_MIN) {
+		lens_home_clear = 1;
+		return;
+	}
+	for (i = 0; i < LENS_CFG_N; i++) {
 		if (av == AP_SEL[i]) {
 			break;
 		}
 	}
-	if (i > g_top || i == g_sel_idx || lens_cfg.lens[i].focal_mm == 0) {
+	if (i >= LENS_CFG_N || i == g_sel_idx || lens_cfg.lens[i].focal_mm == 0) {
 		return;
 	}
 	g_sel_idx    = i;
@@ -113,6 +106,9 @@ void lens_cfg_request(uint16_t av)
 
 void lens_cfg_commit(void)
 {
+	if (lens_home_clear) {
+		cfg_clear(CFG_TYPE_HOME);
+	}
 	lens_cfg_select(g_sel_idx);
 }
 

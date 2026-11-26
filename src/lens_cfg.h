@@ -25,14 +25,12 @@
  * type tag and doubled value make a never-written or torn row read as "not
  * set".
  *
- * AT BOOT (lens_cfg_boot):
+ * AT BOOT (lens_cfg_boot): the saved entry -- none, > 7, or not set -> the
+ * first set entry, searching up from 0, and that is saved.  A single lens is
+ * entry 0 alone, and needs no case of its own: it is always the entry chosen,
+ * and f/2.5, which selects it, is already in use (lens_cfg_request).
  *
- *   the highest set entry 1..7 -> several focal lengths; the minimum
- *     aperture is that entry's selecting aperture, f/2.8 ... f/5.6
- *     (lens_cfg.c); then the saved entry -- none, > 7, or not set ->
- *     the first set entry, searching up from 0, and that is saved
- *   entries 1..7 all unset -> one lens: entry 0, minimum aperture f/1.8,
- *     the same as the maximum
+ * The minimum aperture is f/6.3 either way (EM_APERTURE_MIN).
  */
 #ifndef LENS_CFG_H
 #define LENS_CFG_H
@@ -62,8 +60,8 @@ extern const volatile struct lens_cfg lens_cfg;
 
 uint8_t lens_cfg_hw_version(void);
 
-/* Chooses the minimum aperture and the entry in use, as above, and applies
- * them.  Before em_init, which copies them into the messages. */
+/* Chooses the entry in use, as above, and applies it.  Before em_init, which
+ * copies it into the messages. */
 void lens_cfg_boot(void);
 
 /* Saves `idx` as the entry in use (no flash write if unchanged).  Does not
@@ -77,7 +75,7 @@ void lens_cfg_select(uint8_t idx);
 void lens_cfg_apply(uint8_t idx);
 
 /* SWITCHING BY APERTURE.  A 0x1B request for f/2.5, f/2.8 ... f/5.6 picks
- * entry 0..7, if that entry is set and the lens is not a single one.  Called
+ * entry 0..7, if that entry is set.  Called
  * from the frame handler; nothing is written yet.  lens_changed: the
  * selection now differs from the entry booted with.  After the 0x0A that ends
  * the capture, the main loop saves it (lens_cfg_commit) and restarts the lens
@@ -85,5 +83,12 @@ void lens_cfg_apply(uint8_t idx);
 void lens_cfg_request(uint16_t av);
 void lens_cfg_commit(void);
 extern volatile uint8_t lens_changed;
+
+/* CLEARING HOME BY APERTURE (user's, 2026-11-26).  A 0x1B request for the
+ * minimum aperture, f/6.3, sets lens_home_clear -- single lens or several.
+ * The capture's 0x0A then takes the same restart as a lens switch, and that
+ * restart clears the stored HOME first (lens_cfg_commit), so the next boot
+ * runs the reset and stores a new one (main.c home_from_cfg). */
+extern volatile uint8_t lens_home_clear;
 
 #endif

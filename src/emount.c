@@ -124,12 +124,6 @@
 #define EM28_FOCAL        0x0A
 #define EM08_FOCAL_BCD    0x16
 
-/* The minimum aperture: message 0x05 payload[52] as a descriptor byte, and
- * message 0x08 payload[2..3] as an aperture value.  Written once by
- * put_aperture_min. */
-#define EM05_AP_MIN_DESC  0x3A
-#define EM08_AP_MIN       0x08
-
 /* Message 0x05 payload[4] = frame offset 10 is the APERTURE settle countdown.
  * Nothing writes it: this adapter has no iris, so its aperture is never in
  * transit and the stored 0x00 is already the right answer (emount.h).
@@ -1201,12 +1195,13 @@ static void em_frame_in(const uint8_t *rx, uint16_t n)
 		 * sends 00 00 at capture start, before 0x1B, and its usual
 		 * field mask at capture end (0x3b37e0 / 0x3b38d4), so the
 		 * payload is not what marks the end.  Back to wide open, and
-		 * if 0x1B chose another entry, the restart that loads it. */
+		 * if 0x1B chose another entry, the restart that loads it; if
+		 * it asked for f/6.3, the restart that clears HOME. */
 		if (g_m1b_open) {
 			g_m1b_open      = 0;
 			em_aperture_now = EM_APERTURE_MAX;
 			put_aperture_now();
-			if (lens_changed) {
+			if (lens_changed || lens_home_clear) {
 				em_restart_due = 1;
 			}
 			if (em_aperture_req != EM_APERTURE_MAX) {
@@ -2182,18 +2177,11 @@ static void put_focal(void)
 	em_msg_08[EM08_FOCAL_BCD + 1] = bcd2(mm);
 }
 
-static void put_aperture_min(void)
-{
-	em_msg_05[EM05_AP_MIN_DESC] = EM_AV_DESC(em_aperture_min);
-	put16(em_msg_08, EM08_AP_MIN, em_aperture_min);
-}
-
 void em_init(void)
 {
-	/* Fixed content is in the templates (emount_packets.c); the focal
-	 * length and the minimum aperture are written here. */
+	/* Fixed content is in the templates (emount_packets.c), the minimum
+	 * aperture included; the focal length is written here. */
 	put_focal();
-	put_aperture_min();
 
 	/* protocol_init, 0x551c, replicated including the one non-obvious bit:
 	 * our chip select goes high FIRST and stays high across the whole

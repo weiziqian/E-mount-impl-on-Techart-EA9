@@ -10,7 +10,9 @@
  * blank row (all 0xFF), a write cut off by power loss, or a row of another
  * type all read as "not set".  Read it back with
  *
- *   ea9flash.py --dump 0x1c000:0x100
+ *   ea9flash.py --dump 0x1c000:0x300
+ *
+ * Rows: 0 unused (an old HOME), 1 LENS, 2 HOME.
  */
 #ifndef CFG_H
 #define CFG_H
@@ -31,5 +33,9 @@ int  cfg_read(uint32_t type, uint32_t *value);
 /* Erases and rewrites the type's row -- unless it already holds this value,
  * so calling it with an unchanged value costs no erase cycle. */
 void cfg_write(uint32_t type, uint32_t value);
+
+/* Makes the type's record read as "not set", by programming its type word to
+ * 0 -- no erase.  Nothing if it is not set already. */
+void cfg_clear(uint32_t type);
 
 #endif

@@ -405,13 +405,14 @@ uint16_t em_defocus_scale(void);
  * disagree.  It is the coarser of the two at 1/8 stop, so a value that is not
  * a multiple of 32 above 4096 rounds when it goes there.
  *
- * THE MINIMUM IS THE MAXIMUM.  An adapter with no iris has no range, and the
- * stock's f/90 is a fiction: a body may command anywhere in that range and the
- * transmission is f/1.8 regardless.
+ * THE MINIMUM IS f/6.3, FIXED (user's, 2026-11-26).  An adapter with no iris
+ * has no range: the transmission is f/1.8 whatever the body commands.  The
+ * range exists so the body can be set to f/2.5 ... f/5.6, the apertures that
+ * select a lens entry (lens_cfg.c); f/6.3 is the next third-stop past them.
+ * It used to follow the configuration -- the highest set entry's aperture,
+ * or f/1.8 for a single lens -- and no longer does.
  *
- * Restoring f/90 was TRIED and changed nothing: the camera still re-metered
- * after every exposure, and start-up hung as well (NOTES.md 89).  So the
- * fiction buys nothing here, and the honest single point is what stands.
+ * The stock's f/90 was TRIED and hung start-up (NOTES.md 89).
  *
  * WHY f/1.8 AND NOT f/2.0.  It used to be f/2.0, the stock's own boot value.
  * It moved with an f/1.8 slot B type-1 row this build once sent in message
@@ -423,12 +424,7 @@ uint16_t em_defocus_scale(void);
  * the maximum instead of the stock's f/90.  The test enumerates exactly those
  * four and checks every other byte against a stock literal. */
 #define EM_APERTURE_MAX  0x11C0u        /* f/1.8 -- 0x05 pl[44], pl[51]; 0x08 pl[0..1] */
-#define EM_APERTURE_MIN  0x11C0u        /* f/1.8 -- 0x05 pl[52]; 0x08 pl[2..3]          */
-
-/* The minimum aperture in use: EM_APERTURE_MIN unless the lens configuration
- * enables several focal lengths (lens_cfg.c).  em_init writes it into the
- * messages, as em_focal_mm10. */
-extern uint16_t em_aperture_min;
+#define EM_APERTURE_MIN  0x1555u        /* f/6.3 -- 0x05 pl[52]; 0x08 pl[2..3]          */
 
 /* An aperture value (256 x AV + 4096) as message 0x05's descriptor byte: 1/8
  * stop, 0x08 = f/1.0, rounded to nearest. */

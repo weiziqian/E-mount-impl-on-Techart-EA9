@@ -17,8 +17,7 @@
  *
  * Only what changes at run time (positions, status, events, the 0x34 echo) is written by emount.c -- and the focal length, which
  * em_init writes from em_focal_mm10 into 0x05 pl[24..27], 0x08 pl[16..17]
- * (whole mm, BCD), 0x28 pl[4..7] and 0x35 pl[4..7], and the minimum aperture,
- * from em_aperture_min into 0x05 pl[52] and 0x08 pl[2..3].  Both words and
+ * (whole mm, BCD), 0x28 pl[4..7] and 0x35 pl[4..7].  That word and
  * the 0x3F name are set from the lens configuration before that (lens_cfg.c).  Message 0x0A has no template: the
  * reply is the body's request, echoed (em_send_id).
  *
@@ -309,7 +308,6 @@ uint8_t em_msg_3F[EA9_LEN_3F] = {
 };
 
 uint16_t em_focal_mm10 = EM_FOCAL_MM10;
-uint16_t em_aperture_min = EM_APERTURE_MIN;
 
 const struct ea9_packet ea9_packets[EA9_PACKET_COUNT] = {
 	{ 0x01, em_msg_01, EA9_LEN_01 },

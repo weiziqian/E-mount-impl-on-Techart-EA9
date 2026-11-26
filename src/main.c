@@ -42,6 +42,7 @@
 #include "emount.h"
 #include "motor.h"
 #include "abs_encoder.h"
+#include "cfg.h"
 #include "servo.h"
 #include "focus_map.h"
 #include "focus_dist.h"
@@ -158,9 +159,9 @@ static const uint8_t  FOCUS_PAGE[] = { 20, 21, 22, 23, 29, 0, 1, 2, 4 };
  * trail answers it. */
 #define NORM_PAGE       31u
 
-/* THE LENS RESTART, after the 0x0A that ends a capture with a switch
- * (emount.c).
- * Save the new entry, then raise PA23 (XDETECT) so the body sees the lens
+/* THE LENS RESTART, after the 0x0A that ends a capture with a switch, or
+ * shot at f/6.3 (emount.c).
+ * Save the new entry -- clearing HOME first if f/6.3 asked -- then raise PA23 (XDETECT) so the body sees the lens
  * removed and attaches it again from cold, loading it -- expected, not yet
  * measured.  The flash writes stall the CPU for a few ms; nothing is owed
  * the body between that 0x0A and the restart. */
@@ -635,7 +636,19 @@ static uint8_t home_still_for(struct home_still *st, uint32_t ms,
  * the end test above; settle with the coils floating; and make the reading
  * it rests at track position 0.  Returns that raw reading.  A shutdown that
  * cuts it short (g_rst_cut) leaves it unhomed and braked, and the main loop
- * runs it again after the wake. */
+ * runs it again after the wake.  A completed reset stores the stop as HOME
+ * (home_from_cfg).
+ *
+ * THE STORED HOME (user's, 2026-11-26, after the stock: EA9.md / servo.md
+ * §3).  The stop is kept in flash as the cfg record HOME -- its raw encoder
+ * reading -- and once the encoder has settled the boot takes the position
+ * from it instead of driving into the stop.  The reset runs only if there is
+ * no valid record (none, or the two copies differ), or if the reading now is
+ * impossible for it: more than HOME_SANE_COUNTS below the stop, or above the
+ * far end of the travel.  Every version, hardware version 1 included: its
+ * record is the minimum its reset found. */
+#define HOME_SANE_COUNTS    40
+static uint8_t  g_home_tried;       /* home_from_cfg ran this boot */
 static uint8_t  g_enc_settled;
 static uint8_t  g_enc_win_open;
 static uint8_t  g_enc_wins;
@@ -690,6 +703,27 @@ static void enc_settle_poll(void)
 	g_enc_ref   = raw;
 	g_enc_lo    = g_enc_hi = 0;
 	g_enc_t_win = now;
+}
+
+static void home_from_cfg(void)
+{
+	uint32_t home;
+	int32_t  pos;
+
+	g_home_tried = 1;
+	if (!cfg_read(CFG_TYPE_HOME, &home) || home >= ENC_COUNTS) {
+		diag_tally_mark(DIAG_MARK_HOME, 1);
+		return;
+	}
+	pos = abs_encoder_delta(abs_encoder_raw(), (uint16_t)home);
+	if (pos < -HOME_SANE_COUNTS
+	    || pos > FOCUS_TRAVEL_COUNTS + HOME_SANE_COUNTS) {
+		diag_tally_mark(DIAG_MARK_HOME, 2);
+		return;
+	}
+	abs_encoder_track_set(pos);
+	g_homed = 1;
+	diag_tally_mark(DIAG_MARK_HOME, 0);
 }
 
 static uint16_t motor_reset(void)
@@ -865,6 +899,15 @@ static uint16_t motor_reset(void)
 		}
 	}
 
+	/* Only a reset that ended on the stop is stored: one that timed out
+	 * or went the wrong way found no stop, and a stored HOME is not
+	 * looked for again. */
+	if (!g_rst_cut && !STOCK.dry
+	    && (reason == RST_END_STOP || reason == RST_END_STILL)) {
+		cfg_write(CFG_TYPE_HOME, raw_end);
+		diag_tally_mark(DIAG_MARK_HOME, 3);
+	}
+
 	if (g_reset_n++ == 0) {
 		uint32_t w[16];
 		uint32_t t[16];
@@ -975,7 +1018,9 @@ static void powerdown_signal(void)
 	 * Why: version 1 has no margin at infinity focus, so every wake from
 	 * standby should run the boot reset again, to be sure of taking the
 	 * minimum position each time (motor_reset).  The cost: the camera
-	 * cannot wake quickly from standby -- every wake is a cold start. */
+	 * cannot wake quickly from standby -- every wake is a cold start.
+	 * Since the stored HOME (2026-11-26) that cold start takes the stop
+	 * from flash and resets only without a valid record. */
 	if (lens_cfg_hw_version() == 1) {
 		PORT->Group[0].OUTSET.reg = 1u << EM_PIN_XDETECT;
 		diag_tally_mark(DIAG_MARK_PA23, 0);
@@ -2271,13 +2316,17 @@ int main(void)
 			quiet = 0;      /* it came back; that was a hiccup */
 		}
 
-		/* Reset once, on the body's first 0x10, then serve whatever
-		 * focus targets arrive.  A reset cut short by a shutdown is
-		 * run again after the wake: 0x10 is still held. */
+		/* Once the encoder has settled, take the stored HOME; failing
+		 * that, reset on the body's first 0x10 (held until then), then
+		 * serve whatever focus targets arrive.  A reset cut short by a
+		 * shutdown is run again after the wake: 0x10 is still held. */
 		if (!g_homed) {
 			enc_settle_poll();
+			if (g_enc_settled && !g_home_tried) {
+				home_from_cfg();
+			}
 		}
-		if (!g_aborted && !g_homed && em_reset_wanted) {
+		if (!g_aborted && !g_homed && g_home_tried && em_reset_wanted) {
 			motor_reset();
 		}
 		if (g_homed && step == 0) {

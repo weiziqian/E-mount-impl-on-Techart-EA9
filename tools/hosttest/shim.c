@@ -322,4 +322,5 @@ void host_cs_edge(int level)
 
 /* lens_cfg.c is not linked: no lens entry is ever chosen. */
 volatile uint8_t lens_changed;
+volatile uint8_t lens_home_clear;
 void lens_cfg_request(uint16_t av) { (void)av; }

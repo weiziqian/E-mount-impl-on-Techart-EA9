@@ -574,7 +574,7 @@ int main(void)
 
 	/* --- the status frames are never sent as stored ------------------- */
 	{
-		const uint8_t MAXD = 0x16, MIND = 0x16;   /* EM_APERTURE_MAX/MIN, f/1.8 */
+		const uint8_t MAXD = 0x16, MIND = 0x33;   /* EM_APERTURE_MAX f/1.8, MIN f/6.3 */
 		const struct { const uint8_t *f; uint16_t off; uint8_t want; } PATCH[] = {
 			{ em_msg_06, 0x20, 0x6C },
 			{ em_msg_06, 0x21, 0x02 }, { em_msg_06, 0x22, 0x00 },
@@ -1003,13 +1003,13 @@ int main(void)
 			}
 		}
 
-		/* The descriptor block: f/1.8 at both ends (no iris), and
-		 * never all zero -- a build that zeroed it was shown as F1.0
+		/* The descriptor block: f/1.8 wide open, f/6.3 the minimum
+		 * (fixed, emount.h), and never all zero -- a build that zeroed it was shown as F1.0
 		 * by an a9 II and refused autofocus (EA9.md §8). */
 		{
 			static const struct { uint8_t off, want; } D[] = {
 				{ 0x32, 0x16 }, { 0x34, 0x16 }, { 0x36, 0xA0 },
-				{ 0x39, 0x16 }, { 0x3A, 0x16 }, { 0x41, 0x01 },
+				{ 0x39, 0x16 }, { 0x3A, 0x33 }, { 0x41, 0x01 },
 			};
 			unsigned k;
 

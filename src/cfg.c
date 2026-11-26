@@ -6,8 +6,10 @@
 static uint32_t cfg_addr(uint32_t type)
 {
 	switch (type) {
+	/* Row 0 held HOME as the builds of 2026-11-11/12 wrote it, by a reset
+	 * since replaced; it is left unread so that value is never taken. */
 	case CFG_TYPE_HOME:
-		return NVM_CFG_BASE + 0u * NVM_ROW_SIZE;
+		return NVM_CFG_BASE + 2u * NVM_ROW_SIZE;
 	case CFG_TYPE_LENS:
 		return NVM_CFG_BASE + 1u * NVM_ROW_SIZE;
 	default:
@@ -25,6 +27,17 @@ int cfg_read(uint32_t type, uint32_t *value)
 	}
 	*value = r[1];
 	return 1;
+}
+
+void cfg_clear(uint32_t type)
+{
+	uint32_t addr = cfg_addr(type);
+	uint32_t old;
+	uint32_t zero = 0;
+
+	if (addr != 0 && cfg_read(type, &old)) {
+		nvm_cfg_write(addr, &zero, 1);
+	}
 }
 
 void cfg_write(uint32_t type, uint32_t value)
